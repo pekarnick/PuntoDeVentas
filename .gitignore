@@ -1,0 +1,42 @@
+# Dependencias
+node_modules/
+
+# Compilación UI
+dist/
+dist-ssr/
+*.local
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Bases de datos locales e imágenes de desarrollo
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+imagenes/
+
+# Variables de entorno y secretos (Regla 8 y 19: nunca credenciales en el repo)
+.env
+.env.*
+!.env.example
+*.pem
+*.crt
+*.key
+*.pfx
+*.p12
+
+# Logs y cobertura
+logs/
+*.log
+npm-debug.log*
+coverage/
+
+# IDE / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
