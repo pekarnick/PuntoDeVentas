@@ -6,3 +6,4 @@ export * from './totales.ts';
 export * from './permisos.ts';
 export * from './auditoria.ts';
 export * from './cuit.ts';
+export * from './claves.ts';

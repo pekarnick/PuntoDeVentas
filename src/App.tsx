@@ -1,14 +1,36 @@
-import React from 'react';
-import { formatearMonedaARS, formatearFechaAR } from './domain/dinero.ts';
+import React, { useState } from 'react';
+import { formatearFechaAR } from './domain/dinero.ts';
+import { tienePermiso, type RolUsuario } from './domain/permisos.ts';
+import { PanelAuditoria } from './features/auditoria/PanelAuditoria.tsx';
+import { PanelCaja } from './features/caja/PanelCaja.tsx';
+import { PanelUsuarios } from './features/usuarios/PanelUsuarios.tsx';
 import { formatearEstadoSync } from './sync/index.ts';
 
+type PestaniaActiva = 'caja' | 'usuarios' | 'auditoria';
+
 export function App(): React.ReactElement {
+  const [rolActivo, setRolActivo] = useState<RolUsuario>('superadmin');
+  const [pestania, setPestania] = useState<PestaniaActiva>('caja');
+
   const estadoSync = formatearEstadoSync({
     estado: 'pendiente',
-    cambiosPendientes: 0,
+    cambiosPendientes: 3,
   });
 
   const hoy = formatearFechaAR(new Date());
+
+  const puedeGestionarUsuarios = tienePermiso(rolActivo, 'gestionar_usuarios');
+  const puedeVerAuditoria = tienePermiso(rolActivo, 'ver_exportar_auditoria');
+
+  function cambiarRolDemo(nuevoRol: RolUsuario) {
+    setRolActivo(nuevoRol);
+    if (
+      (pestania === 'usuarios' && !tienePermiso(nuevoRol, 'gestionar_usuarios')) ||
+      (pestania === 'auditoria' && !tienePermiso(nuevoRol, 'ver_exportar_auditoria'))
+    ) {
+      setPestania('caja');
+    }
+  }
 
   return (
     <div className="app-layout">
@@ -17,8 +39,50 @@ export function App(): React.ReactElement {
           <strong>Punto de Ventas</strong>
           <span className="badge-fase">Fase 1 · Local Offline-First</span>
         </div>
+
+        <nav className="topbar-nav" aria-label="Módulos del sistema">
+          <button
+            type="button"
+            className={pestania === 'caja' ? 'nav-btn active' : 'nav-btn'}
+            onClick={() => setPestania('caja')}
+          >
+            Caja y Arqueo
+          </button>
+
+          {puedeGestionarUsuarios && (
+            <button
+              type="button"
+              className={pestania === 'usuarios' ? 'nav-btn active' : 'nav-btn'}
+              onClick={() => setPestania('usuarios')}
+            >
+              Usuarios y Roles
+            </button>
+          )}
+
+          {puedeVerAuditoria && (
+            <button
+              type="button"
+              className={pestania === 'auditoria' ? 'nav-btn active' : 'nav-btn'}
+              onClick={() => setPestania('auditoria')}
+            >
+              Auditoría SHA-256
+            </button>
+          )}
+        </nav>
+
         <div className="topbar-status">
-          <span>Fecha: {hoy}</span>
+          <label className="role-switcher">
+            Sesión activa:
+            <select
+              value={rolActivo}
+              onChange={(e) => cambiarRolDemo(e.target.value as RolUsuario)}
+            >
+              <option value="superadmin">María (superadmin)</option>
+              <option value="encargado">Carlos (encargado)</option>
+              <option value="cajero">Lucas (cajero)</option>
+            </select>
+          </label>
+          <span>{hoy}</span>
           <span className="sync-pill" title="Estado de sincronización">
             {estadoSync}
           </span>
@@ -26,14 +90,9 @@ export function App(): React.ReactElement {
       </header>
 
       <main className="main-content">
-        <section className="pos-card">
-          <h1>Caja lista para operar sin conexión</h1>
-          <p>
-            Base local SQLite configurada con migraciones versionadas, importes en centavos (ej.{' '}
-            <strong>{formatearMonedaARS(123456)}</strong>), stock por suma de movimientos y auditoría
-            encadenada SHA-256.
-          </p>
-        </section>
+        {pestania === 'caja' && <PanelCaja />}
+        {pestania === 'usuarios' && puedeGestionarUsuarios && <PanelUsuarios />}
+        {pestania === 'auditoria' && puedeVerAuditoria && <PanelAuditoria />}
       </main>
     </div>
   );
