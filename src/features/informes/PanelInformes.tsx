@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import type { LibroIvaPeriodoResult } from '../../db/gestion_fase3_repo.ts';
 import type { InformeGestionFase1 } from '../../db/informes_repo.ts';
-import { formatearMonedaARS } from '../../domain/dinero.ts';
+import { aCentavos, formatearMonedaARS } from '../../domain/dinero.ts';
 import type { RolUsuario } from '../../domain/permisos.ts';
 
 export interface PanelInformesProps {
@@ -14,29 +15,57 @@ export function PanelInformes({
   const [fechaDesde, setFechaDesde] = useState('2026-10-01');
   const [fechaHasta, setFechaHasta] = useState('2026-10-31');
   const [informe, setInforme] = useState<InformeGestionFase1 | null>(null);
+  const [libroIva, setLibroIva] = useState<LibroIvaPeriodoResult | null>(null);
   const [mensajeExportacion, setMensajeExportacion] = useState<string | null>(
     null
   );
 
   async function cargarInformes() {
     try {
-      const data = await invocarPosApi<InformeGestionFase1>(
-        'obtener_informes_fase1',
-        {
+      const [data, ivaData] = await Promise.all([
+        invocarPosApi<InformeGestionFase1>('obtener_informes_fase1', {
           rolActivo,
           fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
           fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
-        }
-      );
+        }),
+        invocarPosApi<LibroIvaPeriodoResult>('obtener_libro_iva', {
+          rolActivo,
+          fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
+          fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
+        }),
+      ]);
       setInforme(data);
+      setLibroIva(ivaData);
     } catch {
-      // Fallback
+      // Fallback en entorno de pruebas sin servidor
     }
   }
 
   useEffect(() => {
     void cargarInformes();
   }, [rolActivo, fechaDesde, fechaHasta]);
+
+  function descargarBlobXlsx(base64: string, nombreArchivo: string) {
+    if (
+      typeof window !== 'undefined' &&
+      typeof URL.createObjectURL === 'function'
+    ) {
+      const binario = atob(base64);
+      const bytes = new Uint8Array(binario.length);
+      for (let i = 0; i < binario.length; i++) {
+        bytes[i] = binario.charCodeAt(i);
+      }
+      const blob = new Blob([bytes.buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = nombreArchivo;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  }
 
   async function manejarExportarXlsx() {
     try {
@@ -51,26 +80,10 @@ export function PanelInformes({
       });
 
       setInforme(res.informe);
-
-      if (
-        typeof window !== 'undefined' &&
-        typeof URL.createObjectURL === 'function'
-      ) {
-        const binario = atob(res.xlsxBase64);
-        const bytes = new Uint8Array(binario.length);
-        for (let i = 0; i < binario.length; i++) {
-          bytes[i] = binario.charCodeAt(i);
-        }
-        const blob = new Blob([bytes.buffer], {
-          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `informes-gestion-${fechaDesde}-a-${fechaHasta}.xlsx`;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
+      descargarBlobXlsx(
+        res.xlsxBase64,
+        `informes-gestion-${fechaDesde}-a-${fechaHasta}.xlsx`
+      );
 
       setMensajeExportacion(
         `Archivo Excel (.xlsx, ${res.bytesLength} bytes) descargado y registrado en la auditoría de SQLite.`
@@ -80,27 +93,73 @@ export function PanelInformes({
     }
   }
 
+  async function manejarExportarLibroIvaXlsx() {
+    try {
+      const res = await invocarPosApi<{
+        xlsxBase64: string;
+        bytesLength: number;
+        libro: LibroIvaPeriodoResult;
+      }>('exportar_libro_iva_xlsx', {
+        rolActivo,
+        fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
+        fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
+      });
+
+      setLibroIva(res.libro);
+      descargarBlobXlsx(
+        res.xlsxBase64,
+        `libro-iva-ventas-compras-${fechaDesde}-a-${fechaHasta}.xlsx`
+      );
+
+      setMensajeExportacion(
+        `Libro IVA Ventas y Compras (.xlsx, ${res.bytesLength} bytes) exportado para el contador y auditado.`
+      );
+    } catch {
+      // Fallback
+    }
+  }
+
   const balance = informe?.balancePeriodo ?? {
-    ventasNetasCentavos: 0,
-    costoMercaderiaVendidaCentavos: 0,
-    gananciaBrutaCentavos: 0,
-    egresosCajaCentavos: 0,
-    resultadoNetoOperativoCentavos: 0,
+    ventasNetasCentavos: aCentavos(0),
+    costoMercaderiaVendidaCentavos: aCentavos(0),
+    gananciaBrutaCentavos: aCentavos(0),
+    egresosCajaCentavos: aCentavos(0),
+    resultadoNetoOperativoCentavos: aCentavos(0),
   };
 
   const rentabilidad = informe?.rentabilidad ?? {
     porProducto: [],
-    ventasTotalesCentavos: 0,
-    costoMercaderiaVendidaCentavos: 0,
-    gananciaBrutaTotalCentavos: 0,
+    ventasTotalesCentavos: aCentavos(0),
+    costoMercaderiaVendidaCentavos: aCentavos(0),
+    gananciaBrutaTotalCentavos: aCentavos(0),
     margenPromedioPorcentaje: 0,
   };
 
   const stockValorizado = informe?.stockValorizado ?? {
     items: [],
     cantidadProductosBajoMinimo: 0,
-    totalValorizadoCostoCentavos: 0,
-    totalValorizadoVentaCentavos: 0,
+    totalValorizadoCostoCentavos: aCentavos(0),
+    totalValorizadoVentaCentavos: aCentavos(0),
+  };
+
+  const ivaVentas = libroIva?.ivaVentas ?? {
+    filas: [],
+    total_neto_gravado_centavos: aCentavos(0),
+    total_iva_21_centavos: aCentavos(0),
+    total_iva_105_centavos: aCentavos(0),
+    total_iva_27_centavos: aCentavos(0),
+    total_exento_centavos: aCentavos(0),
+    total_general_centavos: aCentavos(0),
+  };
+
+  const ivaCompras = libroIva?.ivaCompras ?? {
+    filas: [],
+    total_neto_gravado_centavos: aCentavos(0),
+    total_iva_21_centavos: aCentavos(0),
+    total_iva_105_centavos: aCentavos(0),
+    total_iva_27_centavos: aCentavos(0),
+    total_exento_centavos: aCentavos(0),
+    total_general_centavos: aCentavos(0),
   };
 
   return (
@@ -108,9 +167,12 @@ export function PanelInformes({
       <div className="pos-card">
         <div className="card-header">
           <div>
-            <h2>Informes de Gestión en Vivo desde SQLite (Superadmin y Encargado)</h2>
+            <h2>
+              Informes de Gestión en Vivo desde SQLite (Superadmin y Encargado)
+            </h2>
             <p className="text-muted">
-              Ganancia bruta calculada con el costo histórico copiado en cada venta y stock valorizado.
+              Ganancia bruta calculada con el costo histórico copiado en cada
+              venta, stock valorizado y Libro IVA Ventas / Compras.
             </p>
           </div>
           <div className="form-row">
@@ -136,6 +198,13 @@ export function PanelInformes({
               onClick={() => void manejarExportarXlsx()}
             >
               Exportar Informes a Excel (.xlsx)
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void manejarExportarLibroIvaXlsx()}
+            >
+              Exportar Libro IVA Contador (.xlsx)
             </button>
           </div>
         </div>
@@ -207,6 +276,93 @@ export function PanelInformes({
                 }
               >
                 {stockValorizado.cantidadProductosBajoMinimo}
+              </strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Libro IVA Ventas y Libro IVA Compras (Fase 3) */}
+      <div className="panel-grid">
+        <div className="pos-card">
+          <h3>Libro IVA Ventas ({ivaVentas.filas.length} comprobantes)</h3>
+          <div className="arqueo-box">
+            <div className="arqueo-line">
+              <span>Neto Gravado:</span>
+              <strong>
+                {formatearMonedaARS(ivaVentas.total_neto_gravado_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>Débito Fiscal IVA 21%:</span>
+              <strong>
+                {formatearMonedaARS(ivaVentas.total_iva_21_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>Débito Fiscal IVA 10,5%:</span>
+              <strong>
+                {formatearMonedaARS(ivaVentas.total_iva_105_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>Débito Fiscal IVA 27%:</span>
+              <strong>
+                {formatearMonedaARS(ivaVentas.total_iva_27_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>No Gravado / Exento:</span>
+              <strong>
+                {formatearMonedaARS(ivaVentas.total_exento_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line destaque">
+              <span>Total Libro IVA Ventas:</span>
+              <strong>
+                {formatearMonedaARS(ivaVentas.total_general_centavos)}
+              </strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="pos-card">
+          <h3>Libro IVA Compras ({ivaCompras.filas.length} comprobantes)</h3>
+          <div className="arqueo-box">
+            <div className="arqueo-line">
+              <span>Neto Gravado Compras:</span>
+              <strong>
+                {formatearMonedaARS(ivaCompras.total_neto_gravado_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>Crédito Fiscal IVA 21%:</span>
+              <strong>
+                {formatearMonedaARS(ivaCompras.total_iva_21_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>Crédito Fiscal IVA 10,5%:</span>
+              <strong>
+                {formatearMonedaARS(ivaCompras.total_iva_105_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>Crédito Fiscal IVA 27%:</span>
+              <strong>
+                {formatearMonedaARS(ivaCompras.total_iva_27_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line">
+              <span>No Gravado / Exento:</span>
+              <strong>
+                {formatearMonedaARS(ivaCompras.total_exento_centavos)}
+              </strong>
+            </div>
+            <div className="arqueo-line destaque">
+              <span>Total Libro IVA Compras:</span>
+              <strong>
+                {formatearMonedaARS(ivaCompras.total_general_centavos)}
               </strong>
             </div>
           </div>

@@ -331,7 +331,7 @@ code {
 }
 
 label {
-  display: flex;
+  /* display: flex; */
   flex-direction: column;
   gap: 0.3rem;
   font-size: 0.82rem;

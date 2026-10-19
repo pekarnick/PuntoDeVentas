@@ -13,6 +13,15 @@ import {
   type EstadoCajaServidorUI,
 } from './features/caja/PanelCaja.tsx';
 import {
+  PanelClientesCuentaCorriente,
+  type ClienteConSaldoUI,
+} from './features/clientes/PanelClientesCuentaCorriente.tsx';
+import {
+  PanelComprasProveedores,
+  type CompraResumenUI,
+  type ProveedorConSaldoUI,
+} from './features/compras/PanelComprasProveedores.tsx';
+import {
   PanelConfiguracionSync,
   type ConfiguracionSistemaDTO,
   type EstadisticasEspacioImagenesDTO,
@@ -21,6 +30,8 @@ import {
 import { PanelInformes } from './features/informes/PanelInformes.tsx';
 import {
   PanelProductosStock,
+  type CategoriaItemUI,
+  type MarcaItemUI,
   type ProductoAdminItemUI,
 } from './features/productos/PanelProductosStock.tsx';
 import { PanelUsuarios } from './features/usuarios/PanelUsuarios.tsx';
@@ -32,6 +43,8 @@ import {
 type PestaniaActiva =
   | 'venta'
   | 'productos'
+  | 'compras'
+  | 'clientes'
   | 'caja'
   | 'informes'
   | 'usuarios'
@@ -55,6 +68,11 @@ interface EstadoInicialServidor {
   readonly catalogoAdmin: readonly ProductoAdminItemUI[];
   readonly ventasRecientes: readonly VentaRecienteResumenUI[];
   readonly estadoCaja: EstadoCajaServidorUI | null;
+  readonly categorias?: readonly CategoriaItemUI[];
+  readonly marcas?: readonly MarcaItemUI[];
+  readonly proveedores?: readonly ProveedorConSaldoUI[];
+  readonly comprasRecientes?: readonly CompraResumenUI[];
+  readonly clientes?: readonly ClienteConSaldoUI[];
 }
 
 export function App(): React.ReactElement {
@@ -205,6 +223,10 @@ export function App(): React.ReactElement {
 
   const hoy = formatearFechaAR(new Date());
 
+  const puedeGestionarCompras = tienePermiso(
+    rolActivo,
+    'abm_productos_precios_stock_compras'
+  );
   const puedeVerInformes = tienePermiso(rolActivo, 'ver_informes_gestion');
   const puedeGestionarUsuarios = tienePermiso(rolActivo, 'gestionar_usuarios');
   const puedeVerAuditoria = tienePermiso(rolActivo, 'ver_exportar_auditoria');
@@ -216,6 +238,8 @@ export function App(): React.ReactElement {
   function cambiarRolDemo(nuevoRol: RolUsuario) {
     setRolActivo(nuevoRol);
     if (
+      (pestania === 'compras' &&
+        !tienePermiso(nuevoRol, 'abm_productos_precios_stock_compras')) ||
       (pestania === 'informes' &&
         !tienePermiso(nuevoRol, 'ver_informes_gestion')) ||
       (pestania === 'usuarios' &&
@@ -308,6 +332,24 @@ export function App(): React.ReactElement {
             Productos y Stock
           </button>
 
+          {puedeGestionarCompras && (
+            <button
+              type="button"
+              className={pestania === 'compras' ? 'nav-btn active' : 'nav-btn'}
+              onClick={() => setPestania('compras')}
+            >
+              Compras y Proveedores
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={pestania === 'clientes' ? 'nav-btn active' : 'nav-btn'}
+            onClick={() => setPestania('clientes')}
+          >
+            Clientes y Cta. Cte.
+          </button>
+
           <button
             type="button"
             className={pestania === 'caja' ? 'nav-btn active' : 'nav-btn'}
@@ -322,7 +364,7 @@ export function App(): React.ReactElement {
               className={pestania === 'informes' ? 'nav-btn active' : 'nav-btn'}
               onClick={() => setPestania('informes')}
             >
-              Informes y Excel
+              Informes y Libro IVA
             </button>
           )}
 
@@ -371,6 +413,7 @@ export function App(): React.ReactElement {
             ventasRecientesIniciales={
               datosServidor ? datosServidor.ventasRecientes : []
             }
+            clientesDisponibles={datosServidor?.clientes ?? []}
             onDatosActualizados={() => void recargarEstadoLocal()}
           />
         )}
@@ -380,7 +423,26 @@ export function App(): React.ReactElement {
             productosIniciales={
               datosServidor ? datosServidor.catalogoAdmin : []
             }
+            categoriasServidor={datosServidor?.categorias ?? []}
+            marcasServidor={datosServidor?.marcas ?? []}
+            proveedoresServidor={datosServidor?.proveedores ?? []}
             onDatosActualizados={() => void recargarEstadoLocal()}
+          />
+        )}
+        {pestania === 'compras' && puedeGestionarCompras && (
+          <PanelComprasProveedores
+            rolActivo={rolActivo}
+            proveedoresServidor={datosServidor?.proveedores ?? []}
+            comprasRecientesServidor={datosServidor?.comprasRecientes ?? []}
+            catalogoProductos={datosServidor?.catalogoAdmin ?? []}
+            onDatosModificados={() => void recargarEstadoLocal()}
+          />
+        )}
+        {pestania === 'clientes' && (
+          <PanelClientesCuentaCorriente
+            rolActivo={rolActivo}
+            clientesServidor={datosServidor?.clientes ?? []}
+            onDatosModificados={() => void recargarEstadoLocal()}
           />
         )}
         {pestania === 'caja' && (

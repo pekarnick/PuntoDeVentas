@@ -34,6 +34,7 @@ import {
   type PagoVentaInput,
 } from '../domain/totales.ts';
 import { asegurarCentavos, type Centavos } from '../domain/dinero.ts';
+import { validarCargoCuentaCorrienteCliente } from '../domain/gestion_fase3.ts';
 import { generarUuidV7 } from '../domain/uuid.ts';
 
 export interface ActorContexto {
@@ -53,7 +54,7 @@ export interface AutorizadorContexto {
 /**
  * Encola un cambio en sync_cola dentro de la transacción activa.
  */
-function encolarSync(
+export function encolarSync(
   db: DatabaseSync,
   tabla: string,
   registroId: string,
@@ -158,22 +159,46 @@ export function insertarRegistroAuditoria(
   };
 }
 
+const profundidadTransaccionPorDb = new WeakMap<DatabaseSync, number>();
+
 /**
  * Ejecuta una operación de base de datos en una transacción atómica garantizando la escritura en auditoría.
+ * Soporta anidamiento transparente mediante SAVEPOINT.
  * Si cualquier paso (o la auditoría) falla, se hace ROLLBACK completo (Regla 13).
  */
 export function ejecutarEnTransaccion<T>(
   db: DatabaseSync,
   fn: () => T
 ): T {
-  db.exec('BEGIN IMMEDIATE;');
+  const nivelActual = profundidadTransaccionPorDb.get(db) ?? 0;
+  const nombreSavepoint = `sp_pos_${nivelActual}`;
+
+  if (nivelActual === 0) {
+    db.exec('BEGIN IMMEDIATE;');
+  } else {
+    db.exec(`SAVEPOINT ${nombreSavepoint};`);
+  }
+
+  profundidadTransaccionPorDb.set(db, nivelActual + 1);
+
   try {
     const resultado = fn();
-    db.exec('COMMIT;');
+    if (nivelActual === 0) {
+      db.exec('COMMIT;');
+    } else {
+      db.exec(`RELEASE SAVEPOINT ${nombreSavepoint};`);
+    }
     return resultado;
   } catch (error) {
-    db.exec('ROLLBACK;');
+    if (nivelActual === 0) {
+      db.exec('ROLLBACK;');
+    } else {
+      db.exec(`ROLLBACK TO SAVEPOINT ${nombreSavepoint};`);
+      db.exec(`RELEASE SAVEPOINT ${nombreSavepoint};`);
+    }
     throw error;
+  } finally {
+    profundidadTransaccionPorDb.set(db, nivelActual);
   }
 }
 
@@ -415,6 +440,9 @@ export function crearProducto(
     botonRapido?: boolean;
     codigosBarras?: readonly string[];
     stockInicial?: number;
+    categoriaId?: string | null;
+    marcaId?: string | null;
+    proveedorId?: string | null;
   }
 ): string {
   exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
@@ -427,15 +455,19 @@ export function crearProducto(
 
     db.prepare(
       `INSERT INTO productos (
-        id, comercio_id, codigo_interno, nombre, unidad, permite_decimales,
-        costo_compra, alicuota_iva, exento_iva, stock_minimo, activo, boton_rapido,
-        fecha_ultimo_cambio_precio, created_at, updated_at, deleted_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+        id, comercio_id, codigo_interno, nombre, categoria_id, marca_id, proveedor_principal_id,
+        unidad, permite_decimales, costo_compra, alicuota_iva, exento_iva, stock_minimo,
+        activo, boton_rapido, fecha_ultimo_cambio_precio,
+        created_at, updated_at, deleted_at, device_id, sync_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, ?, 'pendiente')`
     ).run(
       productoId,
       actor.comercio_id,
       datos.codigoInterno ?? null,
       datos.nombre,
+      datos.categoriaId ?? null,
+      datos.marcaId ?? null,
+      datos.proveedorId ?? null,
       datos.unidad ?? 'unidad',
       datos.permiteDecimales ? 1 : 0,
       datos.costoCompraCentavos,
@@ -810,6 +842,53 @@ export function registrarVenta(
 
     validarPagosVenta(params.pagos, resumen.total);
 
+    const montoCuentaCorriente = params.pagos
+      .filter((p) => p.medio === 'cuenta_corriente')
+      .reduce((acc, p) => acc + p.monto, 0);
+
+    if (montoCuentaCorriente > 0) {
+      if (!params.clienteId) {
+        throw new Error(
+          'Debe seleccionar un cliente para cobrar en cuenta corriente.'
+        );
+      }
+
+      const cliente = db
+        .prepare(
+          `SELECT id, nombre, limite_credito
+           FROM clientes
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
+        )
+        .get(params.clienteId, actor.comercio_id) as
+        | { id: string; nombre: string; limite_credito: Centavos }
+        | undefined;
+
+      if (!cliente) {
+        throw new Error('Cliente seleccionado no encontrado o inactivo.');
+      }
+
+      const saldoRow = db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN tipo = 'cargo' THEN monto ELSE 0 END), 0) -
+             COALESCE(SUM(CASE WHEN tipo = 'pago' THEN monto ELSE 0 END), 0) AS saldo_pendiente
+           FROM cuenta_corriente_movimientos
+           WHERE comercio_id = ? AND entidad_tipo = 'cliente' AND entidad_id = ? AND deleted_at IS NULL`
+        )
+        .get(actor.comercio_id, params.clienteId) as { saldo_pendiente: number };
+
+      const valCc = validarCargoCuentaCorrienteCliente({
+        saldoActualCentavos: asegurarCentavos(saldoRow?.saldo_pendiente ?? 0),
+        nuevoCargoCentavos: asegurarCentavos(montoCuentaCorriente),
+        limiteCreditoCentavos: asegurarCentavos(cliente.limite_credito ?? 0),
+      });
+      if (!valCc.permitido) {
+        throw new Error(
+          valCc.motivo ?? 'LIMITE_CREDITO_EXCEDIDO: Límite de crédito superado.'
+        );
+      }
+    }
+
     db.prepare(
       `INSERT INTO ventas (
         id, comercio_id, fecha, usuario_id, cliente_id,
@@ -910,6 +989,29 @@ export function registrarVenta(
       encolarSync(db, 'ventas_pagos', pagoId, 'insert', ahora);
     }
 
+    if (montoCuentaCorriente > 0 && params.clienteId) {
+      const movCcId = generarUuidV7();
+      db.prepare(
+        `INSERT INTO cuenta_corriente_movimientos (
+          id, comercio_id, entidad_tipo, entidad_id, tipo, monto,
+          referencia_id, observaciones, usuario_id,
+          created_at, updated_at, deleted_at, device_id, sync_status
+        ) VALUES (?, ?, 'cliente', ?, 'cargo', ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+      ).run(
+        movCcId,
+        actor.comercio_id,
+        params.clienteId,
+        montoCuentaCorriente,
+        ventaId,
+        `Venta en cuenta corriente #${ventaId.slice(0, 8)}`,
+        actor.usuario_id,
+        ahora,
+        ahora,
+        actor.device_id
+      );
+      encolarSync(db, 'cuenta_corriente_movimientos', movCcId, 'insert', ahora);
+    }
+
     insertarRegistroAuditoria(db, {
       actor,
       accion: 'venta_crear',
@@ -917,6 +1019,7 @@ export function registrarVenta(
       entidad_id: ventaId,
       valores_despues: {
         id: ventaId,
+        cliente_id: params.clienteId ?? null,
         subtotal: resumen.subtotal,
         descuento: resumen.descuento_global,
         total: resumen.total,
@@ -968,11 +1071,16 @@ export function anularVenta(
     const ahora = new Date().toISOString();
     const venta = db
       .prepare(
-        `SELECT id, estado, total FROM ventas
+        `SELECT id, estado, total, cliente_id FROM ventas
          WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
       )
       .get(params.ventaId, actor.comercio_id) as
-      | { id: string; estado: 'completada' | 'anulada'; total: Centavos }
+      | {
+          id: string;
+          estado: 'completada' | 'anulada';
+          total: Centavos;
+          cliente_id: string | null;
+        }
       | undefined;
 
     if (!venta) {
@@ -1046,6 +1154,45 @@ export function anularVenta(
         actor.device_id
       );
       encolarSync(db, 'movimientos_stock', movId, 'insert', ahora);
+    }
+
+    if (venta.cliente_id) {
+      const pagosCc = db
+        .prepare(
+          `SELECT COALESCE(SUM(monto), 0) AS total_cc
+           FROM ventas_pagos
+           WHERE venta_id = ? AND comercio_id = ? AND medio = 'cuenta_corriente' AND deleted_at IS NULL`
+        )
+        .get(params.ventaId, actor.comercio_id) as { total_cc: number };
+
+      if ((pagosCc?.total_cc ?? 0) > 0) {
+        const movCcReversionId = generarUuidV7();
+        db.prepare(
+          `INSERT INTO cuenta_corriente_movimientos (
+            id, comercio_id, entidad_tipo, entidad_id, tipo, monto,
+            referencia_id, observaciones, usuario_id,
+            created_at, updated_at, deleted_at, device_id, sync_status
+          ) VALUES (?, ?, 'cliente', ?, 'pago', ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+        ).run(
+          movCcReversionId,
+          actor.comercio_id,
+          venta.cliente_id,
+          pagosCc.total_cc,
+          params.ventaId,
+          `Reversión por anulación de venta: ${params.motivo.trim()}`,
+          actor.usuario_id,
+          ahora,
+          ahora,
+          actor.device_id
+        );
+        encolarSync(
+          db,
+          'cuenta_corriente_movimientos',
+          movCcReversionId,
+          'insert',
+          ahora
+        );
+      }
     }
 
     insertarRegistroAuditoria(db, {

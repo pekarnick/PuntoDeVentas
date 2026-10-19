@@ -5,6 +5,7 @@ import {
   pesosACentavos,
   type Centavos,
 } from '../../domain/dinero.ts';
+import type { ReglaRedondeoPrecio } from '../../domain/gestion_fase3.ts';
 import {
   puedeVerCostos,
   tienePermiso,
@@ -16,10 +17,31 @@ import {
   type TipoMovimientoStock,
 } from '../../domain/stock.ts';
 
+export interface CategoriaItemUI {
+  readonly id: string;
+  readonly nombre: string;
+}
+
+export interface MarcaItemUI {
+  readonly id: string;
+  readonly nombre: string;
+}
+
+export interface ProveedorBasicoUI {
+  readonly id: string;
+  readonly razon_social: string;
+}
+
 export interface ProductoAdminItemUI {
   readonly id: string;
   readonly nombre: string;
   readonly codigo_interno: string;
+  readonly categoria_id?: string | null;
+  readonly marca_id?: string | null;
+  readonly proveedor_id?: string | null;
+  readonly categoria_nombre?: string | null;
+  readonly marca_nombre?: string | null;
+  readonly proveedor_nombre?: string | null;
   readonly codigos_barras: readonly string[];
   readonly unidad: 'unidad' | 'kg' | 'm' | 'l' | 'caja';
   readonly permite_decimales: boolean;
@@ -35,6 +57,9 @@ export interface ProductoAdminItemUI {
 export interface PanelProductosStockProps {
   readonly rolActivo: RolUsuario;
   readonly productosIniciales?: readonly ProductoAdminItemUI[];
+  readonly categoriasServidor?: readonly CategoriaItemUI[];
+  readonly marcasServidor?: readonly MarcaItemUI[];
+  readonly proveedoresServidor?: readonly ProveedorBasicoUI[];
   readonly onDatosActualizados?: () => void;
 }
 
@@ -46,8 +71,8 @@ const PRODUCTOS_FALLBACK_TESTS: ProductoAdminItemUI[] = [
     codigos_barras: ['7791234560012', '7791234560019'],
     unidad: 'unidad',
     permite_decimales: false,
-    costo_compra: 280000,
-    precio_venta: 420000,
+    costo_compra: 280000 as Centavos,
+    precio_venta: 420000 as Centavos,
     stock_minimo: 10,
     stock_actual: 22,
     boton_rapido: false,
@@ -61,8 +86,8 @@ const PRODUCTOS_FALLBACK_TESTS: ProductoAdminItemUI[] = [
     codigos_barras: ['7790001112223'],
     unidad: 'unidad',
     permite_decimales: false,
-    costo_compra: 85000,
-    precio_venta: 150000,
+    costo_compra: 85000 as Centavos,
+    precio_venta: 150000 as Centavos,
     stock_minimo: 15,
     stock_actual: 8,
     boton_rapido: true,
@@ -74,6 +99,9 @@ const PRODUCTOS_FALLBACK_TESTS: ProductoAdminItemUI[] = [
 export function PanelProductosStock({
   rolActivo,
   productosIniciales = PRODUCTOS_FALLBACK_TESTS,
+  categoriasServidor = [],
+  marcasServidor = [],
+  proveedoresServidor = [],
   onDatosActualizados,
 }: PanelProductosStockProps): React.ReactElement {
   const [productos, setProductos] = useState<ProductoAdminItemUI[]>(() => [
@@ -92,11 +120,18 @@ export function PanelProductosStock({
   const [nombreNuevo, setNombreNuevo] = useState('');
   const [codigoInternoNuevo, setCodigoInternoNuevo] = useState('');
   const [codigoBarrasNuevo, setCodigoBarrasNuevo] = useState('');
+  const [categoriaProductoId, setCategoriaProductoId] = useState('');
+  const [marcaProductoId, setMarcaProductoId] = useState('');
+  const [proveedorProductoId, setProveedorProductoId] = useState('');
   const [costoInput, setCostoInput] = useState('');
   const [precioVentaInput, setPrecioVentaInput] = useState('');
   const [stockMinInput, setStockMinInput] = useState('5');
   const [stockInicialInput, setStockInicialInput] = useState('10');
   const [botonRapidoNuevo, setBotonRapidoNuevo] = useState(false);
+
+  // Alta rápida de categoría y marca
+  const [nuevaCategoriaNombre, setNuevaCategoriaNombre] = useState('');
+  const [nuevaMarcaNombre, setNuevaMarcaNombre] = useState('');
 
   // Movimiento de stock manual
   const [productoAjusteId, setProductoAjusteId] = useState<string>(
@@ -106,6 +141,19 @@ export function PanelProductosStock({
     useState<TipoMovimientoStock>('compra');
   const [cantidadMovimientoInput, setCantidadMovimientoInput] = useState('');
   const [motivoMovimiento, setMotivoMovimiento] = useState('');
+
+  // Actualización masiva de precios (Fase 3)
+  const [porcentajeMasivoInput, setPorcentajeMasivoInput] = useState('15');
+  const [reglaRedondeo, setReglaRedondeo] =
+    useState<ReglaRedondeoPrecio>('multiplo_10_pesos');
+  const [filtroCatMasivo, setFiltroCatMasivo] = useState('');
+  const [filtroMarcaMasivo, setFiltroMarcaMasivo] = useState('');
+  const [filtroProvMasivo, setFiltroProvMasivo] = useState('');
+  const [actualizarCostoMasivo, setActualizarCostoMasivo] = useState(false);
+
+  // Importación CSV (Fase 3)
+  const [contenidoCsv, setContenidoCsv] = useState('');
+  const [actualizarExistentesCsv, setActualizarExistentesCsv] = useState(true);
 
   const [mensajeOk, setMensajeOk] = useState<string | null>(null);
   const [mensajeError, setMensajeError] = useState<string | null>(null);
@@ -147,6 +195,9 @@ export function PanelProductosStock({
         rolActivo,
         nombre: nombreNuevo.trim(),
         codigoInterno,
+        categoriaId: categoriaProductoId || null,
+        marcaId: marcaProductoId || null,
+        proveedorId: proveedorProductoId || null,
         costoCompraCentavos: costo,
         precioVentaCentavos: precio,
         stockMinimo: stockMin,
@@ -168,6 +219,42 @@ export function PanelProductosStock({
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'Error al crear el producto.'
+      );
+    }
+  }
+
+  async function manejarCrearCategoriaRapida() {
+    if (!nuevaCategoriaNombre.trim()) return;
+    setMensajeError(null);
+    try {
+      await invocarPosApi('crear_categoria', {
+        rolActivo,
+        nombre: nuevaCategoriaNombre.trim(),
+      });
+      setNuevaCategoriaNombre('');
+      setMensajeOk('Categoría creada correctamente.');
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'Error al crear categoría.'
+      );
+    }
+  }
+
+  async function manejarCrearMarcaRapida() {
+    if (!nuevaMarcaNombre.trim()) return;
+    setMensajeError(null);
+    try {
+      await invocarPosApi('crear_marca', {
+        rolActivo,
+        nombre: nuevaMarcaNombre.trim(),
+      });
+      setNuevaMarcaNombre('');
+      setMensajeOk('Marca creada correctamente.');
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'Error al crear marca.'
       );
     }
   }
@@ -209,162 +296,503 @@ export function PanelProductosStock({
     }
   }
 
+  async function manejarActualizacionMasivaPrecios(e: React.FormEvent) {
+    e.preventDefault();
+    if (!puedeEditarCatalogo) return;
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      const porcentaje = Number(porcentajeMasivoInput.replace(',', '.'));
+      if (!Number.isFinite(porcentaje) || porcentaje === 0) {
+        throw new Error('Ingresá un porcentaje distinto de cero (ej: 15 o -5).');
+      }
+
+      const res = await invocarPosApi<{ productosActualizados: number }>(
+        'actualizar_precios_masivo',
+        {
+          rolActivo,
+          porcentaje,
+          reglaRedondeo,
+          categoriaId: filtroCatMasivo || null,
+          marcaId: filtroMarcaMasivo || null,
+          proveedorId: filtroProvMasivo || null,
+          actualizarCostoCompraTambien: actualizarCostoMasivo,
+        }
+      );
+
+      setMensajeOk(
+        `Actualización masiva aplicada: ${res.productosActualizados} producto(s) actualizados con ${porcentaje}% y redondeo (${reglaRedondeo}).`
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Error al aplicar actualización masiva de precios.'
+      );
+    }
+  }
+
+  async function manejarImportarCsv(e: React.FormEvent) {
+    e.preventDefault();
+    if (!puedeEditarCatalogo) return;
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      if (!contenidoCsv.trim()) {
+        throw new Error('Pegá el contenido CSV o seleccioná un archivo .csv.');
+      }
+
+      const res = await invocarPosApi<{
+        creados: number;
+        actualizados: number;
+        errores: readonly string[];
+      }>('importar_productos_csv', {
+        rolActivo,
+        contenidoCsv,
+        actualizarSiExisteCodigo: actualizarExistentesCsv,
+      });
+
+      setContenidoCsv('');
+      setMensajeOk(
+        `Importación CSV completada: ${res.creados} creados, ${res.actualizados} actualizados.` +
+          (res.errores.length > 0
+            ? ` Advertencias (${res.errores.length}): ${res.errores[0]}`
+            : '')
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'Error al importar catálogo CSV.'
+      );
+    }
+  }
+
+  function manejarCargaArchivoCsv(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setContenidoCsv(reader.result);
+      }
+    };
+    reader.readAsText(file, 'utf-8');
+  }
+
   return (
     <section className="pos-venta-wrapper">
       {mensajeError && <div className="alert-error">{mensajeError}</div>}
       {mensajeOk && <div className="alert-ok">{mensajeOk}</div>}
 
       {puedeEditarCatalogo && (
-        <div className="panel-grid">
-          <div className="pos-card">
-            <h2>Alta de Producto (Persistencia SQLite)</h2>
-            <form
-              onSubmit={(e) => void manejarCrearProducto(e)}
-              className="form-stack"
-            >
-              <div className="form-row">
-                <label>
-                  Nombre:
+        <>
+          <div className="panel-grid">
+            <div className="pos-card">
+              <h2>Alta de Producto (Persistencia SQLite)</h2>
+              <form
+                onSubmit={(e) => void manejarCrearProducto(e)}
+                className="form-stack"
+              >
+                <div className="form-row">
+                  <label>
+                    Nombre:
+                    <input
+                      type="text"
+                      value={nombreNuevo}
+                      onChange={(e) => setNombreNuevo(e.target.value)}
+                      placeholder="Ej. Cuaderno Rayado 48h"
+                    />
+                  </label>
+                  <label>
+                    Código interno:
+                    <input
+                      type="text"
+                      value={codigoInternoNuevo}
+                      onChange={(e) => setCodigoInternoNuevo(e.target.value)}
+                      placeholder="LIB-048"
+                    />
+                  </label>
+                  <label>
+                    Código de barras (EAN):
+                    <input
+                      type="text"
+                      value={codigoBarrasNuevo}
+                      onChange={(e) => setCodigoBarrasNuevo(e.target.value)}
+                      placeholder="7791234500001"
+                    />
+                  </label>
+                </div>
+
+                <div className="form-row">
+                  <label>
+                    Categoría:
+                    <select
+                      value={categoriaProductoId}
+                      onChange={(e) => setCategoriaProductoId(e.target.value)}
+                    >
+                      <option value="">(Sin categoría)</option>
+                      {categoriasServidor.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.nombre}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Marca:
+                    <select
+                      value={marcaProductoId}
+                      onChange={(e) => setMarcaProductoId(e.target.value)}
+                    >
+                      <option value="">(Sin marca)</option>
+                      {marcasServidor.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.nombre}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Proveedor habitual:
+                    <select
+                      value={proveedorProductoId}
+                      onChange={(e) => setProveedorProductoId(e.target.value)}
+                    >
+                      <option value="">(Sin proveedor)</option>
+                      {proveedoresServidor.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.razon_social}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="form-row">
+                  <label>
+                    Costo de compra ($):
+                    <input
+                      type="text"
+                      value={costoInput}
+                      onChange={(e) => setCostoInput(e.target.value)}
+                      placeholder="1800,00"
+                    />
+                  </label>
+                  <label>
+                    Precio de venta ($):
+                    <input
+                      type="text"
+                      value={precioVentaInput}
+                      onChange={(e) => setPrecioVentaInput(e.target.value)}
+                      placeholder="3100,00"
+                    />
+                  </label>
+                  <label>
+                    Stock inicial:
+                    <input
+                      type="number"
+                      value={stockInicialInput}
+                      onChange={(e) => setStockInicialInput(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Stock mínimo:
+                    <input
+                      type="number"
+                      value={stockMinInput}
+                      onChange={(e) => setStockMinInput(e.target.value)}
+                    />
+                  </label>
+                  <label className="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      checked={botonRapidoNuevo}
+                      onChange={(e) => setBotonRapidoNuevo(e.target.checked)}
+                    />
+                    Mostrar como botón rápido en caja
+                  </label>
+                </div>
+                <button type="submit" className="btn-primary">
+                  Guardar Producto en SQLite
+                </button>
+              </form>
+
+              <div
+                className="form-row"
+                style={{
+                  marginTop: '0.85rem',
+                  paddingTop: '0.75rem',
+                  borderTop: '1px solid #e2e8f0',
+                }}
+              >
+                <div style={{ display: 'flex', gap: '0.4rem', flex: 1 }}>
                   <input
                     type="text"
-                    value={nombreNuevo}
-                    onChange={(e) => setNombreNuevo(e.target.value)}
-                    placeholder="Ej. Cuaderno Rayado 48h"
+                    value={nuevaCategoriaNombre}
+                    onChange={(e) => setNuevaCategoriaNombre(e.target.value)}
+                    placeholder="Nueva categoría (ej. Almacén)"
                   />
-                </label>
-                <label>
-                  Código interno:
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void manejarCrearCategoriaRapida()}
+                  >
+                    + Categoría
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: '0.4rem', flex: 1 }}>
                   <input
                     type="text"
-                    value={codigoInternoNuevo}
-                    onChange={(e) => setCodigoInternoNuevo(e.target.value)}
-                    placeholder="LIB-048"
+                    value={nuevaMarcaNombre}
+                    onChange={(e) => setNuevaMarcaNombre(e.target.value)}
+                    placeholder="Nueva marca (ej. Taragüi)"
                   />
-                </label>
-                <label>
-                  Código de barras (EAN):
-                  <input
-                    type="text"
-                    value={codigoBarrasNuevo}
-                    onChange={(e) => setCodigoBarrasNuevo(e.target.value)}
-                    placeholder="7791234500001"
-                  />
-                </label>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void manejarCrearMarcaRapida()}
+                  >
+                    + Marca
+                  </button>
+                </div>
               </div>
-              <div className="form-row">
-                <label>
-                  Costo de compra ($):
+            </div>
+
+            <div className="pos-card">
+              <h2>Movimiento de Stock (Suma de Movimientos — Regla 4)</h2>
+              <p className="text-muted">
+                El stock nunca se edita a mano: cada compra, ajuste o merma
+                agrega un movimiento inmutable.
+              </p>
+              <form
+                onSubmit={(e) => void manejarRegistrarMovimientoStock(e)}
+                className="form-stack"
+              >
+                <div className="form-row">
+                  <label>
+                    Producto:
+                    <select
+                      value={productoAjusteId}
+                      onChange={(e) => setProductoAjusteId(e.target.value)}
+                    >
+                      {productos.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.nombre}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Tipo de movimiento:
+                    <select
+                      value={tipoMovimiento}
+                      onChange={(e) =>
+                        setTipoMovimiento(e.target.value as TipoMovimientoStock)
+                      }
+                    >
+                      <option value="compra">Compra / Ingreso (+)</option>
+                      <option value="ajuste">Ajuste inventario (+/-)</option>
+                      <option value="merma">Merma / Rotura (-)</option>
+                      <option value="devolucion">Devolución (+)</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="form-row">
+                  <label>
+                    Cantidad:
+                    <input
+                      type="text"
+                      value={cantidadMovimientoInput}
+                      onChange={(e) =>
+                        setCantidadMovimientoInput(e.target.value)
+                      }
+                      placeholder="Ej. 10 o -2"
+                    />
+                  </label>
+                  <label>
+                    Motivo (obligatorio en ajustes y mermas):
+                    <input
+                      type="text"
+                      value={motivoMovimiento}
+                      onChange={(e) => setMotivoMovimiento(e.target.value)}
+                      placeholder="Ej. Recuento físico mensual"
+                    />
+                  </label>
+                </div>
+                <button type="submit" className="btn-primary">
+                  Registrar Movimiento en SQLite
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div className="panel-grid">
+            {/* Actualización masiva de precios */}
+            <div className="pos-card">
+              <h2>Actualización Masiva de Precios por % y Redondeo</h2>
+              <p className="text-muted">
+                Ajustá los precios por inflación o lista de proveedor filtrando
+                por categoría, marca o proveedor, con redondeo comercial.
+              </p>
+              <form
+                onSubmit={(e) => void manejarActualizacionMasivaPrecios(e)}
+                className="form-stack"
+              >
+                <div className="form-row">
+                  <label>
+                    Porcentaje de variación (%):
+                    <input
+                      type="text"
+                      value={porcentajeMasivoInput}
+                      onChange={(e) => setPorcentajeMasivoInput(e.target.value)}
+                      placeholder="Ej. 15 o -5"
+                    />
+                  </label>
+                  <label>
+                    Regla de redondeo:
+                    <select
+                      value={reglaRedondeo}
+                      onChange={(e) =>
+                        setReglaRedondeo(e.target.value as ReglaRedondeoPrecio)
+                      }
+                    >
+                      <option value="exacto">Exacto (al centavo)</option>
+                      <option value="pesos_enteros">
+                        A peso entero ($ 1,00)
+                      </option>
+                      <option value="multiplo_10_pesos">
+                        Múltiplo de $ 10
+                      </option>
+                      <option value="multiplo_50_pesos">
+                        Múltiplo de $ 50
+                      </option>
+                      <option value="multiplo_100_pesos">
+                        Múltiplo de $ 100
+                      </option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="form-row">
+                  <label>
+                    Filtrar Categoría:
+                    <select
+                      value={filtroCatMasivo}
+                      onChange={(e) => setFiltroCatMasivo(e.target.value)}
+                    >
+                      <option value="">Todas las categorías</option>
+                      {categoriasServidor.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.nombre}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Filtrar Marca:
+                    <select
+                      value={filtroMarcaMasivo}
+                      onChange={(e) => setFiltroMarcaMasivo(e.target.value)}
+                    >
+                      <option value="">Todas las marcas</option>
+                      {marcasServidor.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.nombre}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Filtrar Proveedor:
+                    <select
+                      value={filtroProvMasivo}
+                      onChange={(e) => setFiltroProvMasivo(e.target.value)}
+                    >
+                      <option value="">Todos los proveedores</option>
+                      {proveedoresServidor.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.razon_social}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <label className="checkbox-inline">
                   <input
-                    type="text"
-                    value={costoInput}
-                    onChange={(e) => setCostoInput(e.target.value)}
-                    placeholder="1800,00"
+                    type="checkbox"
+                    checked={actualizarCostoMasivo}
+                    onChange={(e) => setActualizarCostoMasivo(e.target.checked)}
+                  />
+                  Actualizar también el costo_compra en la misma proporción
+                </label>
+
+                <button type="submit" className="btn-primary">
+                  Aplicar Actualización Masiva de Precios
+                </button>
+              </form>
+            </div>
+
+            {/* Importación CSV / Excel CSV */}
+            <div className="pos-card">
+              <h2>Importar Catálogo desde CSV / Planilla</h2>
+              <p className="text-muted">
+                Columnas soportadas:{' '}
+                <code>
+                  codigo_interno;nombre;costo_compra;precio_venta;stock_inicial;codigo_barras;categoria;marca
+                </code>
+              </p>
+              <form
+                onSubmit={(e) => void manejarImportarCsv(e)}
+                className="form-stack"
+              >
+                <label>
+                  Cargar archivo .csv:
+                  <input
+                    type="file"
+                    accept=".csv,text/csv,text/plain"
+                    onChange={manejarCargaArchivoCsv}
                   />
                 </label>
                 <label>
-                  Precio de venta ($):
-                  <input
-                    type="text"
-                    value={precioVentaInput}
-                    onChange={(e) => setPrecioVentaInput(e.target.value)}
-                    placeholder="3100,00"
-                  />
-                </label>
-                <label>
-                  Stock inicial:
-                  <input
-                    type="number"
-                    value={stockInicialInput}
-                    onChange={(e) => setStockInicialInput(e.target.value)}
-                  />
-                </label>
-                <label>
-                  Stock mínimo:
-                  <input
-                    type="number"
-                    value={stockMinInput}
-                    onChange={(e) => setStockMinInput(e.target.value)}
+                  Contenido CSV (separado por ; o ,):
+                  <textarea
+                    rows={4}
+                    value={contenidoCsv}
+                    onChange={(e) => setContenidoCsv(e.target.value)}
+                    placeholder={
+                      'codigo_interno;nombre;costo_compra;precio_venta;stock_inicial;codigo_barras;categoria;marca\nFER-101;Destornillador Phillips;3200;5500;15;7790010020034;Herramientas;Bahco'
+                    }
+                    style={{
+                      width: '100%',
+                      padding: '0.5rem',
+                      borderRadius: '0.5rem',
+                      border: '1px solid #cbd5e1',
+                      fontFamily: 'monospace',
+                      fontSize: '0.82rem',
+                    }}
                   />
                 </label>
                 <label className="checkbox-inline">
                   <input
                     type="checkbox"
-                    checked={botonRapidoNuevo}
-                    onChange={(e) => setBotonRapidoNuevo(e.target.checked)}
-                  />
-                  Mostrar como botón rápido en caja
-                </label>
-              </div>
-              <button type="submit" className="btn-primary">
-                Guardar Producto en SQLite
-              </button>
-            </form>
-          </div>
-
-          <div className="pos-card">
-            <h2>Movimiento de Stock (Suma de Movimientos — Regla 4)</h2>
-            <p className="text-muted">
-              El stock nunca se edita a mano: cada compra, ajuste o merma agrega un movimiento inmutable.
-            </p>
-            <form
-              onSubmit={(e) => void manejarRegistrarMovimientoStock(e)}
-              className="form-stack"
-            >
-              <div className="form-row">
-                <label>
-                  Producto:
-                  <select
-                    value={productoAjusteId}
-                    onChange={(e) => setProductoAjusteId(e.target.value)}
-                  >
-                    {productos.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.nombre}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Tipo de movimiento:
-                  <select
-                    value={tipoMovimiento}
+                    checked={actualizarExistentesCsv}
                     onChange={(e) =>
-                      setTipoMovimiento(e.target.value as TipoMovimientoStock)
+                      setActualizarExistentesCsv(e.target.checked)
                     }
-                  >
-                    <option value="compra">Compra / Ingreso (+)</option>
-                    <option value="ajuste">Ajuste inventario (+/-)</option>
-                    <option value="merma">Merma / Rotura (-)</option>
-                    <option value="devolucion">Devolución (+)</option>
-                  </select>
-                </label>
-              </div>
-              <div className="form-row">
-                <label>
-                  Cantidad:
-                  <input
-                    type="text"
-                    value={cantidadMovimientoInput}
-                    onChange={(e) => setCantidadMovimientoInput(e.target.value)}
-                    placeholder="Ej. 10 o -2"
                   />
+                  Si el codigo_interno ya existe, actualizar su costo y precio
                 </label>
-                <label>
-                  Motivo (obligatorio en ajustes y mermas):
-                  <input
-                    type="text"
-                    value={motivoMovimiento}
-                    onChange={(e) => setMotivoMovimiento(e.target.value)}
-                    placeholder="Ej. Recuento físico mensual"
-                  />
-                </label>
-              </div>
-              <button type="submit" className="btn-primary">
-                Registrar Movimiento en SQLite
-              </button>
-            </form>
+                <button type="submit" className="btn-primary">
+                  Importar Productos al Catálogo
+                </button>
+              </form>
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       <div className="pos-card">
@@ -390,7 +818,7 @@ export function PanelProductosStock({
           <thead>
             <tr>
               <th>Imagen</th>
-              <th>Producto</th>
+              <th>Producto / Clasificación</th>
               <th>Códigos de Barras</th>
               {mostrarCostos && <th className="num">Costo Compra</th>}
               <th className="num">Precio Venta</th>
@@ -405,7 +833,7 @@ export function PanelProductosStock({
                 stockActual,
                 p.stock_minimo
               );
-              const costoSeguro = p.costo_compra ?? 0;
+              const costoSeguro = (p.costo_compra ?? 0) as Centavos;
               const margen =
                 p.precio_venta > 0
                   ? Math.round(
@@ -425,7 +853,11 @@ export function PanelProductosStock({
                   </td>
                   <td>
                     <strong>{p.nombre}</strong>
-                    <div className="text-muted">{p.codigo_interno}</div>
+                    <div className="text-muted">
+                      {p.codigo_interno}
+                      {p.categoria_nombre ? ` • ${p.categoria_nombre}` : ''}
+                      {p.marca_nombre ? ` • ${p.marca_nombre}` : ''}
+                    </div>
                   </td>
                   <td>
                     {p.codigos_barras.length > 0 ? (
@@ -451,10 +883,10 @@ export function PanelProductosStock({
                     </strong>
                     {bajoMinimo && (
                       <span
-                        className="badge-alerta"
+                        className="badge-stock-bajo"
                         style={{ marginLeft: '0.4rem' }}
                       >
-                        Bajo mín. ({p.stock_minimo})
+                        Bajo mínimo ({p.stock_minimo})
                       </span>
                     )}
                   </td>

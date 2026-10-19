@@ -68,6 +68,27 @@ import {
   resetearBaseDatosAFabrica,
   restaurarDesdeBackupLocal,
 } from './backup_repo.ts';
+import {
+  aplicarActualizacionMasivaPrecios,
+  crearCategoria,
+  crearCliente,
+  crearMarca,
+  crearProveedor,
+  exportarLibroIvaAXlsx,
+  generarTicketEscPosDeVentaDb,
+  importarProductosDesdeCsv,
+  listarCategorias,
+  listarClientesConSaldo,
+  listarComprasRecientes,
+  listarMarcas,
+  listarMovimientosCuentaCorriente,
+  listarProveedoresConSaldo,
+  obtenerLibroIvaPeriodo,
+  registrarCompraProveedor,
+  registrarMovimientoCuentaCorriente,
+} from './gestion_fase3_repo.ts';
+import type { ReglaRedondeoPrecio } from '../domain/gestion_fase3.ts';
+import type { CondicionIvaReceptor } from '../domain/cuit.ts';
 
 export const RUTA_DB_POR_DEFECTO = path.resolve(
   process.cwd(),
@@ -235,6 +256,12 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
         p.id,
         p.nombre,
         p.codigo_interno,
+        p.categoria_id,
+        p.marca_id,
+        p.proveedor_principal_id AS proveedor_id,
+        c.nombre AS categoria_nombre,
+        m.nombre AS marca_nombre,
+        pr.nombre AS proveedor_nombre,
         p.unidad,
         p.permite_decimales,
         p.costo_compra,
@@ -247,6 +274,9 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
         COALESCE(v.precio_venta, 0) AS precio_venta,
         COALESCE(s.stock_actual, 0) AS stock_actual
        FROM productos p
+       LEFT JOIN categorias c ON c.id = p.categoria_id AND c.deleted_at IS NULL
+       LEFT JOIN marcas m ON m.id = p.marca_id AND m.deleted_at IS NULL
+       LEFT JOIN proveedores pr ON pr.id = p.proveedor_principal_id AND pr.deleted_at IS NULL
        LEFT JOIN vista_productos_venta v
          ON v.id = p.id AND v.comercio_id = p.comercio_id
        LEFT JOIN vista_stock_actual s
@@ -258,6 +288,12 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
     id: string;
     nombre: string;
     codigo_interno: string | null;
+    categoria_id: string | null;
+    marca_id: string | null;
+    proveedor_id: string | null;
+    categoria_nombre: string | null;
+    marca_nombre: string | null;
+    proveedor_nombre: string | null;
     unidad: 'unidad' | 'kg' | 'm' | 'l' | 'caja';
     permite_decimales: number;
     costo_compra: number;
@@ -311,6 +347,12 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
     id: f.id,
     nombre: f.nombre,
     codigo_interno: f.codigo_interno ?? '',
+    categoria_id: f.categoria_id,
+    marca_id: f.marca_id,
+    proveedor_id: f.proveedor_id,
+    categoria_nombre: f.categoria_nombre,
+    marca_nombre: f.marca_nombre,
+    proveedor_nombre: f.proveedor_nombre,
     codigos_barras: mapaCodigos.get(f.id) ?? [],
     unidad: f.unidad,
     permite_decimales: f.permite_decimales === 1,
@@ -405,6 +447,9 @@ export function ejecutarAccionPosLocal(
         ? calcularEstadoSesionCaja(db, actor.comercio_id, ultimaSesion.id, 0)
         : null;
 
+      const esEncargadoOSuper =
+        actor.rol === 'superadmin' || actor.rol === 'encargado';
+
       return {
         rutaBaseDatos: rutaActivaDb,
         comercioId: actor.comercio_id,
@@ -428,6 +473,15 @@ export function ejecutarAccionPosLocal(
         catalogoAdmin,
         ventasRecientes,
         estadoCaja,
+        categorias: listarCategorias(db, actor.comercio_id),
+        marcas: listarMarcas(db, actor.comercio_id),
+        proveedores: esEncargadoOSuper
+          ? listarProveedoresConSaldo(db, actor.comercio_id)
+          : [],
+        comprasRecientes: esEncargadoOSuper
+          ? listarComprasRecientes(db, actor)
+          : [],
+        clientes: listarClientesConSaldo(db, actor.comercio_id),
       };
     }
 
@@ -437,6 +491,9 @@ export function ejecutarAccionPosLocal(
         codigoInterno: payload.codigoInterno
           ? String(payload.codigoInterno)
           : undefined,
+        categoriaId: payload.categoriaId ? String(payload.categoriaId) : null,
+        marcaId: payload.marcaId ? String(payload.marcaId) : null,
+        proveedorId: payload.proveedorId ? String(payload.proveedorId) : null,
         unidad:
           (payload.unidad as 'unidad' | 'kg' | 'm' | 'l' | 'caja' | undefined) ??
           'unidad',
@@ -541,6 +598,7 @@ export function ejecutarAccionPosLocal(
         items,
         descuentoGlobalCentavos: Number(payload.descuentoGlobalCentavos ?? 0),
         pagos,
+        clienteId: payload.clienteId ? String(payload.clienteId) : undefined,
         cajaSesionId: sesionAbierta?.id,
       });
 
@@ -837,6 +895,174 @@ export function ejecutarAccionPosLocal(
         sincronizarWalADisco(db);
         return res;
       })();
+    }
+
+    case 'crear_categoria': {
+      const id = crearCategoria(db, actor, {
+        nombre: String(payload.nombre ?? ''),
+      });
+      sincronizarWalADisco(db);
+      return { id };
+    }
+
+    case 'crear_marca': {
+      const id = crearMarca(db, actor, {
+        nombre: String(payload.nombre ?? ''),
+      });
+      sincronizarWalADisco(db);
+      return { id };
+    }
+
+    case 'crear_proveedor': {
+      const id = crearProveedor(db, actor, {
+        razonSocial: String(payload.razonSocial ?? ''),
+        cuit: payload.cuit ? String(payload.cuit) : null,
+        telefono: payload.telefono ? String(payload.telefono) : null,
+        email: payload.email ? String(payload.email) : null,
+      });
+      sincronizarWalADisco(db);
+      return { id };
+    }
+
+    case 'registrar_compra_proveedor': {
+      const items = (
+        (payload.items as Array<{
+          productoId: string;
+          cantidad: number;
+          costoUnitarioCentavos: number;
+          alicuotaIva?: AlicuotaIva;
+          actualizarCostoProducto?: boolean;
+        }>) ?? []
+      ).map((it) => ({
+        productoId: String(it.productoId),
+        cantidad: Number(it.cantidad),
+        costoUnitarioCentavos: Number(it.costoUnitarioCentavos),
+        alicuotaIva: it.alicuotaIva ?? 21,
+        actualizarCostoProducto:
+          it.actualizarCostoProducto !== undefined
+            ? Boolean(it.actualizarCostoProducto)
+            : true,
+      }));
+
+      const res = registrarCompraProveedor(db, actor, {
+        proveedorId: payload.proveedorId ? String(payload.proveedorId) : null,
+        numeroComprobante: payload.numeroComprobante
+          ? String(payload.numeroComprobante)
+          : null,
+        items,
+        registrarCargoCuentaCorriente: Boolean(
+          payload.registrarCargoCuentaCorriente
+        ),
+        montoPagadoEnElActoCentavos: Number(
+          payload.montoPagadoEnElActoCentavos ?? 0
+        ),
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'crear_cliente': {
+      const id = crearCliente(db, actor, {
+        nombre: String(payload.nombre ?? ''),
+        documento: payload.documento ? String(payload.documento) : null,
+        condicionIva:
+          (payload.condicionIva as CondicionIvaReceptor | undefined) ??
+          'consumidor_final',
+        telefono: payload.telefono ? String(payload.telefono) : null,
+        domicilio: payload.domicilio ? String(payload.domicilio) : null,
+        limiteCreditoCentavos: Number(payload.limiteCreditoCentavos ?? 0),
+      });
+      sincronizarWalADisco(db);
+      return { id };
+    }
+
+    case 'registrar_movimiento_cc': {
+      const id = registrarMovimientoCuentaCorriente(db, actor, {
+        entidadTipo: payload.entidadTipo as 'cliente' | 'proveedor',
+        entidadId: String(payload.entidadId ?? ''),
+        tipo: payload.tipo as 'cargo' | 'pago',
+        montoCentavos: Number(payload.montoCentavos ?? 0),
+        observaciones: payload.observaciones
+          ? String(payload.observaciones)
+          : null,
+      });
+      sincronizarWalADisco(db);
+      return { id };
+    }
+
+    case 'listar_movimientos_cc': {
+      return {
+        movimientos: listarMovimientosCuentaCorriente(
+          db,
+          actor.comercio_id,
+          payload.entidadTipo as 'cliente' | 'proveedor',
+          String(payload.entidadId ?? '')
+        ),
+      };
+    }
+
+    case 'actualizar_precios_masivo': {
+      const res = aplicarActualizacionMasivaPrecios(db, actor, {
+        porcentaje: Number(payload.porcentaje ?? 0),
+        reglaRedondeo:
+          (payload.reglaRedondeo as ReglaRedondeoPrecio | undefined) ??
+          'exacto',
+        categoriaId: payload.categoriaId ? String(payload.categoriaId) : null,
+        marcaId: payload.marcaId ? String(payload.marcaId) : null,
+        proveedorId: payload.proveedorId ? String(payload.proveedorId) : null,
+        actualizarCostoCompraTambien: Boolean(
+          payload.actualizarCostoCompraTambien
+        ),
+        motivo: payload.motivo ? String(payload.motivo) : undefined,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'importar_productos_csv': {
+      const res = importarProductosDesdeCsv(db, actor, {
+        contenidoCsv: String(payload.contenidoCsv ?? ''),
+        actualizarSiExisteCodigo:
+          payload.actualizarSiExisteCodigo !== undefined
+            ? Boolean(payload.actualizarSiExisteCodigo)
+            : true,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'obtener_libro_iva': {
+      return obtenerLibroIvaPeriodo(db, actor, {
+        fechaDesdeIso: payload.fechaDesdeIso
+          ? String(payload.fechaDesdeIso)
+          : undefined,
+        fechaHastaIso: payload.fechaHastaIso
+          ? String(payload.fechaHastaIso)
+          : undefined,
+      });
+    }
+
+    case 'exportar_libro_iva_xlsx': {
+      const { xlsxBytes, libro } = exportarLibroIvaAXlsx(db, actor, {
+        fechaDesdeIso: payload.fechaDesdeIso
+          ? String(payload.fechaDesdeIso)
+          : undefined,
+        fechaHastaIso: payload.fechaHastaIso
+          ? String(payload.fechaHastaIso)
+          : undefined,
+      });
+      return {
+        xlsxBase64: Buffer.from(xlsxBytes).toString('base64'),
+        bytesLength: xlsxBytes.byteLength,
+        libro,
+      };
+    }
+
+    case 'generar_ticket_escpos': {
+      return generarTicketEscPosDeVentaDb(db, actor.comercio_id, {
+        ventaId: String(payload.ventaId ?? ''),
+        anchoMm: (payload.anchoMm as 58 | 80 | undefined) ?? 80,
+      });
     }
 
     default:

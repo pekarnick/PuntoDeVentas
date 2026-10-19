@@ -8,6 +8,37 @@ import { asegurarCentavos, type Centavos } from './dinero.ts';
 
 export type AlicuotaIva = 0 | 10.5 | 21 | 27;
 
+export const ALICUOTAS_IVA_VALIDAS: readonly AlicuotaIva[] = [
+  0,
+  10.5,
+  21,
+  27,
+] as const;
+
+export function desglosarIvaPorItem(
+  subtotalCentavos: Centavos,
+  alicuotaIva: AlicuotaIva,
+  exentoIva: boolean,
+  preciosIncluyenIva = true
+): { neto: Centavos; iva: Centavos; total: Centavos } {
+  asegurarCentavos(subtotalCentavos, 'subtotalCentavos');
+  if (exentoIva || alicuotaIva === 0) {
+    return {
+      neto: subtotalCentavos,
+      iva: 0,
+      total: subtotalCentavos,
+    };
+  }
+  if (preciosIncluyenIva) {
+    const neto = Math.round(subtotalCentavos / (1 + alicuotaIva / 100));
+    const iva = subtotalCentavos - neto;
+    return { neto, iva, total: subtotalCentavos };
+  }
+  const neto = subtotalCentavos;
+  const iva = Math.round((subtotalCentavos * alicuotaIva) / 100);
+  return { neto, iva, total: neto + iva };
+}
+
 export type MedioPago =
   | 'efectivo'
   | 'transferencia'

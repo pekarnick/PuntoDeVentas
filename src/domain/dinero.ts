@@ -17,6 +17,9 @@ export function asegurarCentavos(valor: number, nombreCampo = 'importe'): Centav
   return valor;
 }
 
+export const aCentavos = asegurarCentavos;
+export const exigirEnteroCentavos = asegurarCentavos;
+
 /**
  * Convierte un valor en pesos (ej. "1234,56", "1.234,56", "1234.56" o número) a centavos enteros.
  */
@@ -65,6 +68,8 @@ export function formatearMonedaARS(centavos: Centavos): string {
 
   return `${negativo ? '-' : ''}$ ${enterosConPuntos},${decimales}`;
 }
+
+export const formatearPesos = formatearMonedaARS;
 
 const formaterFechaAR = new Intl.DateTimeFormat('es-AR', {
   timeZone: 'America/Argentina/Buenos_Aires',

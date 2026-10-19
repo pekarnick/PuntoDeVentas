@@ -29,6 +29,7 @@ import {
   type DatosTicketNoFiscal,
 } from '../../domain/ticket.ts';
 import { validarPagosVenta, type MedioPago } from '../../domain/totales.ts';
+import type { ClienteConSaldoUI } from '../clientes/PanelClientesCuentaCorriente.tsx';
 
 export interface VentaRecienteResumenUI {
   readonly id: string;
@@ -44,6 +45,7 @@ export interface PanelVentaPOSProps {
   readonly operadorNombre: string;
   readonly catalogoInicial?: readonly ProductoCatalogoVenta[];
   readonly ventasRecientesIniciales?: readonly VentaRecienteResumenUI[];
+  readonly clientesDisponibles?: readonly ClienteConSaldoUI[];
   readonly onDatosActualizados?: () => void;
 }
 
@@ -111,6 +113,7 @@ export function PanelVentaPOS({
   operadorNombre,
   catalogoInicial = CATALOGO_FALLBACK_TESTS,
   ventasRecientesIniciales = [],
+  clientesDisponibles = [],
   onDatosActualizados,
 }: PanelVentaPOSProps): React.ReactElement {
   const [catalogo, setCatalogo] = useState<ProductoCatalogoVenta[]>(() =>
@@ -126,7 +129,9 @@ export function PanelVentaPOS({
     setCatalogo(catalogoInicial.map((p) => sanitizarProductoCatalogoParaPOS(p)));
   }, [catalogoInicial]);
 
-  // Pagos mixtos
+  // Pagos mixtos y cliente (Cuenta Corriente Fase 3)
+  const [clienteSeleccionadoId, setClienteSeleccionadoId] =
+    useState<string>('');
   const [medioPrincipal, setMedioPrincipal] = useState<MedioPago>('efectivo');
   const [modoPagoMixto, setModoPagoMixto] = useState(false);
   const [montoEfectivoMixtoInput, setMontoEfectivoMixtoInput] = useState('');
@@ -141,10 +146,12 @@ export function PanelVentaPOS({
   const [altaRapidaPrecioInput, setAltaRapidaPrecioInput] = useState('');
   const [altaRapidaCostoInput, setAltaRapidaCostoInput] = useState('');
 
-  // Comprobante y anulaciones
+  // Comprobante, impresión ESC/POS y anulaciones
+  const [ultimaVentaId, setUltimaVentaId] = useState<string | null>(null);
   const [ultimoTicketTexto, setUltimoTicketTexto] = useState<string | null>(
     null
   );
+  const [anchoEscPosMm, setAnchoEscPosMm] = useState<58 | 80>(80);
   const [ventasSesion, setVentasSesion] = useState<VentaRecienteResumenUI[]>(
     () => [...ventasRecientesIniciales]
   );
@@ -438,6 +445,15 @@ export function PanelVentaPOS({
         ];
       }
 
+      const usaCuentaCorriente = pagos.some(
+        (p) => p.medio === 'cuenta_corriente' && p.monto > 0
+      );
+      if (usaCuentaCorriente && !clienteSeleccionadoId) {
+        throw new Error(
+          'Seleccioná un cliente registrado para cobrar en Cuenta Corriente.'
+        );
+      }
+
       validarPagosVenta(pagos, resumen.total);
 
       const respuesta = await invocarPosApi<{
@@ -446,6 +462,7 @@ export function PanelVentaPOS({
         datosTicket: DatosTicketNoFiscal;
       }>('registrar_venta', {
         rolActivo,
+        clienteId: clienteSeleccionadoId || undefined,
         items: carrito.map((it) => ({
           productoId: it.producto_id,
           cantidad: it.cantidad,
@@ -480,6 +497,7 @@ export function PanelVentaPOS({
       });
 
       const ticketTexto = formatearTicketNoFiscalTexto(datosTicketSeguro);
+      setUltimaVentaId(respuesta.ventaId);
       setUltimoTicketTexto(ticketTexto);
 
       setCarrito([]);
@@ -494,6 +512,56 @@ export function PanelVentaPOS({
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'No se pudo completar el cobro.'
+      );
+    }
+  }
+
+  async function manejarImprimirODescargarEscPos(
+    ventaId: string,
+    anchoMm: 58 | 80
+  ) {
+    setMensajeError(null);
+    try {
+      const res = await invocarPosApi<{
+        textoPlano: string;
+        comandosEscPosBase64: string;
+        anchoCaracteres: number;
+      }>('generar_ticket_escpos', {
+        rolActivo,
+        ventaId,
+        anchoMm,
+      });
+
+      setUltimoTicketTexto(res.textoPlano);
+
+      if (
+        typeof window !== 'undefined' &&
+        typeof URL.createObjectURL === 'function'
+      ) {
+        const binario = atob(res.comandosEscPosBase64);
+        const bytes = new Uint8Array(binario.length);
+        for (let i = 0; i < binario.length; i++) {
+          bytes[i] = binario.charCodeAt(i);
+        }
+        const blob = new Blob([bytes.buffer], {
+          type: 'application/octet-stream',
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ticket-escpos-${anchoMm}mm-${ventaId.slice(0, 8)}.bin`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      setMensajeEstado(
+        `Ticket térmico ESC/POS (${anchoMm}mm, ${res.anchoCaracteres} cols) generado sin costos internos.`
+      );
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Error al generar ticket térmico ESC/POS.'
       );
     }
   }
@@ -871,6 +939,29 @@ export function PanelVentaPOS({
           <div className="form-stack">
             <div className="form-row">
               <label>
+                Cliente (opcional o requerido en Cta. Cte.):
+                <select
+                  value={clienteSeleccionadoId}
+                  onChange={(e) => setClienteSeleccionadoId(e.target.value)}
+                >
+                  <option value="">Consumidor Final (Anónimo)</option>
+                  {clientesDisponibles.map((cli) => (
+                    <option key={cli.id} value={cli.id}>
+                      {cli.nombre}
+                      {cli.documento ? ` (${cli.documento})` : ''} — Disp.:{' '}
+                      {cli.limite_credito_centavos > 0
+                        ? formatearMonedaARS(
+                            cli.credito_disponible_centavos as Centavos
+                          )
+                        : 'Sin tope'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="form-row">
+              <label>
                 Medio de pago principal:
                 <select
                   value={medioPrincipal}
@@ -885,6 +976,9 @@ export function PanelVentaPOS({
                   <option value="debito">Tarjeta de Débito</option>
                   <option value="credito">Tarjeta de Crédito</option>
                   <option value="qr">QR</option>
+                  <option value="cuenta_corriente">
+                    Cuenta Corriente (Fiado)
+                  </option>
                 </select>
               </label>
 
@@ -920,6 +1014,9 @@ export function PanelVentaPOS({
                     <option value="transferencia">Transferencia</option>
                     <option value="debito">Tarjeta de Débito</option>
                     <option value="credito">Tarjeta de Crédito</option>
+                    <option value="cuenta_corriente">
+                      Cuenta Corriente (Fiado)
+                    </option>
                   </select>
                 </label>
               </div>
@@ -940,7 +1037,44 @@ export function PanelVentaPOS({
               className="ticket-preview"
               aria-label="Vista previa de ticket no fiscal"
             >
-              <h3>Ticket No Fiscal Emitido</h3>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '0.5rem',
+                  marginBottom: '0.5rem',
+                }}
+              >
+                <h3>Ticket Térmico No Fiscal Emitido</h3>
+                {ultimaVentaId && (
+                  <div style={{ display: 'flex', gap: '0.4rem' }}>
+                    <select
+                      aria-label="Ancho de papel térmico"
+                      value={anchoEscPosMm}
+                      onChange={(e) =>
+                        setAnchoEscPosMm(Number(e.target.value) as 58 | 80)
+                      }
+                    >
+                      <option value={80}>Papel 80mm (48 cols)</option>
+                      <option value={58}>Papel 58mm (32 cols)</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() =>
+                        void manejarImprimirODescargarEscPos(
+                          ultimaVentaId,
+                          anchoEscPosMm
+                        )
+                      }
+                    >
+                      Imprimir / ESC-POS ({anchoEscPosMm}mm)
+                    </button>
+                  </div>
+                )}
+              </div>
               <pre>{ultimoTicketTexto}</pre>
             </div>
           )}
