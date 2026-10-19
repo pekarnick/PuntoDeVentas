@@ -549,125 +549,151 @@ ALTER TABLE public.compras ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.compras_items ENABLE ROW LEVEL SECURITY;
 
 -- Políticas de Auditoría (PLAN.md §6.1: solo INSERT para el comercio; SELECT solo superadmin; NUNCA UPDATE/DELETE)
+DROP POLICY IF EXISTS rls_auditoria_insert ON public.auditoria;
 CREATE POLICY rls_auditoria_insert ON public.auditoria
   FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_auditoria_select_superadmin ON public.auditoria;
 CREATE POLICY rls_auditoria_select_superadmin ON public.auditoria
   FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() = 'superadmin');
 
 -- Políticas de Usuarios (solo superadmin gestiona usuarios; todos los del comercio leen usuarios para trazabilidad)
+DROP POLICY IF EXISTS rls_usuarios_select ON public.usuarios;
 CREATE POLICY rls_usuarios_select ON public.usuarios
   FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_usuarios_write_superadmin ON public.usuarios;
 CREATE POLICY rls_usuarios_write_superadmin ON public.usuarios
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() = 'superadmin')
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() = 'superadmin');
 
 -- Políticas por comercio_id para tablas operativas de terminales
+DROP POLICY IF EXISTS rls_comercios_all ON public.comercios;
 CREATE POLICY rls_comercios_all ON public.comercios
   FOR ALL TO anon, authenticated
   USING (id = public.mi_comercio_id())
   WITH CHECK (id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_dispositivos_all ON public.dispositivos;
 CREATE POLICY rls_dispositivos_all ON public.dispositivos
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_categorias_all ON public.categorias;
 CREATE POLICY rls_categorias_all ON public.categorias
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_marcas_all ON public.marcas;
 CREATE POLICY rls_marcas_all ON public.marcas
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_proveedores_all ON public.proveedores;
 CREATE POLICY rls_proveedores_all ON public.proveedores
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 -- Productos: solo superadmin y encargado pueden leer/escribir la tabla completa con costo_compra
+DROP POLICY IF EXISTS rls_productos_admin_encargado ON public.productos;
 CREATE POLICY rls_productos_admin_encargado ON public.productos
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'))
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'));
 
+DROP POLICY IF EXISTS rls_codigos_barras_all ON public.codigos_barras;
 CREATE POLICY rls_codigos_barras_all ON public.codigos_barras
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_listas_precio_all ON public.listas_precio;
 CREATE POLICY rls_listas_precio_all ON public.listas_precio
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_precios_all ON public.precios;
 CREATE POLICY rls_precios_all ON public.precios
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_movimientos_stock_select ON public.movimientos_stock;
 CREATE POLICY rls_movimientos_stock_select ON public.movimientos_stock
   FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_movimientos_stock_insert ON public.movimientos_stock;
 CREATE POLICY rls_movimientos_stock_insert ON public.movimientos_stock
   FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_clientes_all ON public.clientes;
 CREATE POLICY rls_clientes_all ON public.clientes
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_cc_movimientos_all ON public.cuenta_corriente_movimientos;
 CREATE POLICY rls_cc_movimientos_all ON public.cuenta_corriente_movimientos
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_caja_sesiones_all ON public.caja_sesiones;
 CREATE POLICY rls_caja_sesiones_all ON public.caja_sesiones
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_caja_movimientos_all ON public.caja_movimientos;
 CREATE POLICY rls_caja_movimientos_all ON public.caja_movimientos
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_ventas_all ON public.ventas;
 CREATE POLICY rls_ventas_all ON public.ventas
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_ventas_items_select ON public.ventas_items;
 CREATE POLICY rls_ventas_items_select ON public.ventas_items
   FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_ventas_items_insert ON public.ventas_items;
 CREATE POLICY rls_ventas_items_insert ON public.ventas_items
   FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_ventas_pagos_select ON public.ventas_pagos;
 CREATE POLICY rls_ventas_pagos_select ON public.ventas_pagos
   FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_ventas_pagos_insert ON public.ventas_pagos;
 CREATE POLICY rls_ventas_pagos_insert ON public.ventas_pagos
   FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
+DROP POLICY IF EXISTS rls_compras_admin_encargado ON public.compras;
 CREATE POLICY rls_compras_admin_encargado ON public.compras
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'))
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'));
 
+DROP POLICY IF EXISTS rls_compras_items_admin_encargado ON public.compras_items;
 CREATE POLICY rls_compras_items_admin_encargado ON public.compras_items
   FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'))
@@ -718,6 +744,7 @@ INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_typ
 VALUES ('productos', 'productos', FALSE, 204800, ARRAY['image/webp'])
 ON CONFLICT (id) DO NOTHING;
 
+DROP POLICY IF EXISTS storage_productos_select ON storage.objects;
 CREATE POLICY storage_productos_select ON storage.objects
   FOR SELECT TO anon, authenticated
   USING (
@@ -725,6 +752,7 @@ CREATE POLICY storage_productos_select ON storage.objects
     AND (storage.foldername(name))[1]::uuid = public.mi_comercio_id()
   );
 
+DROP POLICY IF EXISTS storage_productos_insert ON storage.objects;
 CREATE POLICY storage_productos_insert ON storage.objects
   FOR INSERT TO anon, authenticated
   WITH CHECK (
@@ -733,6 +761,7 @@ CREATE POLICY storage_productos_insert ON storage.objects
     AND public.mi_rol() IN ('superadmin', 'encargado')
   );
 
+DROP POLICY IF EXISTS storage_productos_update ON storage.objects;
 CREATE POLICY storage_productos_update ON storage.objects
   FOR UPDATE TO anon, authenticated
   USING (
@@ -740,3 +769,4 @@ CREATE POLICY storage_productos_update ON storage.objects
     AND (storage.foldername(name))[1]::uuid = public.mi_comercio_id()
     AND public.mi_rol() IN ('superadmin', 'encargado')
   );
+
