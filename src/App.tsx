@@ -3,12 +3,19 @@ import { formatearFechaAR } from './domain/dinero.ts';
 import { tienePermiso, type RolUsuario } from './domain/permisos.ts';
 import { PanelAuditoria } from './features/auditoria/PanelAuditoria.tsx';
 import { PanelCaja } from './features/caja/PanelCaja.tsx';
+import { PanelInformes } from './features/informes/PanelInformes.tsx';
 import { PanelProductosStock } from './features/productos/PanelProductosStock.tsx';
 import { PanelUsuarios } from './features/usuarios/PanelUsuarios.tsx';
 import { PanelVentaPOS } from './features/venta/PanelVentaPOS.tsx';
 import { formatearEstadoSync } from './sync/index.ts';
 
-type PestaniaActiva = 'venta' | 'productos' | 'caja' | 'usuarios' | 'auditoria';
+type PestaniaActiva =
+  | 'venta'
+  | 'productos'
+  | 'caja'
+  | 'informes'
+  | 'usuarios'
+  | 'auditoria';
 
 const NOMBRES_OPERADOR: Record<RolUsuario, string> = {
   superadmin: 'María Superadmin',
@@ -27,14 +34,19 @@ export function App(): React.ReactElement {
 
   const hoy = formatearFechaAR(new Date());
 
+  const puedeVerInformes = tienePermiso(rolActivo, 'ver_informes_gestion');
   const puedeGestionarUsuarios = tienePermiso(rolActivo, 'gestionar_usuarios');
   const puedeVerAuditoria = tienePermiso(rolActivo, 'ver_exportar_auditoria');
 
   function cambiarRolDemo(nuevoRol: RolUsuario) {
     setRolActivo(nuevoRol);
     if (
-      (pestania === 'usuarios' && !tienePermiso(nuevoRol, 'gestionar_usuarios')) ||
-      (pestania === 'auditoria' && !tienePermiso(nuevoRol, 'ver_exportar_auditoria'))
+      (pestania === 'informes' &&
+        !tienePermiso(nuevoRol, 'ver_informes_gestion')) ||
+      (pestania === 'usuarios' &&
+        !tienePermiso(nuevoRol, 'gestionar_usuarios')) ||
+      (pestania === 'auditoria' &&
+        !tienePermiso(nuevoRol, 'ver_exportar_auditoria'))
     ) {
       setPestania('venta');
     }
@@ -72,6 +84,16 @@ export function App(): React.ReactElement {
           >
             Caja y Arqueo
           </button>
+
+          {puedeVerInformes && (
+            <button
+              type="button"
+              className={pestania === 'informes' ? 'nav-btn active' : 'nav-btn'}
+              onClick={() => setPestania('informes')}
+            >
+              Informes y Excel
+            </button>
+          )}
 
           {puedeGestionarUsuarios && (
             <button
@@ -124,6 +146,7 @@ export function App(): React.ReactElement {
           <PanelProductosStock rolActivo={rolActivo} />
         )}
         {pestania === 'caja' && <PanelCaja />}
+        {pestania === 'informes' && puedeVerInformes && <PanelInformes />}
         {pestania === 'usuarios' && puedeGestionarUsuarios && <PanelUsuarios />}
         {pestania === 'auditoria' && puedeVerAuditoria && <PanelAuditoria />}
       </main>
