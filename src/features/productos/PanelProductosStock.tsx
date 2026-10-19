@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   formatearMonedaARS,
   pesosACentavos,
@@ -10,7 +11,6 @@ import {
   type RolUsuario,
 } from '../../domain/permisos.ts';
 import {
-  calcularStockActual,
   estaBajoStockMinimo,
   normalizarMovimientoStock,
   type TipoMovimientoStock,
@@ -23,24 +23,22 @@ export interface ProductoAdminItemUI {
   readonly codigos_barras: readonly string[];
   readonly unidad: 'unidad' | 'kg' | 'm' | 'l' | 'caja';
   readonly permite_decimales: boolean;
-  readonly costo_compra: Centavos;
+  readonly costo_compra?: Centavos;
   readonly precio_venta: Centavos;
   readonly stock_minimo: number;
+  readonly stock_actual: number;
   readonly boton_rapido: boolean;
   readonly imagen_path: string | null;
   readonly imagen_hash: string | null;
-  readonly movimientos: ReadonlyArray<{
-    readonly tipo: TipoMovimientoStock;
-    readonly cantidad: number;
-    readonly motivo?: string | null;
-  }>;
 }
 
 export interface PanelProductosStockProps {
   readonly rolActivo: RolUsuario;
+  readonly productosIniciales?: readonly ProductoAdminItemUI[];
+  readonly onDatosActualizados?: () => void;
 }
 
-const PRODUCTOS_INICIALES_UI: ProductoAdminItemUI[] = [
+const PRODUCTOS_FALLBACK_TESTS: ProductoAdminItemUI[] = [
   {
     id: 'prod-yerba',
     nombre: 'Yerba Mate Selección 1kg',
@@ -51,13 +49,10 @@ const PRODUCTOS_INICIALES_UI: ProductoAdminItemUI[] = [
     costo_compra: 280000,
     precio_venta: 420000,
     stock_minimo: 10,
+    stock_actual: 22,
     boton_rapido: false,
     imagen_path: 'imagenes/prod-yerba.webp',
     imagen_hash: 'e3b0c44298fc1c149afbf4c8996fb924',
-    movimientos: [
-      { tipo: 'compra', cantidad: 25 },
-      { tipo: 'venta', cantidad: -3 },
-    ],
   },
   {
     id: 'prod-alfajor',
@@ -69,23 +64,29 @@ const PRODUCTOS_INICIALES_UI: ProductoAdminItemUI[] = [
     costo_compra: 85000,
     precio_venta: 150000,
     stock_minimo: 15,
+    stock_actual: 8,
     boton_rapido: true,
     imagen_path: null,
     imagen_hash: null,
-    movimientos: [
-      { tipo: 'compra', cantidad: 12 },
-      { tipo: 'venta', cantidad: -4 },
-    ],
   },
 ];
 
 export function PanelProductosStock({
   rolActivo,
+  productosIniciales = PRODUCTOS_FALLBACK_TESTS,
+  onDatosActualizados,
 }: PanelProductosStockProps): React.ReactElement {
-  const [productos, setProductos] = useState<ProductoAdminItemUI[]>(
-    PRODUCTOS_INICIALES_UI
-  );
+  const [productos, setProductos] = useState<ProductoAdminItemUI[]>(() => [
+    ...productosIniciales,
+  ]);
   const [busqueda, setBusqueda] = useState('');
+
+  useEffect(() => {
+    setProductos([...productosIniciales]);
+    if (productosIniciales.length > 0 && !productoAjusteId) {
+      setProductoAjusteId(productosIniciales[0]!.id);
+    }
+  }, [productosIniciales]);
 
   // Alta de producto
   const [nombreNuevo, setNombreNuevo] = useState('');
@@ -95,13 +96,14 @@ export function PanelProductosStock({
   const [precioVentaInput, setPrecioVentaInput] = useState('');
   const [stockMinInput, setStockMinInput] = useState('5');
   const [stockInicialInput, setStockInicialInput] = useState('10');
+  const [botonRapidoNuevo, setBotonRapidoNuevo] = useState(false);
 
   // Movimiento de stock manual
   const [productoAjusteId, setProductoAjusteId] = useState<string>(
-    PRODUCTOS_INICIALES_UI[0]?.id ?? ''
+    productosIniciales[0]?.id ?? ''
   );
   const [tipoMovimiento, setTipoMovimiento] =
-    useState<TipoMovimientoStock>('ajuste');
+    useState<TipoMovimientoStock>('compra');
   const [cantidadMovimientoInput, setCantidadMovimientoInput] = useState('');
   const [motivoMovimiento, setMotivoMovimiento] = useState('');
 
@@ -121,7 +123,7 @@ export function PanelProductosStock({
       p.codigos_barras.some((cb) => cb.includes(busqueda.trim()))
   );
 
-  function manejarCrearProducto(e: React.FormEvent) {
+  async function manejarCrearProducto(e: React.FormEvent) {
     e.preventDefault();
     if (!puedeEditarCatalogo) return;
     setMensajeError(null);
@@ -135,45 +137,34 @@ export function PanelProductosStock({
       const precio = pesosACentavos(precioVentaInput);
       const stockInicial = parseFloat(stockInicialInput || '0');
       const stockMin = parseFloat(stockMinInput || '0');
+      const codigoInterno =
+        codigoInternoNuevo.trim() || `INT-${Date.now().toString().slice(-4)}`;
+      const codigos = codigoBarrasNuevo.trim()
+        ? [codigoBarrasNuevo.trim()]
+        : [];
 
-      const nuevo: ProductoAdminItemUI = {
-        id: `prod-${Date.now()}`,
+      await invocarPosApi('crear_producto', {
+        rolActivo,
         nombre: nombreNuevo.trim(),
-        codigo_interno: codigoInternoNuevo.trim() || `INT-${Date.now().toString().slice(-4)}`,
-        codigos_barras: codigoBarrasNuevo.trim()
-          ? [codigoBarrasNuevo.trim()]
-          : [],
-        unidad: 'unidad',
-        permite_decimales: false,
-        costo_compra: costo,
-        precio_venta: precio,
-        stock_minimo: stockMin,
-        boton_rapido: false,
-        imagen_path: null,
-        imagen_hash: null,
-        movimientos:
-          stockInicial !== 0
-            ? [
-                {
-                  tipo: 'ajuste',
-                  cantidad: normalizarMovimientoStock({
-                    tipo: 'ajuste',
-                    cantidad: stockInicial,
-                    motivo: 'Stock inicial al crear producto',
-                  }),
-                  motivo: 'Stock inicial al crear producto',
-                },
-              ]
-            : [],
-      };
+        codigoInterno,
+        costoCompraCentavos: costo,
+        precioVentaCentavos: precio,
+        stockMinimo: stockMin,
+        stockInicial,
+        botonRapido: botonRapidoNuevo,
+        codigosBarras: codigos,
+      });
 
-      setProductos((prev) => [...prev, nuevo]);
       setNombreNuevo('');
       setCodigoInternoNuevo('');
       setCodigoBarrasNuevo('');
       setCostoInput('');
       setPrecioVentaInput('');
-      setMensajeOk(`Producto "${nuevo.nombre}" dado de alta y auditado.`);
+      setBotonRapidoNuevo(false);
+      setMensajeOk(
+        `Producto "${nombreNuevo.trim()}" guardado en SQLite local y auditado.`
+      );
+      onDatosActualizados?.();
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'Error al crear el producto.'
@@ -181,7 +172,7 @@ export function PanelProductosStock({
     }
   }
 
-  function manejarRegistrarMovimientoStock(e: React.FormEvent) {
+  async function manejarRegistrarMovimientoStock(e: React.FormEvent) {
     e.preventDefault();
     if (!puedeEditarCatalogo) return;
     setMensajeError(null);
@@ -195,29 +186,20 @@ export function PanelProductosStock({
         motivo: motivoMovimiento,
       });
 
-      setProductos((prev) =>
-        prev.map((p) =>
-          p.id === productoAjusteId
-            ? {
-                ...p,
-                movimientos: [
-                  ...p.movimientos,
-                  {
-                    tipo: tipoMovimiento,
-                    cantidad: cantidadConSigno,
-                    motivo: motivoMovimiento.trim() || null,
-                  },
-                ],
-              }
-            : p
-        )
-      );
+      await invocarPosApi('registrar_movimiento_stock', {
+        rolActivo,
+        productoId: productoAjusteId,
+        tipo: tipoMovimiento,
+        cantidad: cantidadNum,
+        motivo: motivoMovimiento.trim() || undefined,
+      });
 
       setCantidadMovimientoInput('');
       setMotivoMovimiento('');
       setMensajeOk(
-        `Movimiento de stock (${tipoMovimiento}: ${cantidadConSigno > 0 ? `+${cantidadConSigno}` : cantidadConSigno}) registrado y auditado.`
+        `Movimiento de stock (${tipoMovimiento}: ${cantidadConSigno > 0 ? `+${cantidadConSigno}` : cantidadConSigno}) guardado en SQLite y auditado.`
       );
+      onDatosActualizados?.();
     } catch (err) {
       setMensajeError(
         err instanceof Error
@@ -235,8 +217,11 @@ export function PanelProductosStock({
       {puedeEditarCatalogo && (
         <div className="panel-grid">
           <div className="pos-card">
-            <h2>Alta de Producto (con Costo, Precio e Imagen WebP)</h2>
-            <form onSubmit={manejarCrearProducto} className="form-stack">
+            <h2>Alta de Producto (Persistencia SQLite)</h2>
+            <form
+              onSubmit={(e) => void manejarCrearProducto(e)}
+              className="form-stack"
+            >
               <div className="form-row">
                 <label>
                   Nombre:
@@ -301,9 +286,17 @@ export function PanelProductosStock({
                     onChange={(e) => setStockMinInput(e.target.value)}
                   />
                 </label>
+                <label className="checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={botonRapidoNuevo}
+                    onChange={(e) => setBotonRapidoNuevo(e.target.checked)}
+                  />
+                  Mostrar como botón rápido en caja
+                </label>
               </div>
               <button type="submit" className="btn-primary">
-                Guardar Producto
+                Guardar Producto en SQLite
               </button>
             </form>
           </div>
@@ -313,7 +306,10 @@ export function PanelProductosStock({
             <p className="text-muted">
               El stock nunca se edita a mano: cada compra, ajuste o merma agrega un movimiento inmutable.
             </p>
-            <form onSubmit={manejarRegistrarMovimientoStock} className="form-stack">
+            <form
+              onSubmit={(e) => void manejarRegistrarMovimientoStock(e)}
+              className="form-stack"
+            >
               <div className="form-row">
                 <label>
                   Producto:
@@ -364,7 +360,7 @@ export function PanelProductosStock({
                 </label>
               </div>
               <button type="submit" className="btn-primary">
-                Registrar Movimiento de Stock
+                Registrar Movimiento en SQLite
               </button>
             </form>
           </div>
@@ -404,22 +400,26 @@ export function PanelProductosStock({
           </thead>
           <tbody>
             {productosFiltrados.map((p) => {
-              const stockActual = calcularStockActual(p.movimientos);
+              const stockActual = p.stock_actual;
               const bajoMinimo = estaBajoStockMinimo(
                 stockActual,
                 p.stock_minimo
               );
+              const costoSeguro = p.costo_compra ?? 0;
               const margen =
                 p.precio_venta > 0
                   ? Math.round(
-                      ((p.precio_venta - p.costo_compra) / p.precio_venta) * 100
+                      ((p.precio_venta - costoSeguro) / p.precio_venta) * 100
                     )
                   : 0;
 
               return (
                 <tr key={p.id}>
                   <td>
-                    <span className="badge-rol" title={p.imagen_path ?? 'Placeholder local'}>
+                    <span
+                      className="badge-rol"
+                      title={p.imagen_path ?? 'Placeholder local'}
+                    >
                       {p.imagen_path ? 'WebP ✓' : 'Sin foto'}
                     </span>
                   </td>
@@ -439,7 +439,7 @@ export function PanelProductosStock({
                     )}
                   </td>
                   {mostrarCostos && (
-                    <td className="num">{formatearMonedaARS(p.costo_compra)}</td>
+                    <td className="num">{formatearMonedaARS(costoSeguro)}</td>
                   )}
                   <td className="num">
                     <strong>{formatearMonedaARS(p.precio_venta)}</strong>
@@ -450,7 +450,10 @@ export function PanelProductosStock({
                       {stockActual} {p.unidad}
                     </strong>
                     {bajoMinimo && (
-                      <span className="badge-alerta" style={{ marginLeft: '0.4rem' }}>
+                      <span
+                        className="badge-alerta"
+                        style={{ marginLeft: '0.4rem' }}
+                      >
                         Bajo mín. ({p.stock_minimo})
                       </span>
                     )}

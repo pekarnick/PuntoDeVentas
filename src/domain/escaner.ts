@@ -27,6 +27,7 @@ export interface ProductoCatalogoVenta {
   readonly exento_iva: boolean;
   readonly boton_rapido?: boolean;
   readonly imagen_path?: string | null;
+  readonly stock_actual?: number;
 }
 
 export interface ItemCarritoPOS {
@@ -44,6 +45,52 @@ export interface ItemCarritoPOS {
 export interface EventoTeclaLector {
   readonly tecla: string;
   readonly timestampMs: number;
+}
+
+/**
+ * Filtra y ordena productos del catálogo de venta que coinciden con el criterio escrito en el buscador
+ * (por código de barras, código interno o palabras del nombre) para mostrar en el desplegable de sugerencias.
+ */
+export function filtrarSugerenciasCatalogoPOS(
+  catalogo: readonly ProductoCatalogoVenta[],
+  consultaRaw: string,
+  limite = 8
+): ProductoCatalogoVenta[] {
+  const consulta = consultaRaw.trim().toLowerCase();
+  if (!consulta) {
+    return [];
+  }
+
+  const terminos = consulta.split(/\s+/).filter(Boolean);
+
+  const coincidencias = catalogo.filter((prod) => {
+    const textoProducto = [
+      prod.nombre.toLowerCase(),
+      (prod.codigo_interno ?? '').toLowerCase(),
+      ...prod.codigos_barras.map((c) => c.toLowerCase()),
+    ].join(' ');
+
+    return terminos.every((t) => textoProducto.includes(t));
+  });
+
+  // Priorizar coincidencia exacta de código, luego prefijo del nombre, luego orden alfabético
+  return coincidencias
+    .sort((a, b) => {
+      const aExacto =
+        a.codigos_barras.some((c) => c.toLowerCase() === consulta) ||
+        (a.codigo_interno ?? '').toLowerCase() === consulta;
+      const bExacto =
+        b.codigos_barras.some((c) => c.toLowerCase() === consulta) ||
+        (b.codigo_interno ?? '').toLowerCase() === consulta;
+      if (aExacto !== bExacto) return aExacto ? -1 : 1;
+
+      const aPrefijo = a.nombre.toLowerCase().startsWith(consulta);
+      const bPrefijo = b.nombre.toLowerCase().startsWith(consulta);
+      if (aPrefijo !== bPrefijo) return aPrefijo ? -1 : 1;
+
+      return a.nombre.localeCompare(b.nombre, 'es-AR');
+    })
+    .slice(0, limite);
 }
 
 /**
@@ -97,6 +144,9 @@ export function sanitizarProductoCatalogoParaPOS<
     exento_iva: limpio.exento_iva,
     boton_rapido: Boolean(limpio.boton_rapido),
     imagen_path: limpio.imagen_path ?? null,
+    ...(limpio.stock_actual !== undefined
+      ? { stock_actual: limpio.stock_actual }
+      : {}),
   };
 }
 

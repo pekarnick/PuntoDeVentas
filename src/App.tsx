@@ -1,12 +1,23 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { invocarPosApi } from './db/cliente_pos_api.ts';
 import { formatearFechaAR } from './domain/dinero.ts';
+import type { ProductoCatalogoVenta } from './domain/escaner.ts';
 import { tienePermiso, type RolUsuario } from './domain/permisos.ts';
 import { PanelAuditoria } from './features/auditoria/PanelAuditoria.tsx';
-import { PanelCaja } from './features/caja/PanelCaja.tsx';
+import {
+  PanelCaja,
+  type EstadoCajaServidorUI,
+} from './features/caja/PanelCaja.tsx';
 import { PanelInformes } from './features/informes/PanelInformes.tsx';
-import { PanelProductosStock } from './features/productos/PanelProductosStock.tsx';
+import {
+  PanelProductosStock,
+  type ProductoAdminItemUI,
+} from './features/productos/PanelProductosStock.tsx';
 import { PanelUsuarios } from './features/usuarios/PanelUsuarios.tsx';
-import { PanelVentaPOS } from './features/venta/PanelVentaPOS.tsx';
+import {
+  PanelVentaPOS,
+  type VentaRecienteResumenUI,
+} from './features/venta/PanelVentaPOS.tsx';
 import { formatearEstadoSync } from './sync/index.ts';
 
 type PestaniaActiva =
@@ -23,13 +34,40 @@ const NOMBRES_OPERADOR: Record<RolUsuario, string> = {
   cajero: 'Lucas Cajero',
 };
 
+interface EstadoInicialServidor {
+  readonly rutaBaseDatos: string;
+  readonly cambiosPendientesSync: number;
+  readonly catalogoVenta: readonly ProductoCatalogoVenta[];
+  readonly catalogoAdmin: readonly ProductoAdminItemUI[];
+  readonly ventasRecientes: readonly VentaRecienteResumenUI[];
+  readonly estadoCaja: EstadoCajaServidorUI | null;
+}
+
 export function App(): React.ReactElement {
   const [rolActivo, setRolActivo] = useState<RolUsuario>('superadmin');
   const [pestania, setPestania] = useState<PestaniaActiva>('venta');
+  const [datosServidor, setDatosServidor] =
+    useState<EstadoInicialServidor | null>(null);
+
+  const recargarEstadoLocal = useCallback(async () => {
+    try {
+      const estado = await invocarPosApi<EstadoInicialServidor>(
+        'obtener_estado_inicial',
+        { rolActivo }
+      );
+      setDatosServidor(estado);
+    } catch {
+      // En tests unitarios sin servidor Vite se usan los valores por defecto de los paneles
+    }
+  }, [rolActivo]);
+
+  useEffect(() => {
+    void recargarEstadoLocal();
+  }, [recargarEstadoLocal]);
 
   const estadoSync = formatearEstadoSync({
     estado: 'pendiente',
-    cambiosPendientes: 3,
+    cambiosPendientes: datosServidor?.cambiosPendientesSync ?? 0,
   });
 
   const hoy = formatearFechaAR(new Date());
@@ -57,7 +95,9 @@ export function App(): React.ReactElement {
       <header className="topbar">
         <div className="topbar-brand">
           <strong>Punto de Ventas</strong>
-          <span className="badge-fase">Fase 1 · Local Offline-First</span>
+          <span className="badge-fase" title={datosServidor?.rutaBaseDatos}>
+            SQLite: {datosServidor?.rutaBaseDatos ?? 'data/pos_local.db'}
+          </span>
         </div>
 
         <nav className="topbar-nav" aria-label="Módulos del sistema">
@@ -140,13 +180,28 @@ export function App(): React.ReactElement {
           <PanelVentaPOS
             rolActivo={rolActivo}
             operadorNombre={NOMBRES_OPERADOR[rolActivo]}
+            catalogoInicial={datosServidor?.catalogoVenta}
+            ventasRecientesIniciales={datosServidor?.ventasRecientes}
+            onDatosActualizados={() => void recargarEstadoLocal()}
           />
         )}
         {pestania === 'productos' && (
-          <PanelProductosStock rolActivo={rolActivo} />
+          <PanelProductosStock
+            rolActivo={rolActivo}
+            productosIniciales={datosServidor?.catalogoAdmin}
+            onDatosActualizados={() => void recargarEstadoLocal()}
+          />
         )}
-        {pestania === 'caja' && <PanelCaja />}
-        {pestania === 'informes' && puedeVerInformes && <PanelInformes />}
+        {pestania === 'caja' && (
+          <PanelCaja
+            rolActivo={rolActivo}
+            estadoCajaInicial={datosServidor?.estadoCaja}
+            onDatosActualizados={() => void recargarEstadoLocal()}
+          />
+        )}
+        {pestania === 'informes' && puedeVerInformes && (
+          <PanelInformes rolActivo={rolActivo} />
+        )}
         {pestania === 'usuarios' && puedeGestionarUsuarios && <PanelUsuarios />}
         {pestania === 'auditoria' && puedeVerAuditoria && <PanelAuditoria />}
       </main>

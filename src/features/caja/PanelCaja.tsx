@@ -1,51 +1,74 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   formatearFechaHoraAR,
   formatearMonedaARS,
   pesosACentavos,
   type Centavos,
 } from '../../domain/dinero.ts';
-import { calcularArqueoCaja, type MedioPago } from '../../domain/totales.ts';
+import type { RolUsuario } from '../../domain/permisos.ts';
+import type { MedioPago } from '../../domain/totales.ts';
 
-export interface MovimientoManualUI {
-  readonly id: string;
-  readonly fecha: string;
-  readonly tipo: 'ingreso' | 'egreso';
-  readonly concepto: string;
-  readonly monto: Centavos;
-  readonly medio: MedioPago;
+export interface EstadoCajaServidorUI {
+  readonly sesion: {
+    readonly id: string;
+    readonly fecha_apertura: string;
+    readonly monto_inicial: Centavos;
+    readonly estado: 'abierta' | 'cerrada';
+  };
+  readonly totalesPorMedio: Record<MedioPago, Centavos>;
+  readonly efectivoEsperado: Centavos;
+  readonly movimientosManuales: ReadonlyArray<{
+    readonly id: string;
+    readonly fecha: string;
+    readonly tipo: 'ingreso' | 'egreso';
+    readonly concepto: string;
+    readonly monto: Centavos;
+    readonly medio: MedioPago;
+  }>;
 }
 
-export function PanelCaja(): React.ReactElement {
-  const [cajaAbierta, setCajaAbierta] = useState(true);
-  const [fechaApertura] = useState<string>(() => new Date().toISOString());
+export interface PanelCajaProps {
+  readonly rolActivo?: RolUsuario;
+  readonly estadoCajaInicial?: EstadoCajaServidorUI | null;
+  readonly onDatosActualizados?: () => void;
+}
+
+export function PanelCaja({
+  rolActivo = 'superadmin',
+  estadoCajaInicial = null,
+  onDatosActualizados,
+}: PanelCajaProps): React.ReactElement {
+  const [estadoCaja, setEstadoCaja] = useState<EstadoCajaServidorUI | null>(
+    estadoCajaInicial
+  );
+
+  useEffect(() => {
+    setEstadoCaja(estadoCajaInicial);
+  }, [estadoCajaInicial]);
+
   const [montoInicialInput, setMontoInicialInput] = useState('15000,00');
-  const [montoInicialCentavos, setMontoInicialCentavos] = useState<Centavos>(1500000);
-
-  const [movimientos, setMovimientos] = useState<MovimientoManualUI[]>([
-    {
-      id: 'mov-1',
-      fecha: new Date().toISOString(),
-      tipo: 'egreso',
-      concepto: 'Pago proveedor hielo',
-      monto: 250000,
-      medio: 'efectivo',
-    },
-  ]);
-
-  const [pagosVentas] = useState<Array<{ medio: MedioPago; monto: Centavos }>>([
-    { medio: 'efectivo', monto: 840000 },
-    { medio: 'mercado_pago', monto: 520000 },
-    { medio: 'debito', monto: 310000 },
-    { medio: 'transferencia', monto: 190000 },
-  ]);
-
   const [tipoMov, setTipoMov] = useState<'ingreso' | 'egreso'>('egreso');
   const [conceptoMov, setConceptoMov] = useState('');
   const [montoMovInput, setMontoMovInput] = useState('');
-  const [efectivoContadoInput, setEfectivoContadoInput] = useState('20900,00');
+  const [efectivoContadoInput, setEfectivoContadoInput] = useState('15000,00');
   const [mensajeError, setMensajeError] = useState<string | null>(null);
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
+
+  const cajaAbierta = estadoCaja?.sesion.estado === 'abierta';
+  const montoInicialCentavos = estadoCaja?.sesion.monto_inicial ?? 1500000;
+  const efectivoEsperado = estadoCaja?.efectivoEsperado ?? 1500000;
+  const totalesPorMedio: Record<MedioPago, Centavos> =
+    estadoCaja?.totalesPorMedio ?? {
+      efectivo: 0,
+      transferencia: 0,
+      mercado_pago: 0,
+      qr: 0,
+      debito: 0,
+      credito: 0,
+      cuenta_corriente: 0,
+      otro: 0,
+    };
 
   let efectivoContadoCentavos = 0;
   try {
@@ -56,49 +79,50 @@ export function PanelCaja(): React.ReactElement {
     efectivoContadoCentavos = 0;
   }
 
-  const arqueo = calcularArqueoCaja({
-    montoInicial: montoInicialCentavos,
-    pagosVentasCompletadas: pagosVentas,
-    movimientosManuales: movimientos,
-    efectivoContado: efectivoContadoCentavos,
-  });
+  const diferenciaEfectivo = efectivoContadoCentavos - efectivoEsperado;
 
-  function manejarAgregarMovimiento(e: React.FormEvent) {
+  async function manejarAgregarMovimiento(e: React.FormEvent) {
     e.preventDefault();
+    if (!estadoCaja) return;
     setMensajeError(null);
     setMensajeExito(null);
 
     try {
       if (!conceptoMov.trim()) {
-        throw new Error('Ingresá un concepto obligatorio para el movimiento de caja.');
+        throw new Error(
+          'Ingresá un concepto obligatorio para el movimiento de caja.'
+        );
       }
       const monto = pesosACentavos(montoMovInput);
       if (monto <= 0) {
         throw new Error('El importe debe ser mayor a $ 0,00.');
       }
 
-      setMovimientos((prev) => [
-        ...prev,
-        {
-          id: `mov-${Date.now()}`,
-          fecha: new Date().toISOString(),
-          tipo: tipoMov,
-          concepto: conceptoMov.trim(),
-          monto,
-          medio: 'efectivo',
-        },
-      ]);
+      await invocarPosApi('movimiento_manual_caja', {
+        rolActivo,
+        cajaSesionId: estadoCaja.sesion.id,
+        tipo: tipoMov,
+        concepto: conceptoMov.trim(),
+        montoCentavos: monto,
+        medio: 'efectivo',
+      });
+
       setConceptoMov('');
       setMontoMovInput('');
-      setMensajeExito('Movimiento registrado y auditado en la sesión de caja.');
+      setMensajeExito(
+        'Movimiento guardado en SQLite local y auditado en la sesión de caja.'
+      );
+      onDatosActualizados?.();
     } catch (err) {
       setMensajeError(
-        err instanceof Error ? err.message : 'No se pudo registrar el movimiento.'
+        err instanceof Error
+          ? err.message
+          : 'No se pudo registrar el movimiento.'
       );
     }
   }
 
-  function manejarAbrirCaja(e: React.FormEvent) {
+  async function manejarAbrirCaja(e: React.FormEvent) {
     e.preventDefault();
     setMensajeError(null);
     setMensajeExito(null);
@@ -107,9 +131,12 @@ export function PanelCaja(): React.ReactElement {
       if (inicial < 0) {
         throw new Error('El monto inicial no puede ser negativo.');
       }
-      setMontoInicialCentavos(inicial);
-      setCajaAbierta(true);
-      setMensajeExito('Sesión de caja abierta correctamente.');
+      await invocarPosApi('abrir_caja', {
+        rolActivo,
+        montoInicialCentavos: inicial,
+      });
+      setMensajeExito('Sesión de caja abierta y guardada en SQLite.');
+      onDatosActualizados?.();
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'Importe inicial inválido.'
@@ -117,12 +144,24 @@ export function PanelCaja(): React.ReactElement {
     }
   }
 
-  function manejarCerrarCaja() {
+  async function manejarCerrarCaja() {
+    if (!estadoCaja) return;
     setMensajeError(null);
-    setCajaAbierta(false);
-    setMensajeExito(
-      `Caja cerrada y auditada. Diferencia de efectivo: ${formatearMonedaARS(arqueo.diferenciaEfectivo)}.`
-    );
+    try {
+      await invocarPosApi('cerrar_caja', {
+        rolActivo,
+        cajaSesionId: estadoCaja.sesion.id,
+        efectivoContadoCentavos,
+      });
+      setMensajeExito(
+        `Caja cerrada en SQLite y auditada. Diferencia de efectivo: ${formatearMonedaARS(diferenciaEfectivo)}.`
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo cerrar la caja.'
+      );
+    }
   }
 
   return (
@@ -130,16 +169,21 @@ export function PanelCaja(): React.ReactElement {
       <div className="pos-card">
         <div className="card-header">
           <h2>Estado de Caja ({cajaAbierta ? 'Abierta' : 'Cerrada'})</h2>
-          <span className="text-muted">
-            Apertura: {formatearFechaHoraAR(fechaApertura)}
-          </span>
+          {estadoCaja && (
+            <span className="text-muted">
+              Apertura: {formatearFechaHoraAR(estadoCaja.sesion.fecha_apertura)}
+            </span>
+          )}
         </div>
 
         {mensajeError && <div className="alert-error">{mensajeError}</div>}
         {mensajeExito && <div className="alert-ok">{mensajeExito}</div>}
 
         {!cajaAbierta ? (
-          <form onSubmit={manejarAbrirCaja} className="form-inline">
+          <form
+            onSubmit={(e) => void manejarAbrirCaja(e)}
+            className="form-inline"
+          >
             <label>
               Monto inicial en efectivo ($):
               <input
@@ -150,11 +194,14 @@ export function PanelCaja(): React.ReactElement {
               />
             </label>
             <button type="submit" className="btn-primary">
-              Abrir Caja
+              Abrir Caja en SQLite
             </button>
           </form>
         ) : (
-          <form onSubmit={manejarAgregarMovimiento} className="form-stack">
+          <form
+            onSubmit={(e) => void manejarAgregarMovimiento(e)}
+            className="form-stack"
+          >
             <h3>Registrar ingreso o egreso manual</h3>
             <div className="form-row">
               <label>
@@ -188,7 +235,7 @@ export function PanelCaja(): React.ReactElement {
                 />
               </label>
               <button type="submit" className="btn-secondary">
-                Registrar
+                Registrar en SQLite
               </button>
             </div>
           </form>
@@ -205,7 +252,7 @@ export function PanelCaja(): React.ReactElement {
             </tr>
           </thead>
           <tbody>
-            {movimientos.map((m) => (
+            {(estadoCaja?.movimientosManuales ?? []).map((m) => (
               <tr key={m.id}>
                 <td>{formatearFechaHoraAR(m.fecha)}</td>
                 <td>{m.tipo === 'ingreso' ? 'Ingreso' : 'Egreso'}</td>
@@ -222,7 +269,7 @@ export function PanelCaja(): React.ReactElement {
       <div className="pos-card">
         <h2>Arqueo y Cierre por Medio de Pago</h2>
         <p className="text-muted">
-          Desglose de cobros de ventas completadas y cálculo de diferencia de efectivo.
+          Desglose real de cobros de ventas completadas en SQLite y cálculo de diferencia de efectivo.
         </p>
 
         <table className="data-table">
@@ -235,30 +282,38 @@ export function PanelCaja(): React.ReactElement {
           <tbody>
             <tr>
               <td>Efectivo (ventas)</td>
-              <td className="num">{formatearMonedaARS(arqueo.totalesPorMedio.efectivo)}</td>
+              <td className="num">
+                {formatearMonedaARS(totalesPorMedio.efectivo)}
+              </td>
             </tr>
             <tr>
               <td>Mercado Pago</td>
-              <td className="num">{formatearMonedaARS(arqueo.totalesPorMedio.mercado_pago)}</td>
+              <td className="num">
+                {formatearMonedaARS(totalesPorMedio.mercado_pago)}
+              </td>
             </tr>
             <tr>
               <td>Transferencia</td>
-              <td className="num">{formatearMonedaARS(arqueo.totalesPorMedio.transferencia)}</td>
+              <td className="num">
+                {formatearMonedaARS(totalesPorMedio.transferencia)}
+              </td>
             </tr>
             <tr>
               <td>Tarjeta de Débito</td>
-              <td className="num">{formatearMonedaARS(arqueo.totalesPorMedio.debito)}</td>
+              <td className="num">
+                {formatearMonedaARS(totalesPorMedio.debito)}
+              </td>
             </tr>
             <tr>
               <td>Tarjeta de Crédito</td>
-              <td className="num">{formatearMonedaARS(arqueo.totalesPorMedio.credito)}</td>
+              <td className="num">
+                {formatearMonedaARS(totalesPorMedio.credito)}
+              </td>
             </tr>
             <tr>
               <td>QR / Otros</td>
               <td className="num">
-                {formatearMonedaARS(
-                  arqueo.totalesPorMedio.qr + arqueo.totalesPorMedio.otro
-                )}
+                {formatearMonedaARS(totalesPorMedio.qr + totalesPorMedio.otro)}
               </td>
             </tr>
           </tbody>
@@ -271,10 +326,12 @@ export function PanelCaja(): React.ReactElement {
           </div>
           <div className="arqueo-line">
             <span>Efectivo esperado en cajón:</span>
-            <strong>{formatearMonedaARS(arqueo.efectivoEsperado)}</strong>
+            <strong>{formatearMonedaARS(efectivoEsperado)}</strong>
           </div>
           <div className="arqueo-line">
-            <label htmlFor="efectivo-contado">Efectivo físico contado ($):</label>
+            <label htmlFor="efectivo-contado">
+              Efectivo físico contado ($):
+            </label>
             <input
               id="efectivo-contado"
               type="text"
@@ -287,14 +344,14 @@ export function PanelCaja(): React.ReactElement {
             <span>Diferencia de efectivo:</span>
             <strong
               className={
-                arqueo.diferenciaEfectivo < 0
+                diferenciaEfectivo < 0
                   ? 'diff-negativa'
-                  : arqueo.diferenciaEfectivo > 0
+                  : diferenciaEfectivo > 0
                     ? 'diff-positiva'
                     : ''
               }
             >
-              {formatearMonedaARS(arqueo.diferenciaEfectivo)}
+              {formatearMonedaARS(diferenciaEfectivo)}
             </strong>
           </div>
 
@@ -302,9 +359,9 @@ export function PanelCaja(): React.ReactElement {
             <button
               type="button"
               className="btn-primary full-width"
-              onClick={manejarCerrarCaja}
+              onClick={() => void manejarCerrarCaja()}
             >
-              Cerrar Caja y Guardar Arqueo
+              Cerrar Caja y Guardar Arqueo en SQLite
             </button>
           )}
         </div>

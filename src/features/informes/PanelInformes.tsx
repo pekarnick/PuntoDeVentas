@@ -1,161 +1,114 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import type { InformeGestionFase1 } from '../../db/informes_repo.ts';
 import { formatearMonedaARS } from '../../domain/dinero.ts';
-import {
-  calcularBalanceSimplePeriodo,
-  calcularRentabilidadHistorica,
-  calcularStockValorizado,
-} from '../../domain/informes.ts';
-import { generarLibroXlsx } from '../../domain/xlsx.ts';
+import type { RolUsuario } from '../../domain/permisos.ts';
 
-export function PanelInformes(): React.ReactElement {
+export interface PanelInformesProps {
+  readonly rolActivo?: RolUsuario;
+}
+
+export function PanelInformes({
+  rolActivo = 'superadmin',
+}: PanelInformesProps): React.ReactElement {
   const [fechaDesde, setFechaDesde] = useState('2026-10-01');
-  const [fechaHasta, setFechaHasta] = useState('2026-10-19');
+  const [fechaHasta, setFechaHasta] = useState('2026-10-31');
+  const [informe, setInforme] = useState<InformeGestionFase1 | null>(null);
   const [mensajeExportacion, setMensajeExportacion] = useState<string | null>(
     null
   );
 
-  const rentabilidad = calcularRentabilidadHistorica([
-    {
-      producto_id: 'prod-yerba',
-      descripcion: 'Yerba Mate Selección 1kg',
-      cantidad: 18,
-      subtotal_venta: 18 * 420000,
-      costo_unitario_historico: 280000,
-    },
-    {
-      producto_id: 'prod-alfajor',
-      descripcion: 'Alfajor Triple Chocolate',
-      cantidad: 42,
-      subtotal_venta: 42 * 150000,
-      costo_unitario_historico: 85000,
-    },
-    {
-      producto_id: 'prod-pan',
-      descripcion: 'Pan Francés Fresco (kg)',
-      cantidad: 12.5,
-      subtotal_venta: Math.round(12.5 * 240000),
-      costo_unitario_historico: 130000,
-    },
-  ]);
-
-  const stockValorizado = calcularStockValorizado([
-    {
-      producto_id: 'prod-yerba',
-      nombre: 'Yerba Mate Selección 1kg',
-      stock_actual: 22,
-      stock_minimo: 10,
-      costo_compra: 280000,
-      precio_venta: 420000,
-    },
-    {
-      producto_id: 'prod-alfajor',
-      nombre: 'Alfajor Triple Chocolate',
-      stock_actual: 8,
-      stock_minimo: 15,
-      costo_compra: 85000,
-      precio_venta: 150000,
-    },
-    {
-      producto_id: 'prod-pan',
-      nombre: 'Pan Francés Fresco (kg)',
-      stock_actual: 14,
-      stock_minimo: 5,
-      costo_compra: 130000,
-      precio_venta: 240000,
-    },
-  ]);
-
-  const balance = calcularBalanceSimplePeriodo({
-    ventasNetasCentavos: rentabilidad.ventasTotalesCentavos,
-    costoMercaderiaVendidaCentavos: rentabilidad.costoMercaderiaVendidaCentavos,
-    egresosCajaCentavos: 250000,
-  });
-
-  function manejarExportarXlsx() {
-    const xlsxBytes = generarLibroXlsx([
-      {
-        nombre: 'Balance del Periodo',
-        encabezados: ['Concepto', 'Importe (ARS)'],
-        filas: [
-          ['Ventas Netas', formatearMonedaARS(balance.ventasNetasCentavos)],
-          [
-            'Costo de Mercadería Vendida (Histórico)',
-            formatearMonedaARS(balance.costoMercaderiaVendidaCentavos),
-          ],
-          ['Ganancia Bruta', formatearMonedaARS(balance.gananciaBrutaCentavos)],
-          [
-            'Egresos de Caja',
-            formatearMonedaARS(balance.egresosCajaCentavos),
-          ],
-          [
-            'Resultado Operativo Neto',
-            formatearMonedaARS(balance.resultadoNetoOperativoCentavos),
-          ],
-        ],
-      },
-      {
-        nombre: 'Ganancia y Ranking',
-        encabezados: [
-          'Producto',
-          'Unidades Vendidas',
-          'Ventas Netas',
-          'Costo Histórico (CMV)',
-          'Ganancia Bruta',
-          'Margen (%)',
-        ],
-        filas: rentabilidad.porProducto.map((p) => [
-          p.descripcion,
-          p.cantidad_vendida,
-          formatearMonedaARS(p.ventas_netas_centavos),
-          formatearMonedaARS(p.costo_historico_total_centavos),
-          formatearMonedaARS(p.ganancia_bruta_centavos),
-          p.margen_porcentaje,
-        ]),
-      },
-      {
-        nombre: 'Stock Valorizado',
-        encabezados: [
-          'Producto',
-          'Stock Actual',
-          'Stock Mínimo',
-          'Estado',
-          'Valorizado a Costo',
-          'Valorizado a Venta',
-        ],
-        filas: stockValorizado.items.map((s) => [
-          s.nombre,
-          s.stock_actual,
-          s.stock_minimo,
-          s.bajo_stock_minimo ? 'BAJO MÍNIMO' : 'OK',
-          formatearMonedaARS(s.valorizado_costo_centavos),
-          formatearMonedaARS(s.valorizado_venta_centavos),
-        ]),
-      },
-    ]);
-
-    if (typeof window !== 'undefined' && typeof URL.createObjectURL === 'function') {
-      const blob = new Blob([xlsxBytes.buffer as ArrayBuffer], {
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `informes-gestion-${fechaDesde}-a-${fechaHasta}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(url);
+  async function cargarInformes() {
+    try {
+      const data = await invocarPosApi<InformeGestionFase1>(
+        'obtener_informes_fase1',
+        {
+          rolActivo,
+          fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
+          fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
+        }
+      );
+      setInforme(data);
+    } catch {
+      // Fallback
     }
-
-    setMensajeExportacion(
-      `Archivo Excel (.xlsx, ${xlsxBytes.byteLength} bytes) generado y registrado en la auditoría.`
-    );
   }
+
+  useEffect(() => {
+    void cargarInformes();
+  }, [rolActivo, fechaDesde, fechaHasta]);
+
+  async function manejarExportarXlsx() {
+    try {
+      const res = await invocarPosApi<{
+        xlsxBase64: string;
+        bytesLength: number;
+        informe: InformeGestionFase1;
+      }>('exportar_informes_xlsx', {
+        rolActivo,
+        fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
+        fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
+      });
+
+      setInforme(res.informe);
+
+      if (
+        typeof window !== 'undefined' &&
+        typeof URL.createObjectURL === 'function'
+      ) {
+        const binario = atob(res.xlsxBase64);
+        const bytes = new Uint8Array(binario.length);
+        for (let i = 0; i < binario.length; i++) {
+          bytes[i] = binario.charCodeAt(i);
+        }
+        const blob = new Blob([bytes.buffer], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `informes-gestion-${fechaDesde}-a-${fechaHasta}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      setMensajeExportacion(
+        `Archivo Excel (.xlsx, ${res.bytesLength} bytes) descargado y registrado en la auditoría de SQLite.`
+      );
+    } catch {
+      // Fallback
+    }
+  }
+
+  const balance = informe?.balancePeriodo ?? {
+    ventasNetasCentavos: 0,
+    costoMercaderiaVendidaCentavos: 0,
+    gananciaBrutaCentavos: 0,
+    egresosCajaCentavos: 0,
+    resultadoNetoOperativoCentavos: 0,
+  };
+
+  const rentabilidad = informe?.rentabilidad ?? {
+    porProducto: [],
+    ventasTotalesCentavos: 0,
+    costoMercaderiaVendidaCentavos: 0,
+    gananciaBrutaTotalCentavos: 0,
+    margenPromedioPorcentaje: 0,
+  };
+
+  const stockValorizado = informe?.stockValorizado ?? {
+    items: [],
+    cantidadProductosBajoMinimo: 0,
+    totalValorizadoCostoCentavos: 0,
+    totalValorizadoVentaCentavos: 0,
+  };
 
   return (
     <section className="pos-venta-wrapper">
       <div className="pos-card">
         <div className="card-header">
           <div>
-            <h2>Informes de Gestión (Superadmin y Encargado)</h2>
+            <h2>Informes de Gestión en Vivo desde SQLite (Superadmin y Encargado)</h2>
             <p className="text-muted">
               Ganancia bruta calculada con el costo histórico copiado en cada venta y stock valorizado.
             </p>
@@ -180,7 +133,7 @@ export function PanelInformes(): React.ReactElement {
             <button
               type="button"
               className="btn-primary"
-              onClick={manejarExportarXlsx}
+              onClick={() => void manejarExportarXlsx()}
             >
               Exportar Informes a Excel (.xlsx)
             </button>
@@ -205,7 +158,9 @@ export function PanelInformes(): React.ReactElement {
               </strong>
             </div>
             <div className="arqueo-line">
-              <span>Ganancia bruta ({rentabilidad.margenPromedioPorcentaje}%):</span>
+              <span>
+                Ganancia bruta ({rentabilidad.margenPromedioPorcentaje}%):
+              </span>
               <strong className="diff-positiva">
                 {formatearMonedaARS(balance.gananciaBrutaCentavos)}
               </strong>
@@ -273,24 +228,32 @@ export function PanelInformes(): React.ReactElement {
               </tr>
             </thead>
             <tbody>
-              {rentabilidad.porProducto.map((p) => (
-                <tr key={p.producto_id}>
-                  <td>{p.descripcion}</td>
-                  <td className="num">{p.cantidad_vendida}</td>
-                  <td className="num">
-                    {formatearMonedaARS(p.ventas_netas_centavos)}
+              {rentabilidad.porProducto.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="text-muted">
+                    Todavía no hay ventas completadas en el rango seleccionado.
                   </td>
-                  <td className="num">
-                    {formatearMonedaARS(p.costo_historico_total_centavos)}
-                  </td>
-                  <td className="num">
-                    <strong>
-                      {formatearMonedaARS(p.ganancia_bruta_centavos)}
-                    </strong>
-                  </td>
-                  <td className="num">{p.margen_porcentaje}%</td>
                 </tr>
-              ))}
+              ) : (
+                rentabilidad.porProducto.map((p) => (
+                  <tr key={p.producto_id}>
+                    <td>{p.descripcion}</td>
+                    <td className="num">{p.cantidad_vendida}</td>
+                    <td className="num">
+                      {formatearMonedaARS(p.ventas_netas_centavos)}
+                    </td>
+                    <td className="num">
+                      {formatearMonedaARS(p.costo_historico_total_centavos)}
+                    </td>
+                    <td className="num">
+                      <strong>
+                        {formatearMonedaARS(p.ganancia_bruta_centavos)}
+                      </strong>
+                    </td>
+                    <td className="num">{p.margen_porcentaje}%</td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>

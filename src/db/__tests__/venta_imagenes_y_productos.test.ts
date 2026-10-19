@@ -10,10 +10,12 @@ import {
   agregarProductoAlCarrito,
   calcularResumenCarritoPOS,
   detectarEscaneoRafaga,
+  filtrarSugerenciasCatalogoPOS,
   formatearTicketNoFiscalTexto,
   resolverAtajoTecladoPOS,
   sanitizarProductoCatalogoParaPOS,
 } from '../../domain/index.ts';
+import { ejecutarAccionPosLocal } from '../servidor_local_dev.ts';
 import { PanelProductosStock } from '../../features/productos/PanelProductosStock.tsx';
 import { PanelVentaPOS } from '../../features/venta/PanelVentaPOS.tsx';
 import {
@@ -382,5 +384,78 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
     );
     expect(htmlProductosEncargado).toContain('Costo Compra');
     expect(htmlProductosEncargado).toContain('$ 2.800,00');
+  });
+
+  it('filtra sugerencias del desplegable por nombre o código y persiste cambios reales en archivo SQLite en disco', () => {
+    const dirTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-db-disco-'));
+    const rutaDbPrueba = path.join(dirTemp, 'pos_local_test.db');
+
+    try {
+      const estadoInicial = ejecutarAccionPosLocal(
+        'obtener_estado_inicial',
+        { rolActivo: 'superadmin' },
+        rutaDbPrueba
+      ) as {
+        rutaBaseDatos: string;
+        catalogoVenta: Array<{
+          id: string;
+          nombre: string;
+          codigos_barras: string[];
+          unidad: 'unidad' | 'kg' | 'm' | 'l' | 'caja';
+          permite_decimales: boolean;
+          precio_venta: number;
+          alicuota_iva: 0 | 10.5 | 21 | 27;
+          exento_iva: boolean;
+          stock_actual: number;
+        }>;
+      };
+
+      expect(fs.existsSync(rutaDbPrueba)).toBe(true);
+      expect(estadoInicial.catalogoVenta.length).toBeGreaterThanOrEqual(5);
+
+      // Probar el filtro del desplegable de sugerencias buscando por palabras parciales del nombre
+      const sugerenciasAlfajor = filtrarSugerenciasCatalogoPOS(
+        estadoInicial.catalogoVenta,
+        'alfajor choc'
+      );
+      expect(sugerenciasAlfajor).toHaveLength(1);
+      expect(sugerenciasAlfajor[0]?.nombre).toBe('Alfajor Triple Chocolate');
+
+      // Crear un producto nuevo mediante el servicio persistente y verificar que queda guardado en el archivo
+      const creado = ejecutarAccionPosLocal(
+        'crear_producto',
+        {
+          rolActivo: 'encargado',
+          nombre: 'Pila Alcalina AA x2',
+          codigoInterno: 'PIL-AA',
+          costoCompraCentavos: 120000,
+          precioVentaCentavos: 210000,
+          codigosBarras: ['7798888777766'],
+          stockInicial: 40,
+        },
+        rutaDbPrueba
+      ) as { productoId: string };
+
+      const estadoPosterior = ejecutarAccionPosLocal(
+        'obtener_estado_inicial',
+        { rolActivo: 'cajero' },
+        rutaDbPrueba
+      ) as {
+        catalogoVenta: Array<{ id: string; nombre: string; stock_actual: number }>;
+      };
+
+      const pilaEnCatalogo = estadoPosterior.catalogoVenta.find(
+        (p) => p.id === creado.productoId
+      );
+      expect(pilaEnCatalogo?.nombre).toBe('Pila Alcalina AA x2');
+      expect(pilaEnCatalogo?.stock_actual).toBe(40);
+    } finally {
+      // No borramos la conexión abierta en Windows, o ignoramos EBUSY al limpiar temp
+      try {
+        fs.rmSync(dirTemp, { recursive: true, force: true });
+      } catch {
+        // En Windows el archivo .db abierto puede seguir bloqueado hasta cerrar el proceso
+      }
+    }
   });
 });

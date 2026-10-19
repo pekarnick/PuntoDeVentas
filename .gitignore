@@ -11,6 +11,7 @@ src-tauri/target/
 src-tauri/gen/schemas/
 
 # Bases de datos locales e imágenes de desarrollo
+data/
 *.db
 *.db-shm
 *.db-wal

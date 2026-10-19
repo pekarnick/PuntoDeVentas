@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   formatearMonedaARS,
   pesosACentavos,
@@ -10,6 +11,7 @@ import {
   aplicarDescuentoItemEnCarrito,
   calcularResumenCarritoPOS,
   detectarEscaneoRafaga,
+  filtrarSugerenciasCatalogoPOS,
   resolverAtajoTecladoPOS,
   sanitizarProductoCatalogoParaPOS,
   type EventoTeclaLector,
@@ -24,16 +26,28 @@ import {
 import {
   construirDatosTicketSeguro,
   formatearTicketNoFiscalTexto,
+  type DatosTicketNoFiscal,
 } from '../../domain/ticket.ts';
 import { validarPagosVenta, type MedioPago } from '../../domain/totales.ts';
+
+export interface VentaRecienteResumenUI {
+  readonly id: string;
+  readonly fecha: string;
+  readonly total: Centavos;
+  readonly estado: 'completada' | 'anulada';
+  readonly motivo_anulacion?: string | null;
+  readonly autorizada_por_nombre?: string | null;
+}
 
 export interface PanelVentaPOSProps {
   readonly rolActivo: RolUsuario;
   readonly operadorNombre: string;
   readonly catalogoInicial?: readonly ProductoCatalogoVenta[];
+  readonly ventasRecientesIniciales?: readonly VentaRecienteResumenUI[];
+  readonly onDatosActualizados?: () => void;
 }
 
-const CATALOGO_DEMO_INICIAL: ProductoCatalogoVenta[] = [
+const CATALOGO_FALLBACK_TESTS: ProductoCatalogoVenta[] = [
   sanitizarProductoCatalogoParaPOS({
     id: 'prod-yerba',
     nombre: 'Yerba Mate Selección 1kg',
@@ -41,11 +55,12 @@ const CATALOGO_DEMO_INICIAL: ProductoCatalogoVenta[] = [
     codigos_barras: ['7791234560012', '7791234560019'],
     unidad: 'unidad',
     permite_decimales: false,
-    precio_venta: 420000, // $ 4.200,00
-    costo_compra: 280000, // Eliminado automáticamente por sanitizarProductoCatalogoParaPOS (Regla 20)
+    precio_venta: 420000,
+    costo_compra: 280000,
     alicuota_iva: 21,
     exento_iva: false,
     boton_rapido: false,
+    stock_actual: 25,
   }),
   sanitizarProductoCatalogoParaPOS({
     id: 'prod-alfajor',
@@ -54,11 +69,12 @@ const CATALOGO_DEMO_INICIAL: ProductoCatalogoVenta[] = [
     codigos_barras: ['7790001112223'],
     unidad: 'unidad',
     permite_decimales: false,
-    precio_venta: 150000, // $ 1.500,00
+    precio_venta: 150000,
     costo_compra: 85000,
     alicuota_iva: 21,
     exento_iva: false,
     boton_rapido: true,
+    stock_actual: 30,
   }),
   sanitizarProductoCatalogoParaPOS({
     id: 'prod-pan',
@@ -67,11 +83,12 @@ const CATALOGO_DEMO_INICIAL: ProductoCatalogoVenta[] = [
     codigos_barras: ['200001'],
     unidad: 'kg',
     permite_decimales: true,
-    precio_venta: 240000, // $ 2.400,00 / kg
+    precio_venta: 240000,
     costo_compra: 130000,
     alicuota_iva: 10.5,
     exento_iva: false,
     boton_rapido: true,
+    stock_actual: 18,
   }),
   sanitizarProductoCatalogoParaPOS({
     id: 'prod-bolsa',
@@ -80,35 +97,34 @@ const CATALOGO_DEMO_INICIAL: ProductoCatalogoVenta[] = [
     codigos_barras: [],
     unidad: 'unidad',
     permite_decimales: false,
-    precio_venta: 60000, // $ 600,00
+    precio_venta: 60000,
     costo_compra: 25000,
     alicuota_iva: 21,
     exento_iva: false,
     boton_rapido: true,
+    stock_actual: 50,
   }),
 ];
-
-interface VentaRecienteUI {
-  readonly id: string;
-  readonly fechaIso: string;
-  readonly total: Centavos;
-  readonly estado: 'completada' | 'anulada';
-  readonly ticketTexto: string;
-  readonly motivoAnulacion?: string;
-  readonly autorizadaPor?: string;
-}
 
 export function PanelVentaPOS({
   rolActivo,
   operadorNombre,
-  catalogoInicial = CATALOGO_DEMO_INICIAL,
+  catalogoInicial = CATALOGO_FALLBACK_TESTS,
+  ventasRecientesIniciales = [],
+  onDatosActualizados,
 }: PanelVentaPOSProps): React.ReactElement {
   const [catalogo, setCatalogo] = useState<ProductoCatalogoVenta[]>(() =>
     catalogoInicial.map((p) => sanitizarProductoCatalogoParaPOS(p))
   );
   const [carrito, setCarrito] = useState<ItemCarritoPOS[]>([]);
   const [entradaLector, setEntradaLector] = useState('');
+  const [indiceSugerenciaActiva, setIndiceSugerenciaActiva] = useState(0);
+  const [desplegableAbierto, setDesplegableAbierto] = useState(true);
   const [descuentoGlobalInput, setDescuentoGlobalInput] = useState('0,00');
+
+  useEffect(() => {
+    setCatalogo(catalogoInicial.map((p) => sanitizarProductoCatalogoParaPOS(p)));
+  }, [catalogoInicial]);
 
   // Pagos mixtos
   const [medioPrincipal, setMedioPrincipal] = useState<MedioPago>('efectivo');
@@ -129,10 +145,16 @@ export function PanelVentaPOS({
   const [ultimoTicketTexto, setUltimoTicketTexto] = useState<string | null>(
     null
   );
-  const [ventasSesion, setVentasSesion] = useState<VentaRecienteUI[]>([]);
+  const [ventasSesion, setVentasSesion] = useState<VentaRecienteResumenUI[]>(
+    () => [...ventasRecientesIniciales]
+  );
+  useEffect(() => {
+    setVentasSesion([...ventasRecientesIniciales]);
+  }, [ventasRecientesIniciales]);
+
   const [ventaAAnularId, setVentaAAnularId] = useState<string | null>(null);
   const [motivoAnulacion, setMotivoAnulacion] = useState('');
-  const [autorizadorUsuario, setAutorizadorUsuario] = useState('');
+  const [autorizadorUsuario, setAutorizadorUsuario] = useState('carlos');
   const [autorizadorClave, setAutorizadorClave] = useState('');
 
   const [mensajeEstado, setMensajeEstado] = useState<string | null>(null);
@@ -146,6 +168,12 @@ export function PanelVentaPOS({
     'abm_productos_precios_stock_compras'
   );
   const cajeroRequiereAutorizacion = requiereAutorizacionParaAnular(rolActivo);
+
+  // Sugerencias en vivo a medida que el vendedor escribe nombre o código
+  const sugerencias = useMemo(
+    () => filtrarSugerenciasCatalogoPOS(catalogo, entradaLector, 8),
+    [catalogo, entradaLector]
+  );
 
   let descuentoGlobalCentavos = 0;
   try {
@@ -167,6 +195,24 @@ export function PanelVentaPOS({
     enfocarEntradaLector();
   }, []);
 
+  function seleccionarProductoParaCarrito(
+    prod: ProductoCatalogoVenta,
+    etiquetaOrigen: string
+  ) {
+    setMensajeError(null);
+    setCodigoInexistenteDetectado(null);
+    setCarrito((prev) =>
+      agregarProductoAlCarrito(prev, prod, prod.permite_decimales ? 0.5 : 1)
+    );
+    setEntradaLector('');
+    setIndiceSugerenciaActiva(0);
+    setDesplegableAbierto(false);
+    setMensajeEstado(
+      `${etiquetaOrigen} Agregado: ${prod.nombre} (${formatearMonedaARS(prod.precio_venta)})`
+    );
+    enfocarEntradaLector();
+  }
+
   function procesarEntradaCodigoOBusqueda(textoRaw: string, fueRafaga: boolean) {
     setMensajeError(null);
     setMensajeEstado(null);
@@ -178,39 +224,66 @@ export function PanelVentaPOS({
     // 1. Buscar coincidencia exacta por código de barras o código interno
     const porCodigo = catalogo.find(
       (p) =>
-        p.codigos_barras.includes(texto) ||
+        p.codigos_barras.some(
+          (cb) => cb.toLowerCase() === texto.toLowerCase()
+        ) ||
         (p.codigo_interno &&
           p.codigo_interno.toLowerCase() === texto.toLowerCase())
     );
 
     if (porCodigo) {
-      setCarrito((prev) => agregarProductoAlCarrito(prev, porCodigo, 1));
-      setEntradaLector('');
-      setMensajeEstado(
-        `${fueRafaga ? '[Escáner]' : '[Código]'} Agregado: ${porCodigo.nombre} (${formatearMonedaARS(porCodigo.precio_venta)})`
+      seleccionarProductoParaCarrito(
+        porCodigo,
+        fueRafaga ? '[Escáner]' : '[Código]'
       );
       return;
     }
 
-    // 2. Si no fue ráfaga pura de dígitos, buscar por coincidencia de nombre
-    const porNombre = catalogo.filter((p) =>
-      p.nombre.toLowerCase().includes(texto.toLowerCase())
-    );
-
-    if (porNombre.length === 1 && porNombre[0]) {
-      setCarrito((prev) => agregarProductoAlCarrito(prev, porNombre[0]!, 1));
-      setEntradaLector('');
-      setMensajeEstado(`Agregado: ${porNombre[0].nombre}`);
-      return;
+    // 2. Si hay sugerencias en el desplegable, Enter selecciona la opción resaltada actualmente
+    if (sugerencias.length > 0) {
+      const indiceSeguro = Math.min(
+        Math.max(0, indiceSugerenciaActiva),
+        sugerencias.length - 1
+      );
+      const prodElegido = sugerencias[indiceSeguro];
+      if (prodElegido) {
+        seleccionarProductoParaCarrito(prodElegido, '[Buscador]');
+        return;
+      }
     }
 
-    // 3. Código inexistente: ofrecer crearlo sin salir de la venta si es superadmin o encargado (PLAN.md §9)
+    // 3. Código o producto inexistente: ofrecer crearlo sin salir de la venta si es superadmin o encargado (PLAN.md §9)
     setCodigoInexistenteDetectado(texto);
     setEntradaLector('');
   }
 
   function manejarKeyDownLector(e: React.KeyboardEvent<HTMLInputElement>) {
     const ahora = performance.now();
+
+    if (e.key === 'ArrowDown' && sugerencias.length > 0) {
+      e.preventDefault();
+      setDesplegableAbierto(true);
+      setIndiceSugerenciaActiva((prev) => (prev + 1) % sugerencias.length);
+      return;
+    }
+
+    if (e.key === 'ArrowUp' && sugerencias.length > 0) {
+      e.preventDefault();
+      setDesplegableAbierto(true);
+      setIndiceSugerenciaActiva(
+        (prev) => (prev - 1 + sugerencias.length) % sugerencias.length
+      );
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      if (desplegableAbierto && sugerencias.length > 0) {
+        e.preventDefault();
+        setDesplegableAbierto(false);
+        return;
+      }
+    }
+
     if (e.key === 'Enter') {
       e.preventDefault();
       const infoRafaga = detectarEscaneoRafaga(bufferTeclasRef.current);
@@ -239,7 +312,7 @@ export function PanelVentaPOS({
       case 'CONFIRMAR_COBRO_RAPIDO_EFECTIVO':
         e.preventDefault();
         if (carrito.length > 0) {
-          confirmarCobroVenta();
+          void confirmarCobroVenta();
         }
         break;
       case 'ABRIR_MODAL_PAGOS_MIXTOS':
@@ -275,6 +348,7 @@ export function PanelVentaPOS({
       case 'VACIAR_O_CANCELAR':
         setCodigoInexistenteDetectado(null);
         setVentaAAnularId(null);
+        setDesplegableAbierto(false);
         enfocarEntradaLector();
         break;
       default:
@@ -282,7 +356,7 @@ export function PanelVentaPOS({
     }
   }
 
-  function manejarCrearProductoDesdeEscaneo(e: React.FormEvent) {
+  async function manejarCrearProductoDesdeEscaneo(e: React.FormEvent) {
     e.preventDefault();
     if (!codigoInexistenteDetectado || !puedeCrearProductoRapido) return;
     setMensajeError(null);
@@ -300,8 +374,17 @@ export function PanelVentaPOS({
         throw new Error('Verificá los importes ingresados.');
       }
 
+      const res = await invocarPosApi<{ productoId: string }>('crear_producto', {
+        rolActivo,
+        nombre: altaRapidaNombre.trim(),
+        costoCompraCentavos: costoCompra,
+        precioVentaCentavos: precioVenta,
+        codigosBarras: [codigoInexistenteDetectado],
+        stockInicial: 10,
+      });
+
       const nuevoProd = sanitizarProductoCatalogoParaPOS({
-        id: `prod-${Date.now()}`,
+        id: res.productoId,
         nombre: altaRapidaNombre.trim(),
         codigo_interno: null,
         codigos_barras: [codigoInexistenteDetectado],
@@ -312,6 +395,7 @@ export function PanelVentaPOS({
         alicuota_iva: 21,
         exento_iva: false,
         boton_rapido: false,
+        stock_actual: 10,
       });
 
       setCatalogo((prev) => [...prev, nuevoProd]);
@@ -321,8 +405,9 @@ export function PanelVentaPOS({
       setAltaRapidaPrecioInput('');
       setAltaRapidaCostoInput('');
       setMensajeEstado(
-        `Producto "${nuevoProd.nombre}" creado y agregado a la venta actual.`
+        `Producto "${nuevoProd.nombre}" guardado en SQLite y agregado al carrito.`
       );
+      onDatosActualizados?.();
       enfocarEntradaLector();
     } catch (err) {
       setMensajeError(
@@ -331,7 +416,7 @@ export function PanelVentaPOS({
     }
   }
 
-  function confirmarCobroVenta() {
+  async function confirmarCobroVenta() {
     setMensajeError(null);
     setMensajeEstado(null);
 
@@ -355,42 +440,56 @@ export function PanelVentaPOS({
 
       validarPagosVenta(pagos, resumen.total);
 
-      const ventaId = `vta-${Date.now()}`;
-      const fechaIso = new Date().toISOString();
-
-      const datosTicket = construirDatosTicketSeguro({
-        comercioNombre: 'Comercio Local POS',
-        comercioCondicionIva: 'Monotributo',
-        ventaId,
-        fechaIso,
-        cajeroNombre: operadorNombre,
-        items: resumen.items,
-        subtotal: resumen.subtotal,
-        descuentoGlobal: resumen.descuento_global,
-        total: resumen.total,
+      const respuesta = await invocarPosApi<{
+        ventaId: string;
+        totalCentavos: Centavos;
+        datosTicket: DatosTicketNoFiscal;
+      }>('registrar_venta', {
+        rolActivo,
+        items: carrito.map((it) => ({
+          productoId: it.producto_id,
+          cantidad: it.cantidad,
+          descuentoCentavos: it.descuento,
+        })),
+        descuentoGlobalCentavos: resumen.descuento_global,
         pagos,
       });
 
-      const ticketTexto = formatearTicketNoFiscalTexto(datosTicket);
+      const datosTicketSeguro = construirDatosTicketSeguro({
+        comercioNombre: respuesta.datosTicket.comercioNombre,
+        comercioCuit: respuesta.datosTicket.comercioCuit,
+        comercioDomicilio: respuesta.datosTicket.comercioDomicilio,
+        comercioCondicionIva: respuesta.datosTicket.comercioCondicionIva,
+        ventaId: respuesta.datosTicket.ventaId,
+        fechaIso: respuesta.datosTicket.fechaIso,
+        cajeroNombre: respuesta.datosTicket.cajeroNombre,
+        clienteNombre: respuesta.datosTicket.clienteNombre,
+        items: respuesta.datosTicket.items.map((it) => ({
+          producto_id: '',
+          descripcion: it.descripcion,
+          cantidad: it.cantidad,
+          precio_unitario: it.precio_unitario,
+          descuento: it.descuento,
+          subtotal: it.subtotal,
+          alicuota_iva: 21,
+        })),
+        subtotal: respuesta.datosTicket.subtotal,
+        descuentoGlobal: respuesta.datosTicket.descuentoGlobal,
+        total: respuesta.datosTicket.total,
+        pagos: respuesta.datosTicket.pagos,
+      });
+
+      const ticketTexto = formatearTicketNoFiscalTexto(datosTicketSeguro);
       setUltimoTicketTexto(ticketTexto);
-      setVentasSesion((prev) => [
-        {
-          id: ventaId,
-          fechaIso,
-          total: resumen.total,
-          estado: 'completada',
-          ticketTexto,
-        },
-        ...prev,
-      ]);
 
       setCarrito([]);
       setDescuentoGlobalInput('0,00');
       setMontoEfectivoMixtoInput('');
       setModoPagoMixto(false);
       setMensajeEstado(
-        `Venta registrada por ${formatearMonedaARS(resumen.total)}. Stock descontado y auditado.`
+        `Venta #${respuesta.ventaId.slice(-6)} guardada en SQLite por ${formatearMonedaARS(respuesta.totalCentavos)}. Stock descontado y auditado.`
       );
+      onDatosActualizados?.();
       enfocarEntradaLector();
     } catch (err) {
       setMensajeError(
@@ -399,7 +498,7 @@ export function PanelVentaPOS({
     }
   }
 
-  function manejarConfirmarAnulacion(e: React.FormEvent) {
+  async function manejarConfirmarAnulacion(e: React.FormEvent) {
     e.preventDefault();
     if (!ventaAAnularId) return;
     setMensajeError(null);
@@ -409,40 +508,35 @@ export function PanelVentaPOS({
       return;
     }
 
-    if (cajeroRequiereAutorizacion) {
-      if (!autorizadorUsuario.trim() || !autorizadorClave.trim()) {
-        setMensajeError(
-          'Como cajero necesitás el usuario y clave de un encargado o superadmin para autorizar la anulación.'
-        );
-        return;
-      }
+    if (cajeroRequiereAutorizacion && !autorizadorUsuario.trim()) {
+      setMensajeError(
+        'Como cajero necesitás indicar el usuario de un encargado o superadmin para autorizar la anulación.'
+      );
+      return;
     }
 
-    const autorizadorFinal = cajeroRequiereAutorizacion
-      ? autorizadorUsuario.trim()
-      : operadorNombre;
+    try {
+      await invocarPosApi('anular_venta', {
+        rolActivo,
+        ventaId: ventaAAnularId,
+        motivo: motivoAnulacion.trim(),
+        autorizadorUsuario: autorizadorUsuario.trim(),
+        autorizadorClave,
+      });
 
-    setVentasSesion((prev) =>
-      prev.map((v) =>
-        v.id === ventaAAnularId
-          ? {
-              ...v,
-              estado: 'anulada',
-              motivoAnulacion: motivoAnulacion.trim(),
-              autorizadaPor: autorizadorFinal,
-            }
-          : v
-      )
-    );
-
-    setVentaAAnularId(null);
-    setMotivoAnulacion('');
-    setAutorizadorUsuario('');
-    setAutorizadorClave('');
-    setMensajeEstado(
-      `Venta anulada con éxito. Stock devuelto y rastro registrado en auditoría (autorizó: ${autorizadorFinal}).`
-    );
-    enfocarEntradaLector();
+      setVentaAAnularId(null);
+      setMotivoAnulacion('');
+      setAutorizadorClave('');
+      setMensajeEstado(
+        'Venta anulada en SQLite. Stock devuelto y rastro registrado en auditoría.'
+      );
+      onDatosActualizados?.();
+      enfocarEntradaLector();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo anular la venta.'
+      );
+    }
   }
 
   return (
@@ -453,7 +547,13 @@ export function PanelVentaPOS({
     >
       <div className="shortcuts-bar" aria-label="Atajos de teclado de caja">
         <span>
+          <strong>Operador:</strong> {operadorNombre}
+        </span>
+        <span>
           <kbd>F2</kbd> Enfocar lector/búsqueda
+        </span>
+        <span>
+          <kbd>↑</kbd>/<kbd>↓</kbd> + <kbd>Enter</kbd> Elegir del desplegable
         </span>
         <span>
           <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> Cantidad
@@ -465,7 +565,7 @@ export function PanelVentaPOS({
           <kbd>F4</kbd> Cobrar ahora
         </span>
         <span>
-          <kbd>Esc</kbd> Cancelar/Limpiar
+          <kbd>Esc</kbd> Cerrar/Limpiar
         </span>
       </div>
 
@@ -476,29 +576,101 @@ export function PanelVentaPOS({
         <div className="pos-card">
           <div className="scanner-box">
             <label htmlFor="input-lector-barras">
-              Lector de códigos de barras o búsqueda por nombre (<kbd>F2</kbd>):
+              Lector de códigos de barras o buscador por nombre (<kbd>F2</kbd>):
             </label>
-            <div className="form-row">
-              <input
-                id="input-lector-barras"
-                ref={inputLectorRef}
-                type="text"
-                className="scanner-input"
-                value={entradaLector}
-                onChange={(e) => setEntradaLector(e.target.value)}
-                onKeyDown={manejarKeyDownLector}
-                placeholder="Escaneá el código o escribí nombre y presioná Enter..."
-                autoFocus
-              />
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() =>
-                  procesarEntradaCodigoOBusqueda(entradaLector, false)
-                }
-              >
-                Agregar (Enter)
-              </button>
+            <div className="autocomplete-container">
+              <div className="form-row">
+                <input
+                  id="input-lector-barras"
+                  ref={inputLectorRef}
+                  type="text"
+                  className="scanner-input"
+                  value={entradaLector}
+                  onChange={(e) => {
+                    setEntradaLector(e.target.value);
+                    setIndiceSugerenciaActiva(0);
+                    setDesplegableAbierto(true);
+                  }}
+                  onFocus={() => setDesplegableAbierto(true)}
+                  onKeyDown={manejarKeyDownLector}
+                  placeholder="Escaneá un código o escribí el nombre del producto (ej. yerba, alfajor, pan)..."
+                  autoComplete="off"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() =>
+                    procesarEntradaCodigoOBusqueda(entradaLector, false)
+                  }
+                >
+                  Agregar (Enter)
+                </button>
+              </div>
+
+              {desplegableAbierto &&
+                entradaLector.trim().length > 0 &&
+                sugerencias.length > 0 && (
+                  <ul
+                    className="autocomplete-dropdown"
+                    role="listbox"
+                    aria-label="Productos coincidentes"
+                  >
+                    {sugerencias.map((prod, idx) => {
+                      const esActiva = idx === indiceSugerenciaActiva;
+                      return (
+                        <li
+                          key={prod.id}
+                          role="option"
+                          aria-selected={esActiva}
+                          className={
+                            esActiva
+                              ? 'autocomplete-item active'
+                              : 'autocomplete-item'
+                          }
+                          onMouseEnter={() => setIndiceSugerenciaActiva(idx)}
+                          onMouseDown={(e) => {
+                            // onMouseDown evita que el input pierda foco antes de agregar el producto
+                            e.preventDefault();
+                            seleccionarProductoParaCarrito(prod, '[Desplegable]');
+                          }}
+                        >
+                          <div className="autocomplete-main">
+                            <strong>{prod.nombre}</strong>
+                            <span className="autocomplete-codes">
+                              {prod.codigo_interno
+                                ? `${prod.codigo_interno} · `
+                                : ''}
+                              {prod.codigos_barras.length > 0
+                                ? prod.codigos_barras.join(', ')
+                                : 'Sin código EAN'}
+                            </span>
+                          </div>
+                          <div className="autocomplete-meta">
+                            {prod.stock_actual !== undefined && (
+                              <span className="badge-rol">
+                                Stock: {prod.stock_actual} {prod.unidad}
+                              </span>
+                            )}
+                            <strong className="autocomplete-price">
+                              {formatearMonedaARS(prod.precio_venta)}
+                            </strong>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+
+              {desplegableAbierto &&
+                entradaLector.trim().length > 0 &&
+                sugerencias.length === 0 && (
+                  <div className="autocomplete-empty">
+                    No hay productos cargados que coincidan con "
+                    <strong>{entradaLector.trim()}</strong>". Presioná{' '}
+                    <kbd>Enter</kbd> para darlo de alta rápido.
+                  </div>
+                )}
             </div>
           </div>
 
@@ -506,12 +678,13 @@ export function PanelVentaPOS({
             <div className="alert-info">
               <p>
                 <strong>
-                  El código "{codigoInexistenteDetectado}" no está registrado.
+                  El código o producto "{codigoInexistenteDetectado}" no está
+                  registrado.
                 </strong>
               </p>
               {puedeCrearProductoRapido ? (
                 <form
-                  onSubmit={manejarCrearProductoDesdeEscaneo}
+                  onSubmit={(e) => void manejarCrearProductoDesdeEscaneo(e)}
                   className="form-row"
                 >
                   <label>
@@ -542,7 +715,7 @@ export function PanelVentaPOS({
                     />
                   </label>
                   <button type="submit" className="btn-primary">
-                    Crear con este código y agregar al carrito
+                    Crear en SQLite y agregar al carrito
                   </button>
                 </form>
               ) : (
@@ -561,16 +734,9 @@ export function PanelVentaPOS({
                   key={prod.id}
                   type="button"
                   className="btn-secondary quick-btn"
-                  onClick={() => {
-                    setCarrito((prev) =>
-                      agregarProductoAlCarrito(
-                        prev,
-                        prod,
-                        prod.permite_decimales ? 0.5 : 1
-                      )
-                    );
-                    enfocarEntradaLector();
-                  }}
+                  onClick={() =>
+                    seleccionarProductoParaCarrito(prod, '[Botón rápido]')
+                  }
                 >
                   <span>{prod.nombre}</span>
                   <strong>{formatearMonedaARS(prod.precio_venta)}</strong>
@@ -595,7 +761,7 @@ export function PanelVentaPOS({
               {carrito.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="text-muted">
-                    Escaneá un producto o elegí un botón rápido para comenzar.
+                    Escaneá un producto, buscalo por nombre en el desplegable o elegí un botón rápido.
                   </td>
                 </tr>
               ) : (
@@ -643,7 +809,7 @@ export function PanelVentaPOS({
                               )
                             );
                           } catch {
-                            // Ignorar formato inválido hasta corregir
+                            // Ignorar formato inválido
                           }
                         }}
                       />
@@ -762,15 +928,18 @@ export function PanelVentaPOS({
             <button
               type="button"
               className="btn-primary full-width"
-              onClick={confirmarCobroVenta}
+              onClick={() => void confirmarCobroVenta()}
               disabled={carrito.length === 0}
             >
-              Confirmar Venta y Emitir Ticket (F4)
+              Confirmar Venta y Guardar en SQLite (F4)
             </button>
           </div>
 
           {ultimoTicketTexto && (
-            <div className="ticket-preview" aria-label="Vista previa de ticket no fiscal">
+            <div
+              className="ticket-preview"
+              aria-label="Vista previa de ticket no fiscal"
+            >
               <h3>Ticket No Fiscal Emitido</h3>
               <pre>{ultimoTicketTexto}</pre>
             </div>
@@ -778,7 +947,7 @@ export function PanelVentaPOS({
 
           {ventasSesion.length > 0 && (
             <div>
-              <h3>Ventas recientes del turno (Anulación auditable)</h3>
+              <h3>Ventas guardadas en base local (Anulación auditable)</h3>
               <table className="data-table">
                 <thead>
                   <tr>
@@ -798,7 +967,7 @@ export function PanelVentaPOS({
                       <td>
                         {v.estado === 'completada'
                           ? 'Completada'
-                          : `Anulada (${v.motivoAnulacion})`}
+                          : `Anulada (${v.motivo_anulacion ?? 'Sin motivo'})`}
                       </td>
                       <td>
                         {v.estado === 'completada' && (
@@ -819,7 +988,10 @@ export function PanelVentaPOS({
           )}
 
           {ventaAAnularId && (
-            <form onSubmit={manejarConfirmarAnulacion} className="form-stack">
+            <form
+              onSubmit={(e) => void manejarConfirmarAnulacion(e)}
+              className="form-stack"
+            >
               <h3>
                 Anular venta #{ventaAAnularId.slice(-6)}{' '}
                 {cajeroRequiereAutorizacion &&
@@ -837,21 +1009,12 @@ export function PanelVentaPOS({
               {cajeroRequiereAutorizacion && (
                 <div className="form-row">
                   <label>
-                    Usuario autorizador:
+                    Usuario autorizador (ej. carlos o maria):
                     <input
                       type="text"
                       value={autorizadorUsuario}
                       onChange={(e) => setAutorizadorUsuario(e.target.value)}
                       placeholder="carlos"
-                    />
-                  </label>
-                  <label>
-                    Clave autorizador:
-                    <input
-                      type="password"
-                      value={autorizadorClave}
-                      onChange={(e) => setAutorizadorClave(e.target.value)}
-                      placeholder="••••••••"
                     />
                   </label>
                 </div>

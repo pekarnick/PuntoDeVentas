@@ -1,10 +1,53 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 const host = process.env.TAURI_DEV_HOST;
 
+function sqlitePosLocalPlugin(): Plugin {
+  return {
+    name: 'sqlite-pos-local-middleware',
+    configureServer(server) {
+      server.middlewares.use('/api/pos', (req, res, next) => {
+        if (req.method !== 'POST') {
+          next();
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', async () => {
+          try {
+            const rawBody = Buffer.concat(chunks).toString('utf-8');
+            const parsed = rawBody ? (JSON.parse(rawBody) as { accion: string; payload?: Record<string, unknown> }) : { accion: '' };
+            const mod = await import('./src/db/servidor_local_dev.ts');
+            const resultado = mod.ejecutarAccionPosLocal(
+              parsed.accion,
+              parsed.payload ?? {}
+            );
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({ ok: true, data: resultado }));
+          } catch (err) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : 'Error al procesar operación en SQLite local.',
+              })
+            );
+          }
+        });
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), sqlitePosLocalPlugin()],
   clearScreen: false,
   server: {
     port: 1420,
@@ -18,15 +61,15 @@ export default defineConfig({
         }
       : undefined,
     watch: {
-      ignored: ['**/src-tauri/**'],
+      ignored: ['**/src-tauri/**', '**/data/**'],
     },
   },
   ssr: {
-    external: ['node:sqlite'],
+    external: ['node:sqlite', 'sharp'],
   },
   build: {
     rollupOptions: {
-      external: ['node:sqlite'],
+      external: ['node:sqlite', 'sharp'],
     },
   },
 });

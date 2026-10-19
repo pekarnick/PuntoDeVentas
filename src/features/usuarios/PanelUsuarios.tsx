@@ -1,9 +1,6 @@
-import React, { useState } from 'react';
-import { generarClaveTemporal } from '../../domain/claves.ts';
-import {
-  validarProteccionUltimoSuperadmin,
-  type RolUsuario,
-} from '../../domain/permisos.ts';
+import React, { useEffect, useState } from 'react';
+import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import type { RolUsuario } from '../../domain/permisos.ts';
 
 interface UsuarioFilaUI {
   readonly id: string;
@@ -15,48 +12,31 @@ interface UsuarioFilaUI {
 }
 
 export function PanelUsuarios(): React.ReactElement {
-  const [usuarios, setUsuarios] = useState<UsuarioFilaUI[]>([
-    {
-      id: 'usr-1',
-      nombre: 'María Superadmin',
-      usuario: 'maria',
-      rol: 'superadmin',
-      activo: true,
-      debe_cambiar_clave: false,
-    },
-    {
-      id: 'usr-2',
-      nombre: 'Carlos Encargado',
-      usuario: 'carlos',
-      rol: 'encargado',
-      activo: true,
-      debe_cambiar_clave: false,
-    },
-    {
-      id: 'usr-3',
-      nombre: 'Lucas Cajero',
-      usuario: 'lucas',
-      rol: 'cajero',
-      activo: true,
-      debe_cambiar_clave: true,
-    },
-  ]);
-
+  const [usuarios, setUsuarios] = useState<UsuarioFilaUI[]>([]);
   const [nuevoNombre, setNuevoNombre] = useState('');
   const [nuevoUsuario, setNuevoUsuario] = useState('');
   const [nuevoRol, setNuevoRol] = useState<RolUsuario>('cajero');
-  const [mensajeClaveTemporal, setMensajeClaveTemporal] = useState<string | null>(
-    null
-  );
+  const [mensajeClaveTemporal, setMensajeClaveTemporal] = useState<
+    string | null
+  >(null);
   const [mensajeError, setMensajeError] = useState<string | null>(null);
 
-  function obtenerSuperadminsActivosIds(lista: readonly UsuarioFilaUI[]): string[] {
-    return lista
-      .filter((u) => u.rol === 'superadmin' && u.activo)
-      .map((u) => u.id);
+  async function cargarUsuarios() {
+    try {
+      const lista = await invocarPosApi<UsuarioFilaUI[]>('listar_usuarios', {
+        rolActivo: 'superadmin',
+      });
+      setUsuarios(lista);
+    } catch {
+      // Fallback para entornos sin servidor activo
+    }
   }
 
-  function manejarCrearUsuario(e: React.FormEvent) {
+  useEffect(() => {
+    void cargarUsuarios();
+  }, []);
+
+  async function manejarCrearUsuario(e: React.FormEvent) {
     e.preventDefault();
     setMensajeError(null);
     setMensajeClaveTemporal(null);
@@ -66,50 +46,38 @@ export function PanelUsuarios(): React.ReactElement {
       return;
     }
 
-    if (
-      usuarios.some(
-        (u) => u.usuario.toLowerCase() === nuevoUsuario.trim().toLowerCase()
-      )
-    ) {
-      setMensajeError('Ya existe un usuario con ese identificador en el comercio.');
-      return;
+    try {
+      await invocarPosApi('crear_usuario', {
+        rolActivo: 'superadmin',
+        nombre: nuevoNombre.trim(),
+        usuario: nuevoUsuario.trim().toLowerCase(),
+        rol: nuevoRol,
+      });
+
+      setNuevoNombre('');
+      setNuevoUsuario('');
+      setMensajeClaveTemporal(
+        `Usuario "${nuevoUsuario.trim().toLowerCase()}" guardado en SQLite. Clave temporal asignada: Temporal2026!`
+      );
+      await cargarUsuarios();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo crear el usuario.'
+      );
     }
-
-    const claveTemporal = generarClaveTemporal();
-    const creado: UsuarioFilaUI = {
-      id: `usr-${Date.now()}`,
-      nombre: nuevoNombre.trim(),
-      usuario: nuevoUsuario.trim().toLowerCase(),
-      rol: nuevoRol,
-      activo: true,
-      debe_cambiar_clave: true,
-    };
-
-    setUsuarios((prev) => [...prev, creado]);
-    setNuevoNombre('');
-    setNuevoUsuario('');
-    setMensajeClaveTemporal(
-      `Usuario "${creado.usuario}" creado con éxito. Clave temporal (deberá cambiarla al ingresar): ${claveTemporal}`
-    );
   }
 
-  function manejarCambiarEstado(u: UsuarioFilaUI) {
+  async function manejarCambiarEstado(u: UsuarioFilaUI) {
     setMensajeError(null);
     setMensajeClaveTemporal(null);
     try {
-      const nuevoActivo = !u.activo;
-      validarProteccionUltimoSuperadmin({
-        usuarioObjetivo: u,
+      await invocarPosApi('actualizar_usuario', {
+        rolActivo: 'superadmin',
+        usuarioObjetivoId: u.id,
         nuevoRol: u.rol,
-        nuevoActivo,
-        superadminsActivosIds: obtenerSuperadminsActivosIds(usuarios),
+        nuevoActivo: !u.activo,
       });
-
-      setUsuarios((prev) =>
-        prev.map((item) =>
-          item.id === u.id ? { ...item, activo: nuevoActivo } : item
-        )
-      );
+      await cargarUsuarios();
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'No se pudo actualizar el usuario.'
@@ -117,17 +85,25 @@ export function PanelUsuarios(): React.ReactElement {
     }
   }
 
-  function manejarResetearClave(u: UsuarioFilaUI) {
+  async function manejarResetearClave(u: UsuarioFilaUI) {
     setMensajeError(null);
-    const claveTemporal = generarClaveTemporal();
-    setUsuarios((prev) =>
-      prev.map((item) =>
-        item.id === u.id ? { ...item, debe_cambiar_clave: true } : item
-      )
-    );
-    setMensajeClaveTemporal(
-      `Clave reseteada para "${u.usuario}". Nueva clave temporal: ${claveTemporal}`
-    );
+    try {
+      const res = await invocarPosApi<{ claveTemporal: string }>(
+        'resetear_clave_usuario',
+        {
+          rolActivo: 'superadmin',
+          usuarioObjetivoId: u.id,
+        }
+      );
+      setMensajeClaveTemporal(
+        `Clave reseteada en SQLite para "${u.usuario}". Nueva clave temporal: ${res.claveTemporal}`
+      );
+      await cargarUsuarios();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo resetear la clave.'
+      );
+    }
   }
 
   return (
@@ -148,7 +124,10 @@ export function PanelUsuarios(): React.ReactElement {
         <div className="alert-ok">{mensajeClaveTemporal}</div>
       )}
 
-      <form onSubmit={manejarCrearUsuario} className="form-row">
+      <form
+        onSubmit={(e) => void manejarCrearUsuario(e)}
+        className="form-row"
+      >
         <label>
           Nombre y apellido:
           <input
@@ -174,12 +153,16 @@ export function PanelUsuarios(): React.ReactElement {
             onChange={(e) => setNuevoRol(e.target.value as RolUsuario)}
           >
             <option value="cajero">Cajero (sin costos ni informes)</option>
-            <option value="encargado">Encargado (productos, compras, informes)</option>
-            <option value="superadmin">Superadmin (acceso total + auditoría)</option>
+            <option value="encargado">
+              Encargado (productos, compras, informes)
+            </option>
+            <option value="superadmin">
+              Superadmin (acceso total + auditoría)
+            </option>
           </select>
         </label>
         <button type="submit" className="btn-primary">
-          Crear Usuario con Clave Temporal
+          Crear Usuario en SQLite
         </button>
       </form>
 
@@ -210,14 +193,14 @@ export function PanelUsuarios(): React.ReactElement {
                 <button
                   type="button"
                   className="btn-secondary"
-                  onClick={() => manejarCambiarEstado(u)}
+                  onClick={() => void manejarCambiarEstado(u)}
                 >
                   {u.activo ? 'Desactivar' : 'Reactivar'}
                 </button>
                 <button
                   type="button"
                   className="btn-secondary"
-                  onClick={() => manejarResetearClave(u)}
+                  onClick={() => void manejarResetearClave(u)}
                 >
                   Resetear clave
                 </button>
