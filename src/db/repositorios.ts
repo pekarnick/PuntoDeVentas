@@ -90,11 +90,13 @@ export function insertarRegistroAuditoria(
   const ultimoRow = db
     .prepare(
       `SELECT hash FROM auditoria
-       WHERE comercio_id = ?
+       WHERE comercio_id = ? AND device_id = ?
        ORDER BY rowid DESC
        LIMIT 1`
     )
-    .get(params.actor.comercio_id) as { hash: string } | undefined;
+    .get(params.actor.comercio_id, params.actor.device_id) as
+    | { hash: string }
+    | undefined;
 
   const hashPrev = ultimoRow?.hash ?? HASH_GENESIS_AUDITORIA;
 

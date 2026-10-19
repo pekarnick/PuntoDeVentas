@@ -20,7 +20,7 @@ function sqlitePosLocalPlugin(): Plugin {
             const rawBody = Buffer.concat(chunks).toString('utf-8');
             const parsed = rawBody ? (JSON.parse(rawBody) as { accion: string; payload?: Record<string, unknown> }) : { accion: '' };
             const mod = await import('./src/db/servidor_local_dev.ts');
-            const resultado = mod.ejecutarAccionPosLocal(
+            const resultado = await mod.ejecutarAccionPosLocal(
               parsed.accion,
               parsed.payload ?? {}
             );

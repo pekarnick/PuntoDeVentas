@@ -22,7 +22,7 @@ import {
   exportarInformeGestionFase1AXlsx,
   obtenerInformeGestionFase1,
 } from './informes_repo.ts';
-import { crearBaseDatos } from './migrator.ts';
+import { aplicarMigraciones, crearBaseDatos } from './migrator.ts';
 import {
   actualizarProductoYPrecio,
   agregarCodigoBarrasProducto,
@@ -45,6 +45,28 @@ import {
   listarUsuariosComercio,
   resetearClaveUsuario,
 } from './usuarios_auth_repo.ts';
+import {
+  AdaptadorSupabaseHttp,
+  NubeSimuladaEnMemoria,
+  ejecutarCicloSincronizacionCompleto,
+  ejecutarPullDatos,
+  ejecutarPushDatos,
+  guardarConfiguracionSistema,
+  obtenerConfiguracionSistema,
+  obtenerResumenEstadoSyncDb,
+  type AdaptadorNubeSupabase,
+} from '../sync/motor_sync.ts';
+import {
+  calcularEspacioImagenesLocal,
+  procesarColaSincronizacionImagenes,
+} from '../sync/imagenes_sync.ts';
+import {
+  crearBackupBaseDatosLocal,
+  ejecutarBackupDiarioAutomaticoSiCorresponde,
+  exportarTodoAExcel,
+  listarHistorialBackups,
+  restaurarDesdeBackupLocal,
+} from './backup_repo.ts';
 
 export const RUTA_DB_POR_DEFECTO = path.resolve(
   process.cwd(),
@@ -54,11 +76,27 @@ export const RUTA_DB_POR_DEFECTO = path.resolve(
 
 let instanciaDb: DatabaseSync | null = null;
 let rutaActivaDb: string = RUTA_DB_POR_DEFECTO;
+const nubeDemoPersistente = new NubeSimuladaEnMemoria();
+
+function resolverAdaptadorSync(
+  db: DatabaseSync,
+  comercioId: string
+): AdaptadorNubeSupabase {
+  const cfg = obtenerConfiguracionSistema(db, comercioId);
+  if (cfg.supabase_url && cfg.supabase_anon_key) {
+    return new AdaptadorSupabaseHttp({
+      supabaseUrl: cfg.supabase_url,
+      supabaseAnonKey: cfg.supabase_anon_key,
+    });
+  }
+  return nubeDemoPersistente;
+}
 
 export function obtenerConexionLocalDisco(
   rutaPersonalizada: string = RUTA_DB_POR_DEFECTO
 ): DatabaseSync {
   if (instanciaDb && rutaActivaDb === rutaPersonalizada) {
+    aplicarMigraciones(instanciaDb);
     return instanciaDb;
   }
 
@@ -359,13 +397,24 @@ export function ejecutarAccionPosLocal(
 
   switch (accion) {
     case 'obtener_estado_inicial': {
-      const { catalogoVenta, catalogoAdmin } = obtenerCatalogoCompleto(db, actor);
+      const dirBase = path.dirname(rutaActivaDb);
+      const actorSuperadmin = obtenerActorPorRol(db, 'superadmin');
+      try {
+        ejecutarBackupDiarioAutomaticoSiCorresponde(
+          db,
+          actorSuperadmin,
+          dirBase
+        );
+      } catch {
+        // Un fallo de permisos en la carpeta de backups no debe bloquear nunca la caja
+      }
 
-      const pendientesRow = db
-        .prepare(
-          "SELECT COUNT(*) AS total FROM sync_cola WHERE estado = 'pendiente'"
-        )
-        .get() as { total: number };
+      const { catalogoVenta, catalogoAdmin } = obtenerCatalogoCompleto(db, actor);
+      const estadoSync = obtenerResumenEstadoSyncDb(
+        db,
+        actor.comercio_id,
+        Boolean(payload.sinConexion)
+      );
 
       const ventasRecientes = db
         .prepare(
@@ -421,7 +470,17 @@ export function ejecutarAccionPosLocal(
           nombre: actor.usuario_nombre,
           rol: actor.rol,
         },
-        cambiosPendientesSync: pendientesRow.total,
+        cambiosPendientesSync: estadoSync.totalPendientes,
+        estadoSync,
+        configuracionSistema:
+          actor.rol === 'superadmin'
+            ? obtenerConfiguracionSistema(db, actor.comercio_id)
+            : null,
+        historialBackups:
+          actor.rol === 'superadmin'
+            ? listarHistorialBackups(db, actor.comercio_id)
+            : [],
+        espacioImagenes: calcularEspacioImagenesLocal(dirBase),
         catalogoVenta,
         catalogoAdmin,
         ventasRecientes,
@@ -717,6 +776,103 @@ export function ejecutarAccionPosLocal(
         xlsxBase64: Buffer.from(xlsxBytes).toString('base64'),
         bytesLength: xlsxBytes.byteLength,
       };
+    }
+
+    case 'guardar_configuracion_sistema': {
+      return guardarConfiguracionSistema(db, actor, {
+        supabaseUrl:
+          payload.supabaseUrl !== undefined
+            ? (payload.supabaseUrl as string | null)
+            : undefined,
+        supabaseAnonKey:
+          payload.supabaseAnonKey !== undefined
+            ? (payload.supabaseAnonKey as string | null)
+            : undefined,
+        syncAutomaticoHabilitado:
+          payload.syncAutomaticoHabilitado !== undefined
+            ? Boolean(payload.syncAutomaticoHabilitado)
+            : undefined,
+        syncIntervaloMinutos:
+          payload.syncIntervaloMinutos !== undefined
+            ? Number(payload.syncIntervaloMinutos)
+            : undefined,
+        carpetaBackups:
+          payload.carpetaBackups !== undefined
+            ? String(payload.carpetaBackups)
+            : undefined,
+        backupDiarioHabilitado:
+          payload.backupDiarioHabilitado !== undefined
+            ? Boolean(payload.backupDiarioHabilitado)
+            : undefined,
+      });
+    }
+
+    case 'crear_backup_manual': {
+      const dirBase = path.dirname(rutaActivaDb);
+      return crearBackupBaseDatosLocal(db, actor, {
+        directorioBaseDatos: dirBase,
+        tipo: 'manual',
+      });
+    }
+
+    case 'restaurar_desde_backup': {
+      const dirBase = path.dirname(rutaActivaDb);
+      return restaurarDesdeBackupLocal(db, actor, {
+        rutaArchivoBackup: String(payload.rutaArchivoBackup ?? ''),
+        directorioBaseDatos: dirBase,
+      });
+    }
+
+    case 'exportar_todo_excel': {
+      const xlsxBytes = exportarTodoAExcel(db, actor);
+      return {
+        xlsxBase64: Buffer.from(xlsxBytes).toString('base64'),
+        bytesLength: xlsxBytes.byteLength,
+      };
+    }
+
+    case 'sync_subir_ahora': {
+      const dirBase = path.dirname(rutaActivaDb);
+      const adaptador = resolverAdaptadorSync(db, actor.comercio_id);
+      return (async () => {
+        const push = await ejecutarPushDatos(db, adaptador, actor);
+        const imagenes = await procesarColaSincronizacionImagenes(db, adaptador, {
+          comercioId: actor.comercio_id,
+          directorioBaseDatos: dirBase,
+        });
+        const online = await adaptador.estaDisponible();
+        const estadoUI = obtenerResumenEstadoSyncDb(
+          db,
+          actor.comercio_id,
+          !online
+        );
+        return { push, imagenes, estadoUI };
+      })();
+    }
+
+    case 'sync_bajar_ahora': {
+      const dirBase = path.dirname(rutaActivaDb);
+      const adaptador = resolverAdaptadorSync(db, actor.comercio_id);
+      return (async () => {
+        const pull = await ejecutarPullDatos(db, adaptador, actor, dirBase);
+        const imagenes = await procesarColaSincronizacionImagenes(db, adaptador, {
+          comercioId: actor.comercio_id,
+          directorioBaseDatos: dirBase,
+        });
+        const online = await adaptador.estaDisponible();
+        const estadoUI = obtenerResumenEstadoSyncDb(
+          db,
+          actor.comercio_id,
+          !online
+        );
+        return { pull, imagenes, estadoUI };
+      })();
+    }
+
+    case 'sync_ciclo_completo': {
+      const dirBase = path.dirname(rutaActivaDb);
+      const adaptador = resolverAdaptadorSync(db, actor.comercio_id);
+      return ejecutarCicloSincronizacionCompleto(db, adaptador, actor, dirBase);
     }
 
     default:

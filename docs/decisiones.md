@@ -46,3 +46,20 @@ Este documento registra las decisiones técnicas, refinamientos del modelo de da
 | `vitest` | dev | Runner de tests unitarios y de integración para TypeScript (`PLAN.md §2`). |
 | `@types/react`, `@types/react-dom`, `@types/node` | dev | Definiciones de tipos TypeScript para React y APIs nativas de Node en tests. |
 | `@tauri-apps/cli` | dev | CLI oficial para compilar y ejecutar el contenedor de escritorio Tauri 2. |
+
+---
+
+## 3. Decisiones de Sincronización y Backups (Fase 2)
+
+### 3.1 Cadena de hash de `auditoria` por terminal (`device_id`) en sincronización multi-terminal
+- **Decisión:** Cada terminal (`device_id`) encadena su propio `hash_prev` sobre el último registro emitido por esa misma terminal (iniciando en `'GENESIS'`), y `verificarCadenaAuditoria` valida la secuencia de eslabones por cada `device_id`.
+- **Motivo:** Como cada terminal opera offline y la tabla `auditoria` es estrictamente inmutable (`BEFORE UPDATE` prohibido en SQLite y Postgres), mantener el eslabón criptográfico por `device_id` permite que cualquier terminal verifique la integridad completa de los registros propios y de los descargados desde otras terminales sin re-hashear ni modificar registros existentes.
+
+### 3.2 Cola de imágenes separada (`sync_imagenes_cola`)
+- **Decisión:** La migración `002_sync_imagenes_y_config_backup.sql` introduce la tabla `sync_imagenes_cola` separada de `sync_cola`, almacenando `ultimo_hash_sincronizado`.
+- **Motivo:** Cumple `PLAN.md §5.1`: primero viajan todos los datos transaccionales/maestros y recién después se transfieren los archivos `.webp` y `_thumb.webp` al bucket privado `productos` de Supabase Storage, evitando re-subir imágenes cuyo hash SHA-256 no cambió.
+
+### 3.3 Backups locales consistentes mediante `VACUUM INTO`
+- **Decisión:** Las copias de seguridad diarias automáticas, manuales y previas a una restauración se generan mediante la sentencia nativa `VACUUM INTO` de SQLite.
+- **Motivo:** Garantiza una copia atómica e íntegra en un único archivo `.db` incluso cuando la base activa está operando en modo `WAL` con transacciones concurrentes. Antes de aplicar cualquier restauración se valida el encabezado binario SQLite, `PRAGMA integrity_check` y la cadena de hash de `auditoria`, generando además un backup automático `previo_restauracion`.
+

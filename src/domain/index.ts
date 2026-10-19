@@ -11,3 +11,4 @@ export * from './escaner.ts';
 export * from './ticket.ts';
 export * from './xlsx.ts';
 export * from './informes.ts';
+export * from './sync.ts';

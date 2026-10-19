@@ -228,10 +228,13 @@ export function calcularHashAuditoria(
 export function verificarCadenaAuditoria(
   registros: readonly RegistroAuditoriaCompleto[]
 ): ResultadoVerificacionAuditoria {
-  let hashEsperadoPrev = HASH_GENESIS_AUDITORIA;
+  const hashEsperadoPorTerminal = new Map<string, string>();
 
   for (let i = 0; i < registros.length; i++) {
     const reg = registros[i]!;
+    const hashEsperadoPrev =
+      hashEsperadoPorTerminal.get(reg.device_id) ?? HASH_GENESIS_AUDITORIA;
+
     if (reg.hash_prev !== hashEsperadoPrev) {
       return {
         integra: false,
@@ -253,7 +256,7 @@ export function verificarCadenaAuditoria(
       };
     }
 
-    hashEsperadoPrev = reg.hash;
+    hashEsperadoPorTerminal.set(reg.device_id, reg.hash);
   }
 
   return {

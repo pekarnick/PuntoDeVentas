@@ -3,11 +3,21 @@ import { invocarPosApi } from './db/cliente_pos_api.ts';
 import { formatearFechaAR } from './domain/dinero.ts';
 import type { ProductoCatalogoVenta } from './domain/escaner.ts';
 import { tienePermiso, type RolUsuario } from './domain/permisos.ts';
+import {
+  calcularIndicadorEstadoSync,
+  type ResumenEstadoSyncUI,
+} from './domain/sync.ts';
 import { PanelAuditoria } from './features/auditoria/PanelAuditoria.tsx';
 import {
   PanelCaja,
   type EstadoCajaServidorUI,
 } from './features/caja/PanelCaja.tsx';
+import {
+  PanelConfiguracionSync,
+  type ConfiguracionSistemaDTO,
+  type EstadisticasEspacioImagenesDTO,
+  type RegistroHistorialBackupDTO,
+} from './features/configuracion/PanelConfiguracionSync.tsx';
 import { PanelInformes } from './features/informes/PanelInformes.tsx';
 import {
   PanelProductosStock,
@@ -18,7 +28,6 @@ import {
   PanelVentaPOS,
   type VentaRecienteResumenUI,
 } from './features/venta/PanelVentaPOS.tsx';
-import { formatearEstadoSync } from './sync/index.ts';
 
 type PestaniaActiva =
   | 'venta'
@@ -26,7 +35,8 @@ type PestaniaActiva =
   | 'caja'
   | 'informes'
   | 'usuarios'
-  | 'auditoria';
+  | 'auditoria'
+  | 'configuracion';
 
 const NOMBRES_OPERADOR: Record<RolUsuario, string> = {
   superadmin: 'María Superadmin',
@@ -37,6 +47,10 @@ const NOMBRES_OPERADOR: Record<RolUsuario, string> = {
 interface EstadoInicialServidor {
   readonly rutaBaseDatos: string;
   readonly cambiosPendientesSync: number;
+  readonly estadoSync?: ResumenEstadoSyncUI;
+  readonly configuracionSistema?: ConfiguracionSistemaDTO | null;
+  readonly historialBackups?: readonly RegistroHistorialBackupDTO[];
+  readonly espacioImagenes?: EstadisticasEspacioImagenesDTO;
   readonly catalogoVenta: readonly ProductoCatalogoVenta[];
   readonly catalogoAdmin: readonly ProductoAdminItemUI[];
   readonly ventasRecientes: readonly VentaRecienteResumenUI[];
@@ -48,33 +62,156 @@ export function App(): React.ReactElement {
   const [pestania, setPestania] = useState<PestaniaActiva>('venta');
   const [datosServidor, setDatosServidor] =
     useState<EstadoInicialServidor | null>(null);
+  const [sinConexionNavegador, setSinConexionNavegador] = useState<boolean>(
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
+  const [sincronizandoEnCurso, setSincronizandoEnCurso] = useState(false);
 
   const recargarEstadoLocal = useCallback(async () => {
     try {
       const estado = await invocarPosApi<EstadoInicialServidor>(
         'obtener_estado_inicial',
-        { rolActivo }
+        {
+          rolActivo,
+          sinConexion: sinConexionNavegador,
+        }
       );
       setDatosServidor(estado);
     } catch {
       // En tests unitarios sin servidor Vite se usan los valores por defecto de los paneles
     }
-  }, [rolActivo]);
+  }, [rolActivo, sinConexionNavegador]);
+
+  const ejecutarSubidaManual = useCallback(async () => {
+    setSincronizandoEnCurso(true);
+    try {
+      await invocarPosApi('sync_subir_ahora', { rolActivo });
+      await recargarEstadoLocal();
+    } finally {
+      setSincronizandoEnCurso(false);
+    }
+  }, [rolActivo, recargarEstadoLocal]);
+
+  const ejecutarBajadaManual = useCallback(async () => {
+    setSincronizandoEnCurso(true);
+    try {
+      await invocarPosApi('sync_bajar_ahora', { rolActivo });
+      await recargarEstadoLocal();
+    } finally {
+      setSincronizandoEnCurso(false);
+    }
+  }, [rolActivo, recargarEstadoLocal]);
+
+  const ejecutarCicloSync = useCallback(async () => {
+    if (sinConexionNavegador) return;
+    setSincronizandoEnCurso(true);
+    try {
+      await invocarPosApi('sync_ciclo_completo', { rolActivo });
+      await recargarEstadoLocal();
+    } catch {
+      // No bloquear nunca la caja ante fallos de red en segundo plano (Regla 7)
+    } finally {
+      setSincronizandoEnCurso(false);
+    }
+  }, [rolActivo, sinConexionNavegador, recargarEstadoLocal]);
 
   useEffect(() => {
     void recargarEstadoLocal();
   }, [recargarEstadoLocal]);
 
-  const estadoSync = formatearEstadoSync({
-    estado: 'pendiente',
-    cambiosPendientes: datosServidor?.cambiosPendientesSync ?? 0,
-  });
+  // Disparador 1 (PLAN.md §5): Al abrir la app, sincroniza en segundo plano sin bloquear la pantalla de venta
+  useEffect(() => {
+    void ejecutarCicloSync();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Escuchar cambios de conectividad del sistema operativo/navegador
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const alConectar = () => {
+      setSinConexionNavegador(false);
+      void ejecutarCicloSync();
+    };
+    const alDesconectar = () => setSinConexionNavegador(true);
+
+    window.addEventListener('online', alConectar);
+    window.addEventListener('offline', alDesconectar);
+    return () => {
+      window.removeEventListener('online', alConectar);
+      window.removeEventListener('offline', alDesconectar);
+    };
+  }, [ejecutarCicloSync]);
+
+  // Disparador 5 (PLAN.md §5): Sincronización periódica cada X minutos mientras está abierta y hay conexión
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const cfg = datosServidor?.configuracionSistema;
+    if (cfg && !cfg.sync_automatico_habilitado) return;
+
+    const minutos = cfg?.sync_intervalo_minutos ?? 5;
+    const timer = window.setInterval(
+      () => {
+        if (!sinConexionNavegador) {
+          void ejecutarCicloSync();
+        }
+      },
+      minutos * 60 * 1000
+    );
+    return () => window.clearInterval(timer);
+  }, [
+    datosServidor?.configuracionSistema,
+    sinConexionNavegador,
+    ejecutarCicloSync,
+  ]);
+
+  // Disparador 2 (PLAN.md §5): Al cerrar la app, si hay cambios pendientes intenta subirlos con timeout corto sin trabar el cierre
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const alCerrar = () => {
+      const pendientes = datosServidor?.cambiosPendientesSync ?? 0;
+      if (pendientes > 0 && !sinConexionNavegador) {
+        try {
+          void fetch('/api/pos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              accion: 'sync_subir_ahora',
+              payload: { rolActivo },
+            }),
+            keepalive: true,
+            signal: AbortSignal.timeout(1500),
+          });
+        } catch {
+          // Lo que no suba queda pendiente en sync_cola
+        }
+      }
+    };
+    window.addEventListener('pagehide', alCerrar);
+    return () => window.removeEventListener('pagehide', alCerrar);
+  }, [
+    datosServidor?.cambiosPendientesSync,
+    sinConexionNavegador,
+    rolActivo,
+  ]);
+
+  const resumenSync: ResumenEstadoSyncUI =
+    datosServidor?.estadoSync ??
+    calcularIndicadorEstadoSync({
+      sinConexion: sinConexionNavegador,
+      datosPendientes: datosServidor?.cambiosPendientesSync ?? 0,
+      imagenesPendientes: 0,
+      erroresCount: 0,
+    });
 
   const hoy = formatearFechaAR(new Date());
 
   const puedeVerInformes = tienePermiso(rolActivo, 'ver_informes_gestion');
   const puedeGestionarUsuarios = tienePermiso(rolActivo, 'gestionar_usuarios');
   const puedeVerAuditoria = tienePermiso(rolActivo, 'ver_exportar_auditoria');
+  const puedeConfigurarSistema = tienePermiso(
+    rolActivo,
+    'configuracion_sensible'
+  );
 
   function cambiarRolDemo(nuevoRol: RolUsuario) {
     setRolActivo(nuevoRol);
@@ -84,7 +221,9 @@ export function App(): React.ReactElement {
       (pestania === 'usuarios' &&
         !tienePermiso(nuevoRol, 'gestionar_usuarios')) ||
       (pestania === 'auditoria' &&
-        !tienePermiso(nuevoRol, 'ver_exportar_auditoria'))
+        !tienePermiso(nuevoRol, 'ver_exportar_auditoria')) ||
+      (pestania === 'configuracion' &&
+        !tienePermiso(nuevoRol, 'configuracion_sensible'))
     ) {
       setPestania('venta');
     }
@@ -148,10 +287,24 @@ export function App(): React.ReactElement {
           {puedeVerAuditoria && (
             <button
               type="button"
-              className={pestania === 'auditoria' ? 'nav-btn active' : 'nav-btn'}
+              className={
+                pestania === 'auditoria' ? 'nav-btn active' : 'nav-btn'
+              }
               onClick={() => setPestania('auditoria')}
             >
               Auditoría SHA-256
+            </button>
+          )}
+
+          {puedeConfigurarSistema && (
+            <button
+              type="button"
+              className={
+                pestania === 'configuracion' ? 'nav-btn active' : 'nav-btn'
+              }
+              onClick={() => setPestania('configuracion')}
+            >
+              Configuración y Sync
             </button>
           )}
         </nav>
@@ -169,9 +322,35 @@ export function App(): React.ReactElement {
             </select>
           </label>
           <span>{hoy}</span>
-          <span className="sync-pill" title="Estado de sincronización">
-            {estadoSync}
+          <span
+            className="sync-pill"
+            title={
+              resumenSync.ultimoErrorDetalle ??
+              `Datos pendientes: ${resumenSync.datosPendientes} | Imágenes pendientes: ${resumenSync.imagenesPendientes}`
+            }
+          >
+            {sincronizandoEnCurso ? 'Sincronizando...' : resumenSync.etiqueta}
           </span>
+          <button
+            type="button"
+            className="nav-btn"
+            style={{ padding: '0.2rem 0.45rem', fontSize: '0.75rem' }}
+            disabled={sincronizandoEnCurso}
+            title="Subir datos ahora (Push)"
+            onClick={() => void ejecutarSubidaManual()}
+          >
+            ↑ Subir
+          </button>
+          <button
+            type="button"
+            className="nav-btn"
+            style={{ padding: '0.2rem 0.45rem', fontSize: '0.75rem' }}
+            disabled={sincronizandoEnCurso}
+            title="Bajar datos ahora (Pull)"
+            onClick={() => void ejecutarBajadaManual()}
+          >
+            ↓ Bajar
+          </button>
         </div>
       </header>
 
@@ -204,9 +383,33 @@ export function App(): React.ReactElement {
         )}
         {pestania === 'usuarios' && puedeGestionarUsuarios && <PanelUsuarios />}
         {pestania === 'auditoria' && puedeVerAuditoria && <PanelAuditoria />}
+        {pestania === 'configuracion' && puedeConfigurarSistema && (
+          <PanelConfiguracionSync
+            rolActivo={rolActivo}
+            estadoSync={resumenSync}
+            configuracionInicial={datosServidor?.configuracionSistema ?? null}
+            historialBackupsInicial={[
+              ...(datosServidor?.historialBackups ?? []),
+            ]}
+            espacioImagenes={
+              datosServidor?.espacioImagenes ?? {
+                cantidadArchivos: 0,
+                bytesTotales: 0,
+                kbTotales: 0,
+                mbTotales: 0,
+                porcentajeCuotaGratuita: 0,
+              }
+            }
+            onSubirAhora={ejecutarSubidaManual}
+            onBajarAhora={ejecutarBajadaManual}
+            onSincronizarCicloCompleto={ejecutarCicloSync}
+            onDatosActualizados={() => void recargarEstadoLocal()}
+          />
+        )}
       </main>
     </div>
   );
 }
 
 export default App;
+
