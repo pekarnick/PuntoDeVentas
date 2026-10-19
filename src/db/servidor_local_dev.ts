@@ -87,6 +87,8 @@ function resolverAdaptadorSync(
     return new AdaptadorSupabaseHttp({
       supabaseUrl: cfg.supabase_url,
       supabaseAnonKey: cfg.supabase_anon_key,
+      comercioId,
+      rolUsuario: 'superadmin',
     });
   }
   return nubeDemoPersistente;

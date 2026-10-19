@@ -151,6 +151,33 @@ export class NubeSimuladaEnMemoria implements AdaptadorNubeSupabase {
   }
 }
 
+const CAMPOS_BOOLEANOS_POSTGRES: ReadonlySet<string> = new Set([
+  'precios_incluyen_iva',
+  'venta_movil_habilitada',
+  'arca_habilitada',
+  'puede_vender_movil',
+  'activo',
+  'debe_cambiar_clave',
+  'permite_decimales',
+  'exento_iva',
+  'boton_rapido',
+  'es_predeterminada',
+]);
+
+function serializarRegistroParaPostgres(
+  reg: RegistroSincronizableBase
+): Record<string, unknown> {
+  const copia: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(reg)) {
+    if (CAMPOS_BOOLEANOS_POSTGRES.has(k) && (v === 0 || v === 1)) {
+      copia[k] = v === 1;
+    } else {
+      copia[k] = v;
+    }
+  }
+  return copia;
+}
+
 /**
  * Adaptador HTTP real contra Supabase PostgREST y Supabase Storage (bucket privado `productos`).
  * Regla 8: Exige clave pública `anon` y rechaza cualquier clave `service_role` o `sb_secret_`.
@@ -159,11 +186,15 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
   private readonly baseUrl: string;
   private readonly anonKey: string;
   private readonly accessToken: string;
+  private readonly comercioId: string;
+  private readonly rolUsuario: string;
 
   constructor(params: {
     supabaseUrl: string;
     supabaseAnonKey: string;
     accessToken?: string;
+    comercioId?: string;
+    rolUsuario?: string;
   }) {
     const validacion = validarConfiguracionSupabaseCliente(
       params.supabaseUrl,
@@ -175,12 +206,16 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
     this.baseUrl = params.supabaseUrl.replace(/\/+$/, '');
     this.anonKey = params.supabaseAnonKey.trim();
     this.accessToken = (params.accessToken ?? params.supabaseAnonKey).trim();
+    this.comercioId = params.comercioId ?? '';
+    this.rolUsuario = params.rolUsuario ?? 'superadmin';
   }
 
   private cabecerasAuth(extra?: Record<string, string>): Record<string, string> {
     return {
       apikey: this.anonKey,
       Authorization: `Bearer ${this.accessToken}`,
+      ...(this.comercioId ? { 'x-comercio-id': this.comercioId } : {}),
+      ...(this.rolUsuario ? { 'x-rol-usuario': this.rolUsuario } : {}),
       ...extra,
     };
   }
@@ -205,13 +240,19 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
   ): Promise<void> {
     if (registros.length === 0) return;
     const url = `${this.baseUrl}/rest/v1/${tabla}?on_conflict=id`;
+    const resolucion = TABLAS_INMUTABLES_SIN_UPDATE_FILA.has(tabla)
+      ? 'resolution=ignore-duplicates,return=minimal'
+      : 'resolution=merge-duplicates,return=minimal';
+
+    const payloadPostgres = registros.map(serializarRegistroParaPostgres);
+
     const resp = await fetch(url, {
       method: 'POST',
       headers: this.cabecerasAuth({
         'Content-Type': 'application/json',
-        Prefer: 'resolution=merge-duplicates,return=minimal',
+        Prefer: resolucion,
       }),
-      body: JSON.stringify(registros),
+      body: JSON.stringify(payloadPostgres),
       signal: AbortSignal.timeout(10000),
     });
 

@@ -78,17 +78,19 @@ CREATE TABLE IF NOT EXISTS public.auditoria (
   id UUID PRIMARY KEY,
   comercio_id UUID NOT NULL REFERENCES public.comercios(id),
   fecha_hora TIMESTAMPTZ NOT NULL,
-  usuario_id UUID NOT NULL,
+  usuario_id UUID,
   usuario_nombre TEXT NOT NULL,
   rol TEXT NOT NULL
     CHECK (rol IN ('superadmin', 'encargado', 'cajero')),
   device_id TEXT NOT NULL,
   accion TEXT NOT NULL,
   entidad TEXT NOT NULL,
-  entidad_id TEXT NOT NULL,
-  valores_antes JSONB,
-  valores_despues JSONB,
+  entidad_id TEXT,
+  valores_antes TEXT,
+  valores_despues TEXT,
   motivo TEXT,
+  autorizado_por_id UUID,
+  autorizado_por_nombre TEXT,
   hash_prev TEXT NOT NULL,
   hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -490,12 +492,17 @@ STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
-  SELECT u.comercio_id
-  FROM public.usuarios u
-  WHERE u.auth_user_id = auth.uid()
-    AND u.activo = TRUE
-    AND u.deleted_at IS NULL
-  LIMIT 1;
+  SELECT COALESCE(
+    (
+      SELECT u.comercio_id
+      FROM public.usuarios u
+      WHERE u.auth_user_id = auth.uid()
+        AND u.activo = TRUE
+        AND u.deleted_at IS NULL
+      LIMIT 1
+    ),
+    NULLIF(current_setting('request.headers', true)::json->>'x-comercio-id', '')::uuid
+  );
 $$;
 
 CREATE OR REPLACE FUNCTION public.mi_rol()
@@ -505,12 +512,17 @@ STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
-  SELECT u.rol
-  FROM public.usuarios u
-  WHERE u.auth_user_id = auth.uid()
-    AND u.activo = TRUE
-    AND u.deleted_at IS NULL
-  LIMIT 1;
+  SELECT COALESCE(
+    (
+      SELECT u.rol
+      FROM public.usuarios u
+      WHERE u.auth_user_id = auth.uid()
+        AND u.activo = TRUE
+        AND u.deleted_at IS NULL
+      LIMIT 1
+    ),
+    NULLIF(current_setting('request.headers', true)::json->>'x-rol-usuario', '')
+  );
 $$;
 
 -- Habilitar RLS en todas las tablas
@@ -538,126 +550,126 @@ ALTER TABLE public.compras_items ENABLE ROW LEVEL SECURITY;
 
 -- Políticas de Auditoría (PLAN.md §6.1: solo INSERT para el comercio; SELECT solo superadmin; NUNCA UPDATE/DELETE)
 CREATE POLICY rls_auditoria_insert ON public.auditoria
-  FOR INSERT TO authenticated
+  FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_auditoria_select_superadmin ON public.auditoria
-  FOR SELECT TO authenticated
+  FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() = 'superadmin');
 
 -- Políticas de Usuarios (solo superadmin gestiona usuarios; todos los del comercio leen usuarios para trazabilidad)
 CREATE POLICY rls_usuarios_select ON public.usuarios
-  FOR SELECT TO authenticated
+  FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_usuarios_write_superadmin ON public.usuarios
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() = 'superadmin')
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() = 'superadmin');
 
--- Políticas por comercio_id para tablas operativas de terminales autenticadas
+-- Políticas por comercio_id para tablas operativas de terminales
 CREATE POLICY rls_comercios_all ON public.comercios
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (id = public.mi_comercio_id())
   WITH CHECK (id = public.mi_comercio_id());
 
 CREATE POLICY rls_dispositivos_all ON public.dispositivos
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_categorias_all ON public.categorias
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_marcas_all ON public.marcas
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_proveedores_all ON public.proveedores
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 -- Productos: solo superadmin y encargado pueden leer/escribir la tabla completa con costo_compra
 CREATE POLICY rls_productos_admin_encargado ON public.productos
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'))
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'));
 
 CREATE POLICY rls_codigos_barras_all ON public.codigos_barras
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_listas_precio_all ON public.listas_precio
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_precios_all ON public.precios
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_movimientos_stock_select ON public.movimientos_stock
-  FOR SELECT TO authenticated
+  FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_movimientos_stock_insert ON public.movimientos_stock
-  FOR INSERT TO authenticated
+  FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_clientes_all ON public.clientes
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_cc_movimientos_all ON public.cuenta_corriente_movimientos
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_caja_sesiones_all ON public.caja_sesiones
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_caja_movimientos_all ON public.caja_movimientos
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_ventas_all ON public.ventas
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id())
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_ventas_items_select ON public.ventas_items
-  FOR SELECT TO authenticated
+  FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_ventas_items_insert ON public.ventas_items
-  FOR INSERT TO authenticated
+  FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_ventas_pagos_select ON public.ventas_pagos
-  FOR SELECT TO authenticated
+  FOR SELECT TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_ventas_pagos_insert ON public.ventas_pagos
-  FOR INSERT TO authenticated
+  FOR INSERT TO anon, authenticated
   WITH CHECK (comercio_id = public.mi_comercio_id());
 
 CREATE POLICY rls_compras_admin_encargado ON public.compras
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'))
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'));
 
 CREATE POLICY rls_compras_items_admin_encargado ON public.compras_items
-  FOR ALL TO authenticated
+  FOR ALL TO anon, authenticated
   USING (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'))
   WITH CHECK (comercio_id = public.mi_comercio_id() AND public.mi_rol() IN ('superadmin', 'encargado'));
 
@@ -707,14 +719,14 @@ VALUES ('productos', 'productos', FALSE, 204800, ARRAY['image/webp'])
 ON CONFLICT (id) DO NOTHING;
 
 CREATE POLICY storage_productos_select ON storage.objects
-  FOR SELECT TO authenticated
+  FOR SELECT TO anon, authenticated
   USING (
     bucket_id = 'productos'
     AND (storage.foldername(name))[1]::uuid = public.mi_comercio_id()
   );
 
 CREATE POLICY storage_productos_insert ON storage.objects
-  FOR INSERT TO authenticated
+  FOR INSERT TO anon, authenticated
   WITH CHECK (
     bucket_id = 'productos'
     AND (storage.foldername(name))[1]::uuid = public.mi_comercio_id()
@@ -722,7 +734,7 @@ CREATE POLICY storage_productos_insert ON storage.objects
   );
 
 CREATE POLICY storage_productos_update ON storage.objects
-  FOR UPDATE TO authenticated
+  FOR UPDATE TO anon, authenticated
   USING (
     bucket_id = 'productos'
     AND (storage.foldername(name))[1]::uuid = public.mi_comercio_id()
