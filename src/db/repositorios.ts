@@ -410,6 +410,7 @@ export function crearProducto(
     alicuotaIva?: AlicuotaIva;
     exentoIva?: boolean;
     stockMinimo?: number;
+    botonRapido?: boolean;
     codigosBarras?: readonly string[];
     stockInicial?: number;
   }
@@ -425,9 +426,9 @@ export function crearProducto(
     db.prepare(
       `INSERT INTO productos (
         id, comercio_id, codigo_interno, nombre, unidad, permite_decimales,
-        costo_compra, alicuota_iva, exento_iva, stock_minimo, activo,
+        costo_compra, alicuota_iva, exento_iva, stock_minimo, activo, boton_rapido,
         fecha_ultimo_cambio_precio, created_at, updated_at, deleted_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, ?, 'pendiente')`
     ).run(
       productoId,
       actor.comercio_id,
@@ -439,6 +440,7 @@ export function crearProducto(
       datos.alicuotaIva ?? 21,
       datos.exentoIva ? 1 : 0,
       datos.stockMinimo ?? 0,
+      datos.botonRapido ? 1 : 0,
       ahora,
       ahora,
       ahora,

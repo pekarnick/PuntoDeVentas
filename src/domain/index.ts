@@ -7,3 +7,5 @@ export * from './permisos.ts';
 export * from './auditoria.ts';
 export * from './cuit.ts';
 export * from './claves.ts';
+export * from './escaner.ts';
+export * from './ticket.ts';

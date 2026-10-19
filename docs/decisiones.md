@@ -40,6 +40,7 @@ Este documento registra las decisiones técnicas, refinamientos del modelo de da
 | `react`, `react-dom` | prod | Librería de interfaz de usuario definida en el stack oficial (`PLAN.md §2`). |
 | `@tauri-apps/api` | prod | Puente oficial de comunicación entre el frontend React y el proceso nativo de Tauri 2. |
 | `@noble/hashes` | prod | Implementación auditada sin dependencias de Argon2id para el hash seguro de claves de usuario (`PLAN.md §3` regla 16). |
+| `sharp` | prod | Procesamiento local de imágenes de productos: corrección de orientación EXIF, borrado de metadatos GPS/EXIF y compresión a WebP (`<= 150 KB`) y miniatura (`PLAN.md §5.1`). |
 | `typescript` | dev | Tipado estático obligatorio definido en el stack (`PLAN.md §2`). |
 | `vite`, `@vitejs/plugin-react` | dev | Empaquetador y servidor de desarrollo rápido para React + Tauri 2 (`PLAN.md §2`). |
 | `vitest` | dev | Runner de tests unitarios y de integración para TypeScript (`PLAN.md §2`). |
