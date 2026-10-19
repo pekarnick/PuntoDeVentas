@@ -16,7 +16,12 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@pos/domain": ["./packages/domain/src/index.ts"],
+      "@pos/domain/*": ["./packages/domain/src/*"]
+    }
   },
-  "include": ["src"]
+  "include": ["src", "packages/domain/src", "web-pos/src"]
 }
