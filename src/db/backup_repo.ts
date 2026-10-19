@@ -367,6 +367,168 @@ export function restaurarDesdeBackupLocal(
 }
 
 /**
+ * Reinicia la base de datos local a estado de fábrica dejando únicamente:
+ * 1. El registro fijo del comercio (`comercios`).
+ * 2. Un único usuario administrador activo (`superadmin`).
+ * 3. La lista de precios predeterminada fija (`General`).
+ * 4. La configuración del sistema (`configuracion_sistema`, conservando las credenciales de Supabase).
+ * 5. Un backup automático previo en `data/backups/` y el nuevo eslabón inicial `GENESIS` de auditoría.
+ */
+export function resetearBaseDatosAFabrica(
+  db: DatabaseSync,
+  actor: ActorContexto,
+  directorioBaseDatos: string
+): {
+  backupResguardoPrevio: RegistroHistorialBackup;
+  superadminConservado: string;
+} {
+  exigirPermiso(actor.rol, 'configuracion_sensible');
+
+  const backupResguardoPrevio = crearBackupBaseDatosLocal(db, actor, {
+    directorioBaseDatos,
+    tipo: 'previo_restauracion',
+    nombreArchivoPersonalizado: `pos_backup_previo_reset_${Date.now()}.db`,
+  });
+
+  const superadminFila = db
+    .prepare(
+      `SELECT id, usuario, nombre FROM usuarios
+       WHERE comercio_id = ? AND rol = 'superadmin' AND activo = 1 AND deleted_at IS NULL
+       ORDER BY created_at ASC LIMIT 1`
+    )
+    .get(actor.comercio_id) as
+    | { id: string; usuario: string; nombre: string }
+    | undefined;
+
+  if (!superadminFila) {
+    throw new Error('No se encontró un superadmin activo para conservar.');
+  }
+
+  const listaGeneralFila = db
+    .prepare(
+      `SELECT id FROM listas_precio
+       WHERE comercio_id = ? AND es_predeterminada = 1 AND deleted_at IS NULL
+       ORDER BY created_at ASC LIMIT 1`
+    )
+    .get(actor.comercio_id) as { id: string } | undefined;
+
+  const triggersActuales = db
+    .prepare(
+      `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL`
+    )
+    .all() as unknown as { name: string; sql: string }[];
+
+  const ahora = new Date().toISOString();
+
+  db.exec('PRAGMA foreign_keys = OFF;');
+  try {
+    ejecutarEnTransaccion(db, () => {
+      for (const trg of triggersActuales) {
+        db.exec(`DROP TRIGGER IF EXISTS "${trg.name}";`);
+      }
+
+      const tablasVaciarPorCompleto = [
+        'ventas_pagos',
+        'ventas_items',
+        'ventas',
+        'caja_movimientos',
+        'caja_sesiones',
+        'cuenta_corriente_movimientos',
+        'clientes',
+        'compras_items',
+        'compras',
+        'movimientos_stock',
+        'precios',
+        'codigos_barras',
+        'productos',
+        'proveedores',
+        'marcas',
+        'categorias',
+        'auditoria',
+        'dispositivos',
+        'sync_cola',
+        'sync_estado',
+        'sync_imagenes_cola',
+      ];
+
+      for (const tabla of tablasVaciarPorCompleto) {
+        db.exec(`DELETE FROM ${tabla};`);
+      }
+
+      // Conservar únicamente al administrador principal (superadmin)
+      db.prepare(
+        `DELETE FROM usuarios WHERE comercio_id = ? AND id != ?`
+      ).run(actor.comercio_id, superadminFila.id);
+
+      db.prepare(
+        `UPDATE usuarios
+         SET activo = 1, deleted_at = NULL, updated_at = ?, sync_status = 'pendiente'
+         WHERE id = ?`
+      ).run(ahora, superadminFila.id);
+
+      // Conservar únicamente la lista de precios predeterminada ('General')
+      if (listaGeneralFila) {
+        db.prepare(
+          `DELETE FROM listas_precio WHERE comercio_id = ? AND id != ?`
+        ).run(actor.comercio_id, listaGeneralFila.id);
+        db.prepare(
+          `UPDATE listas_precio
+           SET nombre = 'General', es_predeterminada = 1, deleted_at = NULL, updated_at = ?, sync_status = 'pendiente'
+           WHERE id = ?`
+        ).run(ahora, listaGeneralFila.id);
+      } else {
+        db.prepare(
+          `INSERT INTO listas_precio (id, comercio_id, nombre, es_predeterminada, created_at, updated_at, deleted_at, device_id, sync_status)
+           VALUES (?, ?, 'General', 1, ?, ?, NULL, ?, 'pendiente')`
+        ).run(
+          generarUuidV7(),
+          actor.comercio_id,
+          ahora,
+          ahora,
+          actor.device_id
+        );
+      }
+
+      db.prepare(
+        `UPDATE comercios SET updated_at = ?, sync_status = 'pendiente' WHERE id = ?`
+      ).run(ahora, actor.comercio_id);
+
+      // Reinstalar todos los triggers de inmutabilidad y protección
+      for (const trg of triggersActuales) {
+        db.exec(trg.sql);
+      }
+
+      // Escribir el nuevo registro GENESIS de auditoría
+      insertarRegistroAuditoria(db, {
+        actor: {
+          comercio_id: actor.comercio_id,
+          usuario_id: superadminFila.id,
+          usuario_nombre: superadminFila.nombre,
+          rol: 'superadmin',
+          device_id: actor.device_id,
+        },
+        accion: 'sistema_resetear_fabrica',
+        entidad: 'comercios',
+        entidad_id: actor.comercio_id,
+        valores_despues: {
+          superadmin_conservado: superadminFila.usuario,
+          backup_resguardo_previo: backupResguardoPrevio.ruta_archivo,
+        },
+        motivo:
+          'Reinicio de base de datos a cero conservando comercio, superadmin, lista General y credenciales.',
+      });
+    });
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON;');
+  }
+
+  return {
+    backupResguardoPrevio,
+    superadminConservado: `${superadminFila.nombre} (${superadminFila.usuario})`,
+  };
+}
+
+/**
  * Botón "Exportar todo a Excel" (PLAN.md §5):
  * Exporta todas las tablas de gestión del comercio a un único libro `.xlsx`
  * y registra la exportación en `auditoria`.

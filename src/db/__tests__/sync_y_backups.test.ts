@@ -31,6 +31,7 @@ import {
   crearBackupBaseDatosLocal,
   ejecutarBackupDiarioAutomaticoSiCorresponde,
   exportarTodoAExcel,
+  resetearBaseDatosAFabrica,
   restaurarDesdeBackupLocal,
 } from '../backup_repo.ts';
 
@@ -455,6 +456,31 @@ describe('Fase 2: Sincronización multi-terminal, cola de imágenes, resolución
           erroresCount: 1,
         }).etiqueta
       ).toBe('Error (ver detalle)');
+
+      // 6. Probar reinicio a fábrica (deja solo el comercio, el único superadmin, la lista General y las credenciales de configuración)
+      const resReset = resetearBaseDatosAFabrica(db, actor, tmpDir);
+      expect(resReset.superadminConservado).toContain('laura');
+      expect(
+        fs.existsSync(resReset.backupResguardoPrevio.ruta_archivo)
+      ).toBe(true);
+
+      const totalProductosPostReset = (
+        db.prepare('SELECT COUNT(*) as c FROM productos').get() as { c: number }
+      ).c;
+      const totalUsuariosPostReset = (
+        db.prepare('SELECT COUNT(*) as c FROM usuarios').get() as { c: number }
+      ).c;
+      const totalListasPostReset = (
+        db.prepare('SELECT COUNT(*) as c FROM listas_precio').get() as {
+          c: number;
+        }
+      ).c;
+      expect(totalProductosPostReset).toBe(0);
+      expect(totalUsuariosPostReset).toBe(1);
+      expect(totalListasPostReset).toBe(1);
+      expect(verificarIntegridadAuditoriaDb(db, init.comercioId).integra).toBe(
+        true
+      );
     } finally {
       db.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });

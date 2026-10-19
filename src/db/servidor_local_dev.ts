@@ -65,6 +65,7 @@ import {
   ejecutarBackupDiarioAutomaticoSiCorresponde,
   exportarTodoAExcel,
   listarHistorialBackups,
+  resetearBaseDatosAFabrica,
   restaurarDesdeBackupLocal,
 } from './backup_repo.ts';
 
@@ -169,7 +170,7 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
   }
 
   const optsArgon = { m: 4096, t: 2, p: 1 } as const;
-  const { comercioId, superadminId } = inicializarComercioYSuperadmin(db, {
+  inicializarComercioYSuperadmin(db, {
     nombreComercio: 'Comercio Local POS',
     cuit: '20-12345678-6',
     condicionIva: 'monotributo',
@@ -177,41 +178,6 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
     usuarioAdmin: 'maria',
     claveHashAdmin: hashearClaveArgon2id('Admin1234', optsArgon),
     deviceId: 'terminal-local-1',
-  });
-
-  const actorSuperadmin: ActorContexto = {
-    comercio_id: comercioId,
-    usuario_id: superadminId,
-    usuario_nombre: 'María Superadmin',
-    rol: 'superadmin',
-    device_id: 'terminal-local-1',
-  };
-
-  crearUsuario(db, actorSuperadmin, {
-    nombre: 'Carlos Encargado',
-    usuario: 'carlos',
-    claveHash: hashearClaveArgon2id('Encargado1234', optsArgon),
-    rol: 'encargado',
-  });
-
-  const cajeroId = crearUsuario(db, actorSuperadmin, {
-    nombre: 'Lucas Cajero',
-    usuario: 'lucas',
-    claveHash: hashearClaveArgon2id('Cajero1234', optsArgon),
-    rol: 'cajero',
-  });
-
-  const actorCajero: ActorContexto = {
-    comercio_id: comercioId,
-    usuario_id: cajeroId,
-    usuario_nombre: 'Lucas Cajero',
-    rol: 'cajero',
-    device_id: 'terminal-local-1',
-  };
-
-  abrirSesionCaja(db, actorCajero, {
-    montoInicialCentavos: 0,
-    observaciones: 'Apertura inicial de caja local',
   });
 }
 
@@ -794,14 +760,24 @@ export function ejecutarAccionPosLocal(
 
     case 'restaurar_desde_backup': {
       const dirBase = path.dirname(rutaActivaDb);
-      return restaurarDesdeBackupLocal(db, actor, {
+      const res = restaurarDesdeBackupLocal(db, actor, {
         rutaArchivoBackup: String(payload.rutaArchivoBackup ?? ''),
         directorioBaseDatos: dirBase,
       });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'resetear_base_datos': {
+      const dirBase = path.dirname(rutaActivaDb);
+      const res = resetearBaseDatosAFabrica(db, actor, dirBase);
+      sincronizarWalADisco(db);
+      return res;
     }
 
     case 'exportar_todo_excel': {
       const xlsxBytes = exportarTodoAExcel(db, actor);
+      sincronizarWalADisco(db);
       return {
         xlsxBase64: Buffer.from(xlsxBytes).toString('base64'),
         bytesLength: xlsxBytes.byteLength,

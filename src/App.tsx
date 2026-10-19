@@ -232,11 +232,63 @@ export function App(): React.ReactElement {
   return (
     <div className="app-layout">
       <header className="topbar">
-        <div className="topbar-brand">
-          <strong>Punto de Ventas</strong>
-          <span className="badge-fase" title={datosServidor?.rutaBaseDatos}>
-            SQLite: {datosServidor?.rutaBaseDatos ?? 'data/pos_local.db'}
-          </span>
+        <div className="topbar-row-top">
+          <div className="topbar-brand">
+            <span className="brand-dot" aria-hidden="true" />
+            <strong>Punto de Ventas</strong>
+            <span
+              className="badge-fase"
+              title={
+                datosServidor?.rutaBaseDatos ?? 'data/pos_local.db'
+              }
+            >
+              SQLite: data/pos_local.db
+            </span>
+          </div>
+
+          <div className="topbar-status">
+            <label className="role-switcher">
+              <span>Sesión:</span>
+              <select
+                value={rolActivo}
+                onChange={(e) => cambiarRolDemo(e.target.value as RolUsuario)}
+              >
+                <option value="superadmin">María (superadmin)</option>
+                <option value="encargado">Carlos (encargado)</option>
+                <option value="cajero">Lucas (cajero)</option>
+              </select>
+            </label>
+            <span className="topbar-date">{hoy}</span>
+            <span
+              className={`sync-pill sync-pill-${resumenSync.tipoBadge}`}
+              title={
+                resumenSync.ultimoErrorDetalle ??
+                `Datos pendientes: ${resumenSync.datosPendientes} | Imágenes pendientes: ${resumenSync.imagenesPendientes}`
+              }
+            >
+              {sincronizandoEnCurso ? 'Sincronizando...' : resumenSync.etiqueta}
+            </span>
+            <div className="topbar-sync-actions">
+              <button
+                type="button"
+                className="nav-btn nav-btn-compact"
+                disabled={sincronizandoEnCurso}
+                title="Subir datos ahora (Push)"
+                onClick={() => void ejecutarSubidaManual()}
+              >
+                ↑ Subir
+              </button>
+              <button
+                type="button"
+                className="nav-btn nav-btn-compact"
+                disabled={sincronizandoEnCurso}
+                title="Bajar datos ahora (Pull)"
+                onClick={() => void ejecutarBajadaManual()}
+              >
+                ↓ Bajar
+              </button>
+            </div>
+          </div>
         </div>
 
         <nav className="topbar-nav" aria-label="Módulos del sistema">
@@ -308,50 +360,6 @@ export function App(): React.ReactElement {
             </button>
           )}
         </nav>
-
-        <div className="topbar-status">
-          <label className="role-switcher">
-            Sesión activa:
-            <select
-              value={rolActivo}
-              onChange={(e) => cambiarRolDemo(e.target.value as RolUsuario)}
-            >
-              <option value="superadmin">María (superadmin)</option>
-              <option value="encargado">Carlos (encargado)</option>
-              <option value="cajero">Lucas (cajero)</option>
-            </select>
-          </label>
-          <span>{hoy}</span>
-          <span
-            className="sync-pill"
-            title={
-              resumenSync.ultimoErrorDetalle ??
-              `Datos pendientes: ${resumenSync.datosPendientes} | Imágenes pendientes: ${resumenSync.imagenesPendientes}`
-            }
-          >
-            {sincronizandoEnCurso ? 'Sincronizando...' : resumenSync.etiqueta}
-          </span>
-          <button
-            type="button"
-            className="nav-btn"
-            style={{ padding: '0.2rem 0.45rem', fontSize: '0.75rem' }}
-            disabled={sincronizandoEnCurso}
-            title="Subir datos ahora (Push)"
-            onClick={() => void ejecutarSubidaManual()}
-          >
-            ↑ Subir
-          </button>
-          <button
-            type="button"
-            className="nav-btn"
-            style={{ padding: '0.2rem 0.45rem', fontSize: '0.75rem' }}
-            disabled={sincronizandoEnCurso}
-            title="Bajar datos ahora (Pull)"
-            onClick={() => void ejecutarBajadaManual()}
-          >
-            ↓ Bajar
-          </button>
-        </div>
       </header>
 
       <main className="main-content">

@@ -288,6 +288,33 @@ export function PanelConfiguracionSync({
     }
   }
 
+  const [confirmandoReset, setConfirmandoReset] = useState(false);
+
+  async function manejarResetearBaseDatos() {
+    setMensajeError(null);
+    setMensajeExito(null);
+    setProcesando(true);
+    try {
+      const res = await invocarPosApi<{
+        backupResguardoPrevio: RegistroHistorialBackupDTO;
+        superadminConservado: string;
+      }>('resetear_base_datos', { rolActivo });
+      setConfirmandoReset(false);
+      setMensajeExito(
+        `Base de datos reiniciada a cero. Se conservó únicamente al administrador (${res.superadminConservado}), el comercio, la lista General y las credenciales de Supabase. Resguardo previo en: ${res.backupResguardoPrevio.ruta_archivo}`
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Error al reiniciar la base de datos.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
   return (
     <div className="pos-grid">
       <div>
@@ -302,9 +329,9 @@ export function PanelConfiguracionSync({
           </div>
         ) : null}
 
-        <section className="card" style={{ marginBottom: '1rem' }}>
+        <section className="card" style={{ marginBottom: '1.25rem' }}>
           <h2>Estado de Sincronización (Nube Supabase)</h2>
-          <p style={{ color: '#475569', fontSize: '0.9rem' }}>
+          <p className="text-muted">
             La base SQLite local es la fuente de verdad de trabajo. Primero
             sincronizan los datos y después, en segundo plano y con su propia
             cola, las imágenes WebP de los productos (PLAN.md §5 y §5.1).
@@ -313,14 +340,14 @@ export function PanelConfiguracionSync({
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
               gap: '0.75rem',
-              margin: '1rem 0',
+              margin: '0.5rem 0',
             }}
           >
             <div className="stat-box">
               <div className="stat-label">Estado actual</div>
-              <div className="stat-value" style={{ fontSize: '1.1rem' }}>
+              <div className="stat-value" style={{ fontSize: '1.05rem' }}>
                 {estadoSync.etiqueta}
               </div>
             </div>
@@ -331,14 +358,14 @@ export function PanelConfiguracionSync({
               </div>
             </div>
             <div className="stat-box">
-              <div className="stat-label">Cola de Imágenes (separada)</div>
+              <div className="stat-label">Cola de Imágenes</div>
               <div className="stat-value">
                 {estadoSync.imagenesPendientes} pendientes
               </div>
             </div>
             <div className="stat-box">
               <div className="stat-label">Última subida / bajada</div>
-              <div style={{ fontSize: '0.82rem', marginTop: '0.25rem' }}>
+              <div style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>
                 <div>
                   ↑{' '}
                   {estadoSync.ultimaSubidaAt
@@ -395,7 +422,8 @@ export function PanelConfiguracionSync({
           <form onSubmit={(e) => void manejarGuardarConfiguracion(e)}>
             <div className="form-group">
               <label htmlFor="cfg-supabase-url">
-                URL del Proyecto Supabase (opcional en modo 100% local)
+                URL del Proyecto Supabase (guardada en tabla{' '}
+                <code>configuracion_sistema</code> de SQLite)
               </label>
               <input
                 id="cfg-supabase-url"
@@ -418,31 +446,33 @@ export function PanelConfiguracionSync({
                 value={supabaseAnonKey}
                 onChange={(e) => setSupabaseAnonKey(e.target.value)}
               />
-              <small style={{ color: '#64748b' }}>
-                Regla 8: Nunca ingreses la clave <code>service_role</code> ni{' '}
-                <code>sb_secret_</code>. El sistema las bloquea por seguridad y
-                aplica Row Level Security (RLS).
+              <small style={{ color: '#64748b', lineHeight: 1.4 }}>
+                Regla 8: Se guarda localmente en{' '}
+                <code>data/pos_local.db</code> (tabla{' '}
+                <code>configuracion_sistema</code>). Nunca ingreses la clave{' '}
+                <code>service_role</code> ni <code>sb_secret_</code>.
               </small>
             </div>
 
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: '0.75rem',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: '0.85rem',
+                alignItems: 'center',
               }}
             >
-              <div className="form-group">
-                <label>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="checkbox-inline">
                   <input
                     type="checkbox"
                     checked={syncAuto}
                     onChange={(e) => setSyncAuto(e.target.checked)}
-                  />{' '}
-                  Sincronizar automáticamente en segundo plano
+                  />
+                  <span>Sincronizar automáticamente en segundo plano</span>
                 </label>
               </div>
-              <div className="form-group">
+              <div className="form-group" style={{ marginBottom: 0 }}>
                 <label htmlFor="cfg-intervalo">
                   Intervalo periódico (minutos)
                 </label>
@@ -474,13 +504,13 @@ export function PanelConfiguracionSync({
             </div>
 
             <div className="form-group">
-              <label>
+              <label className="checkbox-inline">
                 <input
                   type="checkbox"
                   checked={backupDiario}
                   onChange={(e) => setBackupDiario(e.target.checked)}
-                />{' '}
-                Realizar copia diaria automática del archivo SQLite
+                />
+                <span>Realizar copia diaria automática del archivo SQLite</span>
               </label>
             </div>
 
@@ -496,18 +526,18 @@ export function PanelConfiguracionSync({
       </div>
 
       <div>
-        <section className="card" style={{ marginBottom: '1rem' }}>
+        <section className="card" style={{ marginBottom: '1.25rem' }}>
           <h2>Espacio usado por Imágenes de Productos (§5.1)</h2>
-          <p style={{ fontSize: '0.88rem', color: '#475569' }}>
+          <p className="text-muted">
             Todas las fotos se convierten a WebP (&le; 150 KB) + miniatura (200
             px) y sin metadatos EXIF/GPS para proteger el plan gratuito.
           </p>
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 1fr 1fr',
-              gap: '0.5rem',
-              marginTop: '0.75rem',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: '0.65rem',
+              marginTop: '0.35rem',
             }}
           >
             <div className="stat-box">
@@ -529,14 +559,14 @@ export function PanelConfiguracionSync({
           </div>
         </section>
 
-        <section className="card">
+        <section className="card" style={{ marginBottom: '1.25rem' }}>
           <h2>Backups Independientes y Restauración (§5)</h2>
           <div
             style={{
               display: 'flex',
               gap: '0.6rem',
               flexWrap: 'wrap',
-              marginBottom: '1rem',
+              marginBottom: '0.75rem',
             }}
           >
             <button
@@ -561,8 +591,9 @@ export function PanelConfiguracionSync({
             style={{
               display: 'flex',
               gap: '0.5rem',
-              marginBottom: '1rem',
+              marginBottom: '0.75rem',
               alignItems: 'flex-end',
+              flexWrap: 'wrap',
             }}
           >
             <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
@@ -587,68 +618,123 @@ export function PanelConfiguracionSync({
             </button>
           </div>
 
-          <h3 style={{ fontSize: '0.95rem', marginBottom: '0.5rem' }}>
-            Historial de copias locales recientes
-          </h3>
-          <table className="pos-table">
-            <thead>
-              <tr>
-                <th>Fecha</th>
-                <th>Tipo</th>
-                <th>Tamaño</th>
-                <th>Archivo</th>
-                <th>Acción</th>
-              </tr>
-            </thead>
-            <tbody>
-              {historialBackupsInicial.length === 0 ? (
+          <h3>Historial de copias locales recientes</h3>
+          <div className="table-scroll">
+            <table className="pos-table">
+              <thead>
                 <tr>
-                  <td colSpan={5} style={{ textAlign: 'center' }}>
-                    Aún no hay copias registradas.
-                  </td>
+                  <th>Fecha</th>
+                  <th>Tipo</th>
+                  <th>Tamaño</th>
+                  <th>Archivo</th>
+                  <th>Acción</th>
                 </tr>
-              ) : (
-                historialBackupsInicial.map((b) => (
-                  <tr key={b.id}>
-                    <td>{formatearFechaHoraAR(b.fecha)}</td>
-                    <td>
-                      {b.tipo === 'automatico_diario'
-                        ? 'Diario automático'
-                        : b.tipo === 'previo_restauracion'
-                          ? 'Resguardo pre-restauración'
-                          : 'Manual'}
-                    </td>
-                    <td>{Math.round(b.tamano_bytes / 1024)} KB</td>
-                    <td
-                      style={{
-                        maxWidth: '200px',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontSize: '0.8rem',
-                      }}
-                      title={b.ruta_archivo}
-                    >
-                      {b.ruta_archivo}
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.78rem' }}
-                        disabled={procesando}
-                        onClick={() =>
-                          void manejarRestaurarBackup(b.ruta_archivo)
-                        }
-                      >
-                        Restaurar
-                      </button>
+              </thead>
+              <tbody>
+                {historialBackupsInicial.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ textAlign: 'center' }}>
+                      Aún no hay copias registradas.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  historialBackupsInicial.map((b) => (
+                    <tr key={b.id}>
+                      <td>{formatearFechaHoraAR(b.fecha)}</td>
+                      <td>
+                        {b.tipo === 'automatico_diario'
+                          ? 'Diario automático'
+                          : b.tipo === 'previo_restauracion'
+                            ? 'Resguardo previo'
+                            : 'Manual'}
+                      </td>
+                      <td>{Math.round(b.tamano_bytes / 1024)} KB</td>
+                      <td
+                        style={{
+                          maxWidth: '180px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          fontSize: '0.8rem',
+                        }}
+                        title={b.ruta_archivo}
+                      >
+                        {b.ruta_archivo.split(/[\\/]/).pop() ?? b.ruta_archivo}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ padding: '0.25rem 0.55rem', fontSize: '0.78rem' }}
+                          disabled={procesando}
+                          onClick={() =>
+                            void manejarRestaurarBackup(b.ruta_archivo)
+                          }
+                        >
+                          Restaurar
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="card danger-zone-card">
+          <h2>Zona de Mantenimiento: Reiniciar Base de Datos a Cero</h2>
+          <p className="text-muted">
+            Limpia todos los productos, movimientos de stock, sesiones de caja,
+            ventas y usuarios secundarios. Deja únicamente los datos fijos:{' '}
+            <strong>el comercio</strong>,{' '}
+            <strong>un único administrador (superadmin)</strong>,{' '}
+            <strong>la lista de precios General</strong> y las{' '}
+            <strong>credenciales de Supabase</strong>. Antes de vaciar, guarda
+            un backup automático de resguardo en <code>data/backups/</code>.
+          </p>
+
+          {!confirmandoReset ? (
+            <div>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={procesando}
+                onClick={() => setConfirmandoReset(true)}
+              >
+                Resetear base de datos (dejar solo Admin y datos fijos)
+              </button>
+            </div>
+          ) : (
+            <div className="alert-error" style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+              <strong>
+                ¿Confirmás reiniciar la base de datos local a cero?
+              </strong>
+              <span>
+                Se creará una copia de seguridad previa en{' '}
+                <code>data/backups/</code> y se eliminarán todos los productos,
+                ventas, movimientos y usuarios no administradores.
+              </span>
+              <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  disabled={procesando}
+                  onClick={() => void manejarResetearBaseDatos()}
+                >
+                  Sí, confirmar reinicio a cero
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={procesando}
+                  onClick={() => setConfirmandoReset(false)}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </div>
     </div>
