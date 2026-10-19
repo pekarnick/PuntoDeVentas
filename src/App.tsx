@@ -359,15 +359,19 @@ export function App(): React.ReactElement {
           <PanelVentaPOS
             rolActivo={rolActivo}
             operadorNombre={NOMBRES_OPERADOR[rolActivo]}
-            catalogoInicial={datosServidor?.catalogoVenta}
-            ventasRecientesIniciales={datosServidor?.ventasRecientes}
+            catalogoInicial={datosServidor ? datosServidor.catalogoVenta : []}
+            ventasRecientesIniciales={
+              datosServidor ? datosServidor.ventasRecientes : []
+            }
             onDatosActualizados={() => void recargarEstadoLocal()}
           />
         )}
         {pestania === 'productos' && (
           <PanelProductosStock
             rolActivo={rolActivo}
-            productosIniciales={datosServidor?.catalogoAdmin}
+            productosIniciales={
+              datosServidor ? datosServidor.catalogoAdmin : []
+            }
             onDatosActualizados={() => void recargarEstadoLocal()}
           />
         )}

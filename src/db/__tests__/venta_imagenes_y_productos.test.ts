@@ -411,15 +411,7 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
       };
 
       expect(fs.existsSync(rutaDbPrueba)).toBe(true);
-      expect(estadoInicial.catalogoVenta.length).toBeGreaterThanOrEqual(5);
-
-      // Probar el filtro del desplegable de sugerencias buscando por palabras parciales del nombre
-      const sugerenciasAlfajor = filtrarSugerenciasCatalogoPOS(
-        estadoInicial.catalogoVenta,
-        'alfajor choc'
-      );
-      expect(sugerenciasAlfajor).toHaveLength(1);
-      expect(sugerenciasAlfajor[0]?.nombre).toBe('Alfajor Triple Chocolate');
+      expect(estadoInicial.catalogoVenta).toHaveLength(0);
 
       // Crear un producto nuevo mediante el servicio persistente y verificar que queda guardado en el archivo
       const creado = ejecutarAccionPosLocal(
@@ -441,7 +433,17 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
         { rolActivo: 'cajero' },
         rutaDbPrueba
       ) as {
-        catalogoVenta: Array<{ id: string; nombre: string; stock_actual: number }>;
+        catalogoVenta: Array<{
+          id: string;
+          nombre: string;
+          codigos_barras: string[];
+          unidad: 'unidad' | 'kg' | 'm' | 'l' | 'caja';
+          permite_decimales: boolean;
+          precio_venta: number;
+          alicuota_iva: 0 | 10.5 | 21 | 27;
+          exento_iva: boolean;
+          stock_actual: number;
+        }>;
       };
 
       const pilaEnCatalogo = estadoPosterior.catalogoVenta.find(
@@ -449,6 +451,14 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
       );
       expect(pilaEnCatalogo?.nombre).toBe('Pila Alcalina AA x2');
       expect(pilaEnCatalogo?.stock_actual).toBe(40);
+
+      // Probar el filtro del desplegable de sugerencias buscando por palabras parciales del nombre
+      const sugerenciasPila = filtrarSugerenciasCatalogoPOS(
+        estadoPosterior.catalogoVenta,
+        'pila alc'
+      );
+      expect(sugerenciasPila).toHaveLength(1);
+      expect(sugerenciasPila[0]?.nombre).toBe('Pila Alcalina AA x2');
     } finally {
       // No borramos la conexión abierta en Windows, o ignoramos EBUSY al limpiar temp
       try {

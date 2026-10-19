@@ -47,7 +47,7 @@ import {
 } from './usuarios_auth_repo.ts';
 import {
   AdaptadorSupabaseHttp,
-  NubeSimuladaEnMemoria,
+  NubeSinConfigurar,
   ejecutarCicloSincronizacionCompleto,
   ejecutarPullDatos,
   ejecutarPushDatos,
@@ -76,7 +76,15 @@ export const RUTA_DB_POR_DEFECTO = path.resolve(
 
 let instanciaDb: DatabaseSync | null = null;
 let rutaActivaDb: string = RUTA_DB_POR_DEFECTO;
-const nubeDemoPersistente = new NubeSimuladaEnMemoria();
+const nubeSinConfigurar = new NubeSinConfigurar();
+
+function sincronizarWalADisco(db: DatabaseSync): void {
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  } catch {
+    // Si hay una lectura simultánea, el próximo ciclo volcará el WAL
+  }
+}
 
 function resolverAdaptadorSync(
   db: DatabaseSync,
@@ -91,7 +99,7 @@ function resolverAdaptadorSync(
       rolUsuario: 'superadmin',
     });
   }
-  return nubeDemoPersistente;
+  return nubeSinConfigurar;
 }
 
 export function obtenerConexionLocalDisco(
@@ -99,6 +107,8 @@ export function obtenerConexionLocalDisco(
 ): DatabaseSync {
   if (instanciaDb && rutaActivaDb === rutaPersonalizada) {
     aplicarMigraciones(instanciaDb);
+    limpiarProductosDemoResiduales(instanciaDb);
+    sincronizarWalADisco(instanciaDb);
     return instanciaDb;
   }
 
@@ -107,10 +117,46 @@ export function obtenerConexionLocalDisco(
 
   const db = crearBaseDatos(rutaPersonalizada);
   asegurarDatosInicialesSiVacia(db);
+  limpiarProductosDemoResiduales(db);
+  sincronizarWalADisco(db);
 
   instanciaDb = db;
   rutaActivaDb = rutaPersonalizada;
   return db;
+}
+
+const CODIGOS_DEMO_SEMILLA = [
+  'YER-001',
+  'ALF-003',
+  'PAN-KG',
+  'GAS-225',
+  'BOL-01',
+] as const;
+
+function limpiarProductosDemoResiduales(db: DatabaseSync): void {
+  const placeholders = CODIGOS_DEMO_SEMILLA.map(() => '?').join(', ');
+  const existentes = db
+    .prepare(
+      `SELECT id FROM productos
+       WHERE codigo_interno IN (${placeholders}) AND deleted_at IS NULL`
+    )
+    .all(...CODIGOS_DEMO_SEMILLA) as unknown as { id: string }[];
+
+  if (existentes.length === 0) return;
+
+  const ahora = new Date().toISOString();
+  for (const prod of existentes) {
+    db.prepare(
+      `UPDATE productos
+       SET activo = 0, deleted_at = ?, updated_at = ?, sync_status = 'pendiente'
+       WHERE id = ?`
+    ).run(ahora, ahora, prod.id);
+    db.prepare(
+      `UPDATE codigos_barras
+       SET deleted_at = ?, updated_at = ?, sync_status = 'pendiente'
+       WHERE producto_id = ? AND deleted_at IS NULL`
+    ).run(ahora, ahora, prod.id);
+  }
 }
 
 function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
@@ -141,7 +187,7 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
     device_id: 'terminal-local-1',
   };
 
-  const encargadoId = crearUsuario(db, actorSuperadmin, {
+  crearUsuario(db, actorSuperadmin, {
     nombre: 'Carlos Encargado',
     usuario: 'carlos',
     claveHash: hashearClaveArgon2id('Encargado1234', optsArgon),
@@ -155,14 +201,6 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
     rol: 'cajero',
   });
 
-  const actorEncargado: ActorContexto = {
-    comercio_id: comercioId,
-    usuario_id: encargadoId,
-    usuario_nombre: 'Carlos Encargado',
-    rol: 'encargado',
-    device_id: 'terminal-local-1',
-  };
-
   const actorCajero: ActorContexto = {
     comercio_id: comercioId,
     usuario_id: cajeroId,
@@ -171,71 +209,8 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
     device_id: 'terminal-local-1',
   };
 
-  // Productos iniciales reales en SQLite
-  crearProducto(db, actorEncargado, {
-    nombre: 'Yerba Mate Selección 1kg',
-    codigoInterno: 'YER-001',
-    costoCompraCentavos: 280000,
-    precioVentaCentavos: 420000,
-    alicuotaIva: 21,
-    stockMinimo: 10,
-    botonRapido: false,
-    codigosBarras: ['7791234560012', '7791234560019'],
-    stockInicial: 25,
-  });
-
-  crearProducto(db, actorEncargado, {
-    nombre: 'Alfajor Triple Chocolate',
-    codigoInterno: 'ALF-003',
-    costoCompraCentavos: 85000,
-    precioVentaCentavos: 150000,
-    alicuotaIva: 21,
-    stockMinimo: 15,
-    botonRapido: true,
-    codigosBarras: ['7790001112223'],
-    stockInicial: 30,
-  });
-
-  crearProducto(db, actorEncargado, {
-    nombre: 'Pan Francés Fresco (kg)',
-    codigoInterno: 'PAN-KG',
-    unidad: 'kg',
-    permiteDecimales: true,
-    costoCompraCentavos: 130000,
-    precioVentaCentavos: 240000,
-    alicuotaIva: 10.5,
-    stockMinimo: 5,
-    botonRapido: true,
-    codigosBarras: ['200001'],
-    stockInicial: 18,
-  });
-
-  crearProducto(db, actorEncargado, {
-    nombre: 'Gaseosa Cola 2.25L',
-    codigoInterno: 'GAS-225',
-    costoCompraCentavos: 190000,
-    precioVentaCentavos: 310000,
-    alicuotaIva: 21,
-    stockMinimo: 8,
-    botonRapido: true,
-    codigosBarras: ['7790895000997'],
-    stockInicial: 20,
-  });
-
-  crearProducto(db, actorEncargado, {
-    nombre: 'Bolsa Reutilizable Grande',
-    codigoInterno: 'BOL-01',
-    costoCompraCentavos: 25000,
-    precioVentaCentavos: 60000,
-    alicuotaIva: 21,
-    stockMinimo: 20,
-    botonRapido: true,
-    codigosBarras: [],
-    stockInicial: 50,
-  });
-
   abrirSesionCaja(db, actorCajero, {
-    montoInicialCentavos: 1500000, // $ 15.000,00
+    montoInicialCentavos: 0,
     observaciones: 'Apertura inicial de caja local',
   });
 }
@@ -848,6 +823,7 @@ export function ejecutarAccionPosLocal(
           actor.comercio_id,
           !online
         );
+        sincronizarWalADisco(db);
         return { push, imagenes, estadoUI };
       })();
     }
@@ -867,6 +843,7 @@ export function ejecutarAccionPosLocal(
           actor.comercio_id,
           !online
         );
+        sincronizarWalADisco(db);
         return { pull, imagenes, estadoUI };
       })();
     }
@@ -874,7 +851,16 @@ export function ejecutarAccionPosLocal(
     case 'sync_ciclo_completo': {
       const dirBase = path.dirname(rutaActivaDb);
       const adaptador = resolverAdaptadorSync(db, actor.comercio_id);
-      return ejecutarCicloSincronizacionCompleto(db, adaptador, actor, dirBase);
+      return (async () => {
+        const res = await ejecutarCicloSincronizacionCompleto(
+          db,
+          adaptador,
+          actor,
+          dirBase
+        );
+        sincronizarWalADisco(db);
+        return res;
+      })();
     }
 
     default:

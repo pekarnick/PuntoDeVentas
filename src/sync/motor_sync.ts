@@ -165,17 +165,73 @@ const CAMPOS_BOOLEANOS_POSTGRES: ReadonlySet<string> = new Set([
 ]);
 
 function serializarRegistroParaPostgres(
+  tabla: TablaSincronizable,
   reg: RegistroSincronizableBase
 ): Record<string, unknown> {
   const copia: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(reg)) {
+    if (tabla === 'precios' && k === 'margen_bp') {
+      copia.margen_porcentaje =
+        typeof v === 'number' ? Number((v / 100).toFixed(2)) : null;
+      continue;
+    }
+    if (tabla === 'cuenta_corriente_movimientos' && k === 'observaciones') {
+      continue;
+    }
     if (CAMPOS_BOOLEANOS_POSTGRES.has(k) && (v === 0 || v === 1)) {
       copia[k] = v === 1;
+    } else if (k === 'rubro' && (v === null || v === undefined || v === '')) {
+      copia[k] = 'general';
     } else {
       copia[k] = v;
     }
   }
   return copia;
+}
+
+function normalizarRegistroDesdePostgres(
+  tabla: TablaSincronizable,
+  reg: Record<string, unknown>
+): RegistroSincronizableBase {
+  const copia: Record<string, unknown> = { ...reg };
+  if (
+    tabla === 'precios' &&
+    'margen_porcentaje' in copia &&
+    !('margen_bp' in copia)
+  ) {
+    const mp = copia.margen_porcentaje;
+    copia.margen_bp =
+      mp !== null && mp !== undefined && !Number.isNaN(Number(mp))
+        ? Math.round(Number(mp) * 100)
+        : null;
+  }
+  return copia as RegistroSincronizableBase;
+}
+
+/**
+ * Adaptador inactivo cuando aún no se configuró la URL y Anon Key de Supabase.
+ * Mantiene todos los cambios en `sync_cola` como `pendiente` sin marcarlos falsamente como sincronizados.
+ */
+export class NubeSinConfigurar implements AdaptadorNubeSupabase {
+  public async estaDisponible(): Promise<boolean> {
+    return false;
+  }
+
+  public async subirRegistrosTabla(): Promise<void> {
+    throw new Error('Supabase no está configurado todavía.');
+  }
+
+  public async bajarRegistrosTabla(): Promise<RegistroSincronizableBase[]> {
+    throw new Error('Supabase no está configurado todavía.');
+  }
+
+  public async subirArchivoImagen(): Promise<void> {
+    throw new Error('Supabase Storage no está configurado todavía.');
+  }
+
+  public async bajarArchivoImagen(): Promise<Buffer | null> {
+    throw new Error('Supabase Storage no está configurado todavía.');
+  }
 }
 
 /**
@@ -244,7 +300,9 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
       ? 'resolution=ignore-duplicates,return=minimal'
       : 'resolution=merge-duplicates,return=minimal';
 
-    const payloadPostgres = registros.map(serializarRegistroParaPostgres);
+    const payloadPostgres = registros.map((r) =>
+      serializarRegistroParaPostgres(tabla, r)
+    );
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -289,7 +347,8 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
       throw new Error(`Error HTTP ${resp.status} al bajar ${tabla}: ${texto}`);
     }
 
-    return (await resp.json()) as RegistroSincronizableBase[];
+    const filas = (await resp.json()) as Record<string, unknown>[];
+    return filas.map((f) => normalizarRegistroDesdePostgres(tabla, f));
   }
 
   public async subirArchivoImagen(
@@ -417,6 +476,34 @@ export function recolectarPendientesLocalesEnCola(
   return nuevosEncolados;
 }
 
+/**
+ * Re-encola todos los registros locales del comercio en `sync_cola` respetando el orden topológico.
+ * Se utiliza cuando se configura por primera vez la URL de Supabase o cuando el servidor remoto
+ * reporta que una tabla padre (ej. `comercios`) aún no fue cargada (`23503`).
+ */
+export function reencolarComercioCompletoParaSync(
+  db: DatabaseSync,
+  comercioId: string
+): void {
+  ejecutarEnTransaccion(db, () => {
+    for (const tabla of ORDEN_TABLAS_SYNC) {
+      const colComercio = tabla === 'comercios' ? 'id' : 'comercio_id';
+      if (!TABLAS_INMUTABLES_SIN_UPDATE_FILA.has(tabla)) {
+        db.prepare(
+          `UPDATE ${tabla} SET sync_status = 'pendiente' WHERE ${colComercio} = ?`
+        ).run(comercioId);
+      }
+    }
+
+    db.prepare(
+      `UPDATE sync_cola SET estado = 'pendiente', ultimo_error = NULL WHERE estado IN ('sincronizado', 'error')`
+    ).run();
+    db.prepare(`DELETE FROM sync_estado`).run();
+  });
+
+  recolectarPendientesLocalesEnCola(db, comercioId);
+}
+
 export interface ResultadoPushSync {
   registrosSubidos: number;
   tablasActualizadas: TablaSincronizable[];
@@ -430,7 +517,8 @@ export interface ResultadoPushSync {
 export async function ejecutarPushDatos(
   db: DatabaseSync,
   adaptador: AdaptadorNubeSupabase,
-  actor: ActorContexto
+  actor: ActorContexto,
+  reintentoPadresAplicado = false
 ): Promise<ResultadoPushSync> {
   recolectarPendientesLocalesEnCola(db, actor.comercio_id);
 
@@ -473,7 +561,7 @@ export async function ejecutarPushDatos(
 
     if (registrosAEnviar.length === 0) {
       db.prepare(
-        `UPDATE sync_cola SET estado = 'sincronizado' WHERE tabla = ? AND estado IN ('pendiente', 'error')`
+        `UPDATE sync_cola SET estado = 'sincronizado', ultimo_error = NULL WHERE tabla = ? AND estado IN ('pendiente', 'error')`
       ).run(tabla);
       continue;
     }
@@ -508,13 +596,22 @@ export async function ejecutarPushDatos(
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : `Error al subir tabla ${tabla}`;
+
+      // Si una tabla hija falla por 23503 (clave foránea faltante en Supabase porque las tablas padres
+      // se habían marcado como sincronizadas antes de conectar Supabase), re-encolar todo el comercio
+      // en orden topológico y reintentar una única vez de forma transparente.
+      if (!reintentoPadresAplicado && msg.includes('23503')) {
+        reencolarComercioCompletoParaSync(db, actor.comercio_id);
+        return ejecutarPushDatos(db, adaptador, actor, true);
+      }
+
       errores.push(msg);
       db.prepare(
         `UPDATE sync_cola
          SET estado = 'error',
              intentos = intentos + 1,
              ultimo_error = ?
-         WHERE tabla = ? AND estado = 'pendiente'`
+         WHERE tabla = ? AND estado IN ('pendiente', 'error')`
       ).run(msg, tabla);
     }
   }
@@ -1011,7 +1108,11 @@ export function guardarConfiguracionSistema(
   const backupDiario =
     input.backupDiarioHabilitado ?? actual.backup_diario_habilitado;
 
-  return ejecutarEnTransaccion(db, () => {
+  const cambioDestinoSupabase =
+    nuevaUrl !== actual.supabase_url ||
+    nuevaAnonKey !== actual.supabase_anon_key;
+
+  const resultado = ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
 
     db.prepare(
@@ -1058,4 +1159,10 @@ export function guardarConfiguracionSistema(
 
     return obtenerConfiguracionSistema(db, actor.comercio_id);
   });
+
+  if (cambioDestinoSupabase && nuevaUrl && nuevaAnonKey) {
+    reencolarComercioCompletoParaSync(db, actor.comercio_id);
+  }
+
+  return resultado;
 }
