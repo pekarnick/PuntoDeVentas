@@ -41,3 +41,4 @@ coverage/
 .idea/
 .DS_Store
 Thumbs.db
+credenciales_google.json

@@ -6,8 +6,8 @@
 POS genérico offline-first para comercios argentinos (kiosco, librería, ferretería). Stack: **Tauri 2 + React + TypeScript + SQLite + Supabase**.
 
 ## Primer paso en cada sesión
-1. Leé `PLAN.md` completo.
-2. Revisá en qué fase estamos y qué falta antes de tocar código.
+1. Leé `PLAN.md` y `PROMPT_BASE.md` completos.
+2. Revisá en qué fase estamos y qué falta antes de tocar código (mantené `PROMPT_BASE.md` actualizado al finalizar cada fase).
 3. Si la tarea contradice el plan, **avisá y proponé la alternativa**; no la implementes en silencio.
 
 ## Reglas inviolables (resumen; detalle en PLAN.md §3)
