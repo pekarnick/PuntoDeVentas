@@ -25,7 +25,7 @@ export interface ProductoCatalogoMovil {
   readonly id: string;
   readonly codigo_interno: string | null;
   readonly nombre: string;
-  readonly unidad: 'unidad' | 'kg' | 'litro' | 'metro' | 'par';
+  readonly unidad: 'unidad' | 'kg' | 'm' | 'l' | 'caja' | 'litro' | 'metro' | 'par';
   readonly permite_decimales: boolean;
   readonly precio_venta: Centavos;
   readonly alicuota_iva: AlicuotaIva;
@@ -348,8 +348,8 @@ function calcularPolinomioGeneradorRs(grado: number): Uint8Array {
     const next = new Uint8Array(poly.length + 1);
     const factor = GF_EXP[i]!;
     for (let j = 0; j < poly.length; j++) {
-      next[j] ^= poly[j]!;
-      next[j + 1] ^= gfMul(poly[j]!, factor);
+      next[j] = (next[j] ?? 0) ^ poly[j]!;
+      next[j + 1] = (next[j + 1] ?? 0) ^ gfMul(poly[j]!, factor);
     }
     poly = next;
   }
@@ -364,7 +364,7 @@ function calcularRestoReedSolomon(datos: Uint8Array, ecLen: number): Uint8Array 
     resto.copyWithin(0, 1);
     resto[ecLen - 1] = 0;
     for (let j = 0; j < ecLen; j++) {
-      resto[j] ^= gfMul(gen[j + 1]!, factor);
+      resto[j] = (resto[j] ?? 0) ^ gfMul(gen[j + 1]!, factor);
     }
   }
   return resto;

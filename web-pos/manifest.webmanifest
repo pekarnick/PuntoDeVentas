@@ -1,0 +1,11 @@
+{
+  "name": "Punto de Venta Móvil (/web-pos)",
+  "short_name": "POS Móvil",
+  "description": "Canal móvil de venta web contra Supabase y vista_productos_venta (sin costos)",
+  "start_url": "/web-pos/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "lang": "es-AR",
+  "orientation": "portrait"
+}

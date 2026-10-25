@@ -1,4 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import {
+  generarQrSvgUrlPublica,
+  validarUrlPublicaVentaMovil,
+} from '@pos/domain';
 import { formatearFechaHoraAR } from '../../domain/dinero.ts';
 import { tienePermiso, type RolUsuario } from '../../domain/permisos.ts';
 import {
@@ -6,6 +10,39 @@ import {
   type ResumenEstadoSyncUI,
 } from '../../domain/sync.ts';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+
+export interface SesionMovilResumenDTO {
+  readonly id: string;
+  readonly usuario_id: string;
+  readonly usuario_nombre: string;
+  readonly usuario_login: string;
+  readonly dispositivo_id: string;
+  readonly dispositivo_nombre: string;
+  readonly user_agent: string | null;
+  readonly iniciada_at: string;
+  readonly ultima_actividad_at: string;
+  readonly expira_at: string;
+  readonly estado: 'activa' | 'revocada' | 'expirada' | 'cerrada';
+  readonly revocada_at: string | null;
+  readonly motivo_revocacion: string | null;
+}
+
+export interface EstadoConfigVentaMovilDTO {
+  readonly comercio_id: string;
+  readonly comercio_nombre: string;
+  readonly venta_movil_habilitada: boolean;
+  readonly venta_movil_url: string;
+  readonly qr_svg: string;
+  readonly sesiones: readonly SesionMovilResumenDTO[];
+  readonly usuarios_moviles: readonly {
+    readonly id: string;
+    readonly nombre: string;
+    readonly usuario: string;
+    readonly rol: string;
+    readonly activo: boolean;
+    readonly puede_vender_movil: boolean;
+  }[];
+}
 
 export interface ConfiguracionSistemaDTO {
   comercio_id: string;
@@ -43,6 +80,7 @@ export interface PanelConfiguracionSyncProps {
   rolActivo: RolUsuario;
   estadoSync: ResumenEstadoSyncUI;
   configuracionInicial: ConfiguracionSistemaDTO | null;
+  configVentaMovilInicial?: EstadoConfigVentaMovilDTO | null;
   historialBackupsInicial: RegistroHistorialBackupDTO[];
   espacioImagenes: EstadisticasEspacioImagenesDTO;
   onSubirAhora: () => Promise<void>;
@@ -76,6 +114,7 @@ export function PanelConfiguracionSync({
   rolActivo,
   estadoSync,
   configuracionInicial,
+  configVentaMovilInicial = null,
   historialBackupsInicial,
   espacioImagenes,
   onSubirAhora,
@@ -105,6 +144,18 @@ export function PanelConfiguracionSync({
   );
   const [rutaRestauracionManual, setRutaRestauracionManual] = useState('');
 
+  const [configMovil, setConfigMovil] =
+    useState<EstadoConfigVentaMovilDTO | null>(configVentaMovilInicial);
+  const [ventaMovilHabilitada, setVentaMovilHabilitada] = useState(
+    configVentaMovilInicial?.venta_movil_habilitada ?? false
+  );
+  const [ventaMovilUrl, setVentaMovilUrl] = useState(
+    configVentaMovilInicial?.venta_movil_url ??
+      (typeof window !== 'undefined'
+        ? `${window.location.origin}/web-pos/`
+        : 'https://pos-movil.ejemplo.com/web-pos')
+  );
+
   const [procesando, setProcesando] = useState(false);
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [mensajeError, setMensajeError] = useState<string | null>(null);
@@ -119,6 +170,14 @@ export function PanelConfiguracionSync({
       setBackupDiario(configuracionInicial.backup_diario_habilitado);
     }
   }, [configuracionInicial]);
+
+  useEffect(() => {
+    if (configVentaMovilInicial) {
+      setConfigMovil(configVentaMovilInicial);
+      setVentaMovilHabilitada(configVentaMovilInicial.venta_movil_habilitada);
+      setVentaMovilUrl(configVentaMovilInicial.venta_movil_url);
+    }
+  }, [configVentaMovilInicial]);
 
   if (!puedeConfigurar) {
     return (
@@ -289,6 +348,179 @@ export function PanelConfiguracionSync({
   }
 
   const [confirmandoReset, setConfirmandoReset] = useState(false);
+
+  async function manejarGuardarVentaMovil(e: React.FormEvent) {
+    e.preventDefault();
+    setMensajeError(null);
+    setMensajeExito(null);
+
+    let urlValidada: string;
+    try {
+      urlValidada = validarUrlPublicaVentaMovil(ventaMovilUrl);
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'Dirección de Venta Móvil inválida.'
+      );
+      return;
+    }
+
+    setProcesando(true);
+    try {
+      const actualizado = await invocarPosApi<EstadoConfigVentaMovilDTO>(
+        'configurar_venta_movil',
+        {
+          rolActivo,
+          habilitada: ventaMovilHabilitada,
+          urlPublica: urlValidada,
+        }
+      );
+      setConfigMovil(actualizado);
+      setVentaMovilHabilitada(actualizado.venta_movil_habilitada);
+      setVentaMovilUrl(actualizado.venta_movil_url);
+      setMensajeExito(
+        `Venta Móvil ${
+          actualizado.venta_movil_habilitada ? 'habilitada' : 'deshabilitada'
+        } y QR actualizado (Regla 19).`
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo actualizar la configuración de Venta Móvil.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function manejarTogglePermisoMovilUsuario(
+    usuarioId: string,
+    nuevoValor: boolean
+  ) {
+    setMensajeError(null);
+    setMensajeExito(null);
+    setProcesando(true);
+    try {
+      const actualizado = await invocarPosApi<EstadoConfigVentaMovilDTO>(
+        'actualizar_permiso_venta_movil',
+        {
+          rolActivo,
+          usuarioObjetivoId: usuarioId,
+          puedeVenderMovil: nuevoValor,
+        }
+      );
+      setConfigMovil(actualizado);
+      setMensajeExito(
+        `Permiso de Venta Móvil ${
+          nuevoValor ? 'otorgado' : 'revocado'
+        } y registrado en auditoría.`
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo actualizar el permiso de Venta Móvil.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function manejarRevocarSesionMovil(sesionId: string) {
+    setMensajeError(null);
+    setMensajeExito(null);
+    setProcesando(true);
+    try {
+      const actualizado = await invocarPosApi<EstadoConfigVentaMovilDTO>(
+        'revocar_sesion_movil',
+        {
+          rolActivo,
+          sesionId,
+          motivo: 'Sesión revocada desde el panel de Configuración de escritorio',
+        }
+      );
+      setConfigMovil(actualizado);
+      setMensajeExito(
+        'Sesión móvil revocada inmediatamente y registrada en auditoría.'
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo revocar la sesión móvil.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function manejarCopiarUrlMovil() {
+    setMensajeError(null);
+    try {
+      const urlLimpia = validarUrlPublicaVentaMovil(ventaMovilUrl);
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(urlLimpia);
+      }
+      setMensajeExito(`Dirección copiada al portapapeles: ${urlLimpia}`);
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo copiar la dirección.'
+      );
+    }
+  }
+
+  function manejarImprimirQrMovil() {
+    setMensajeError(null);
+    try {
+      const { svg, urlValidada } = generarQrSvgUrlPublica(ventaMovilUrl, 320);
+      if (typeof window !== 'undefined') {
+        const win = window.open('', '_blank', 'width=540,height=680');
+        if (win) {
+          win.document.write(`<!doctype html>
+<html lang="es-AR">
+<head>
+  <meta charset="utf-8" />
+  <title>Imprimir QR Venta Móvil</title>
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 32px; color: #0f172a; }
+    .box { border: 2px solid #0f172a; border-radius: 16px; padding: 24px; max-width: 380px; margin: 0 auto; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p { font-size: 13px; color: #475569; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>${configMovil?.comercio_nombre ?? 'Punto de Venta'} — Venta Móvil</h1>
+    <p>Escaneá el código con la cámara del celular e ingresá con tu usuario y clave:</p>
+    <div style="margin: 16px 0;">${svg}</div>
+    <p><strong>${urlValidada}</strong></p>
+  </div>
+  <script>window.onload = () => { window.print(); };</script>
+</body>
+</html>`);
+          win.document.close();
+        }
+      }
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Dirección inválida para generar el QR imprimible.'
+      );
+    }
+  }
+
+  let qrPreviewSvg: string | null = configMovil?.qr_svg ?? null;
+  let errorValidacionUrlMovil: string | null = null;
+  try {
+    qrPreviewSvg = generarQrSvgUrlPublica(ventaMovilUrl, 190).svg;
+  } catch (err) {
+    errorValidacionUrlMovil =
+      err instanceof Error ? err.message : 'URL inválida.';
+  }
 
   async function manejarResetearBaseDatos() {
     setMensajeError(null);
@@ -522,6 +754,248 @@ export function PanelConfiguracionSync({
               Guardar configuración
             </button>
           </form>
+        </section>
+
+        <section className="card" style={{ marginTop: '1.25rem' }}>
+          <h2>Venta Móvil Web (/web-pos) — QR y Sesiones Activas (§6.2)</h2>
+          <p className="text-muted">
+            Publicada en HTTPS contra Supabase (sin certificados ni servidor
+            local en la red del comercio). El código QR contiene{' '}
+            <strong>solo la URL pública</strong> (Regla 19) y nunca expone{' '}
+            <code>costo_compra</code> (Regla 20).
+          </p>
+
+          <form onSubmit={(e) => void manejarGuardarVentaMovil(e)}>
+            <div className="form-group">
+              <label className="checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={ventaMovilHabilitada}
+                  onChange={(e) => setVentaMovilHabilitada(e.target.checked)}
+                />
+                <span>
+                  <strong>Habilitar Venta Móvil en este comercio</strong>
+                </span>
+              </label>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="cfg-venta-movil-url">
+                Dirección pública de la PWA móvil (HTTPS o localhost en desarrollo)
+              </label>
+              <input
+                id="cfg-venta-movil-url"
+                type="text"
+                value={ventaMovilUrl}
+                onChange={(e) => setVentaMovilUrl(e.target.value)}
+                placeholder="https://mi-comercio.vercel.app/web-pos"
+              />
+              {errorValidacionUrlMovil ? (
+                <small style={{ color: '#b91c1c', display: 'block', marginTop: '0.25rem' }}>
+                  {errorValidacionUrlMovil}
+                </small>
+              ) : (
+                <small style={{ color: '#64748b', display: 'block', marginTop: '0.25rem' }}>
+                  Regla 19: El QR solo codifica esta URL pública, jamás claves ni tokens.
+                </small>
+              )}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                gap: '1rem',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                margin: '0.75rem 0',
+                padding: '0.75rem',
+                background: '#f8fafc',
+                borderRadius: '0.5rem',
+                border: '1px solid #e2e8f0',
+              }}
+            >
+              {qrPreviewSvg ? (
+                <div
+                  aria-label="Vista previa Código QR Venta Móvil"
+                  style={{
+                    background: '#ffffff',
+                    padding: '0.4rem',
+                    borderRadius: '0.5rem',
+                    border: '1px solid #cbd5e1',
+                    lineHeight: 0,
+                  }}
+                  dangerouslySetInnerHTML={{ __html: qrPreviewSvg }}
+                />
+              ) : null}
+
+              <div style={{ flex: 1, minWidth: '210px' }}>
+                <div style={{ fontWeight: 600, marginBottom: '0.35rem' }}>
+                  Estado:{' '}
+                  <span
+                    style={{
+                      color: ventaMovilHabilitada ? '#15803d' : '#b45309',
+                    }}
+                  >
+                    {ventaMovilHabilitada ? 'Activa' : 'Deshabilitada'}
+                  </span>
+                </div>
+                <p
+                  className="text-muted"
+                  style={{ fontSize: '0.82rem', marginBottom: '0.65rem' }}
+                >
+                  El vendedor escanea el QR con la cámara del celular e ingresa
+                  con su usuario y clave individual.
+                </p>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <button
+                    type="submit"
+                    className="btn btn-primary"
+                    disabled={procesando || Boolean(errorValidacionUrlMovil)}
+                  >
+                    Guardar Venta Móvil
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={Boolean(errorValidacionUrlMovil)}
+                    onClick={() => void manejarCopiarUrlMovil()}
+                  >
+                    Copiar dirección
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={Boolean(errorValidacionUrlMovil)}
+                    onClick={manejarImprimirQrMovil}
+                  >
+                    Imprimir QR
+                  </button>
+                  <a
+                    href="/web-pos/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn btn-secondary"
+                    style={{ textDecoration: 'none' }}
+                  >
+                    Abrir /web-pos ↗
+                  </a>
+                </div>
+              </div>
+            </div>
+          </form>
+
+          <h3 style={{ marginTop: '1rem' }}>
+            Usuarios autorizados para Venta Móvil (<code>puede_vender_movil</code>)
+          </h3>
+          <div className="table-scroll" style={{ marginBottom: '1rem' }}>
+            <table className="pos-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Usuario</th>
+                  <th>Rol</th>
+                  <th>Puede vender desde el celular</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(configMovil?.usuarios_moviles ?? []).length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ textAlign: 'center' }}>
+                      Sin usuarios cargados.
+                    </td>
+                  </tr>
+                ) : (
+                  (configMovil?.usuarios_moviles ?? []).map((u) => (
+                    <tr key={u.id}>
+                      <td>{u.nombre}</td>
+                      <td>
+                        <code>{u.usuario}</code>
+                      </td>
+                      <td>{u.rol}</td>
+                      <td>
+                        <label
+                          className="checkbox-inline"
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={u.puede_vender_movil}
+                            disabled={procesando}
+                            onChange={(e) =>
+                              void manejarTogglePermisoMovilUsuario(
+                                u.id,
+                                e.target.checked
+                              )
+                            }
+                          />
+                          <span>
+                            {u.puede_vender_movil ? 'Autorizado' : 'Sin acceso'}
+                          </span>
+                        </label>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Sesiones móviles registradas y revocación inmediata</h3>
+          <div className="table-scroll">
+            <table className="pos-table">
+              <thead>
+                <tr>
+                  <th>Vendedor</th>
+                  <th>Dispositivo</th>
+                  <th>Última actividad</th>
+                  <th>Estado</th>
+                  <th>Acción</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(configMovil?.sesiones ?? []).length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ textAlign: 'center' }}>
+                      No hay sesiones móviles registradas todavía.
+                    </td>
+                  </tr>
+                ) : (
+                  (configMovil?.sesiones ?? []).map((s) => (
+                    <tr key={s.id}>
+                      <td>
+                        {s.usuario_nombre} (<code>{s.usuario_login}</code>)
+                      </td>
+                      <td>{s.dispositivo_nombre}</td>
+                      <td>{formatearFechaHoraAR(s.ultima_actividad_at)}</td>
+                      <td>
+                        <strong>{s.estado.toUpperCase()}</strong>
+                      </td>
+                      <td>
+                        {s.estado === 'activa' ? (
+                          <button
+                            type="button"
+                            className="btn btn-danger"
+                            style={{
+                              padding: '0.25rem 0.55rem',
+                              fontSize: '0.78rem',
+                            }}
+                            disabled={procesando}
+                            onClick={() => void manejarRevocarSesionMovil(s.id)}
+                          >
+                            Revocar sesión
+                          </button>
+                        ) : (
+                          <span className="text-muted" style={{ fontSize: '0.8rem' }}>
+                            {s.motivo_revocacion ?? 'Finalizada'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
       </div>
 

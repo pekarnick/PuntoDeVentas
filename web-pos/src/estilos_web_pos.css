@@ -1,0 +1,233 @@
+:root {
+  --bg-app: #f1f5f9;
+  --bg-card: #ffffff;
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --primary: #1d4ed8;
+  --primary-dark: #1e40af;
+  --success: #15803d;
+  --danger: #b91c1c;
+  --border: #cbd5e1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    sans-serif;
+  background: var(--bg-app);
+  color: var(--text-main);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.movil-shell {
+  max-width: 540px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4.5rem;
+}
+
+.movil-header {
+  background: #0f172a;
+  color: #ffffff;
+  padding: 0.85rem 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.movil-header h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.movil-header-sub {
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
+.movil-main {
+  padding: 0.85rem;
+  flex: 1;
+}
+
+.movil-card {
+  background: var(--bg-card);
+  border-radius: 0.75rem;
+  padding: 0.95rem;
+  border: 1px solid var(--border);
+  margin-bottom: 0.85rem;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.movil-card h2 {
+  margin: 0 0 0.65rem 0;
+  font-size: 1rem;
+}
+
+.movil-input,
+.movil-select {
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  font-size: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: #ffffff;
+  color: var(--text-main);
+}
+
+.movil-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 0.6rem;
+  border: none;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.movil-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.movil-btn-primary {
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.movil-btn-success {
+  background: var(--success);
+  color: #ffffff;
+}
+
+.movil-btn-secondary {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.movil-btn-danger {
+  background: #fee2e2;
+  color: var(--danger);
+}
+
+.movil-grid-productos {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.6rem;
+}
+
+.movil-prod-item {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  padding: 0.65rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.movil-prod-item:active {
+  background: #dbeafe;
+  border-color: var(--primary);
+}
+
+.movil-prod-nombre {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-main);
+}
+
+.movil-prod-precio {
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--primary-dark);
+}
+
+.movil-prod-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.movil-nav-bottom {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #ffffff;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-around;
+  padding: 0.4rem;
+  max-width: 540px;
+  margin: 0 auto;
+  z-index: 30;
+}
+
+.movil-nav-tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  padding: 0.5rem 0.25rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+.movil-nav-tab.activo {
+  background: #eff6ff;
+  color: var(--primary);
+}
+
+.movil-alert-error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+  padding: 0.7rem;
+  border-radius: 0.55rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.movil-alert-ok {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+  padding: 0.7rem;
+  border-radius: 0.55rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.movil-video-box {
+  position: relative;
+  background: #000000;
+  border-radius: 0.65rem;
+  overflow: hidden;
+  margin-top: 0.5rem;
+}
+
+.movil-video-box video {
+  width: 100%;
+  max-height: 220px;
+  object-fit: cover;
+  display: block;
+}

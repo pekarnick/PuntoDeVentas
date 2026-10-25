@@ -89,6 +89,21 @@ import {
 } from './gestion_fase3_repo.ts';
 import type { ReglaRedondeoPrecio } from '../domain/gestion_fase3.ts';
 import type { CondicionIvaReceptor } from '../domain/cuit.ts';
+import {
+  abrirCajaMovilUsuario,
+  actualizarPermisoVentaMovilUsuario,
+  cerrarCajaMovilUsuario,
+  configurarVentaMovilComercio,
+  crearVentaMovilServidor,
+  iniciarSesionMovil,
+  listarVentasPropiasDelDiaMovil,
+  obtenerCatalogoVentaMovil,
+  obtenerConfigVentaMovil,
+  obtenerEstadoCajaMovilUsuario,
+  revocarSesionMovil,
+  validarYRenovarSesionMovil,
+} from './venta_movil_repo.ts';
+import type { ItemPedidoMovilInput, PagoVentaInput } from '@pos/domain';
 
 export const RUTA_DB_POR_DEFECTO = path.resolve(
   process.cwd(),
@@ -463,6 +478,10 @@ export function ejecutarAccionPosLocal(
         configuracionSistema:
           actor.rol === 'superadmin'
             ? obtenerConfiguracionSistema(db, actor.comercio_id)
+            : null,
+        configVentaMovil:
+          actor.rol === 'superadmin'
+            ? obtenerConfigVentaMovil(db, actor.comercio_id)
             : null,
         historialBackups:
           actor.rol === 'superadmin'
@@ -1063,6 +1082,183 @@ export function ejecutarAccionPosLocal(
         ventaId: String(payload.ventaId ?? ''),
         anchoMm: (payload.anchoMm as 58 | 80 | undefined) ?? 80,
       });
+    }
+
+    case 'obtener_config_venta_movil': {
+      return obtenerConfigVentaMovil(db, actor.comercio_id);
+    }
+
+    case 'configurar_venta_movil': {
+      const res = configurarVentaMovilComercio(db, {
+        actor,
+        habilitada: Boolean(payload.habilitada),
+        urlPublica: String(payload.urlPublica ?? ''),
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'actualizar_permiso_venta_movil': {
+      actualizarPermisoVentaMovilUsuario(db, {
+        actor,
+        usuarioObjetivoId: String(payload.usuarioObjetivoId ?? ''),
+        puedeVenderMovil: Boolean(payload.puedeVenderMovil),
+      });
+      sincronizarWalADisco(db);
+      return obtenerConfigVentaMovil(db, actor.comercio_id);
+    }
+
+    case 'revocar_sesion_movil': {
+      revocarSesionMovil(db, {
+        actor,
+        sesionId: String(payload.sesionId ?? ''),
+        motivo: payload.motivo ? String(payload.motivo) : undefined,
+      });
+      sincronizarWalADisco(db);
+      return obtenerConfigVentaMovil(db, actor.comercio_id);
+    }
+
+    case 'login_movil': {
+      const res = iniciarSesionMovil(db, {
+        comercioId: payload.comercioId
+          ? String(payload.comercioId)
+          : actor.comercio_id,
+        usuario: String(payload.usuario ?? ''),
+        clave: String(payload.clave ?? ''),
+        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
+        dispositivoNombre: payload.dispositivoNombre
+          ? String(payload.dispositivoNombre)
+          : undefined,
+        userAgent: payload.userAgent ? String(payload.userAgent) : undefined,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'obtener_catalogo_movil': {
+      const comercioId = payload.comercioId
+        ? String(payload.comercioId)
+        : actor.comercio_id;
+      if (payload.sesionMovilId) {
+        validarYRenovarSesionMovil(db, {
+          sesionId: String(payload.sesionMovilId),
+          comercioId,
+        });
+      }
+      const productos = obtenerCatalogoVentaMovil(db, comercioId);
+      const clientes = listarClientesConSaldo(db, comercioId).map((c) => ({
+        id: c.id,
+        nombre: c.nombre,
+        cuit_dni: c.cuit_dni,
+        condicion_iva: c.condicion_iva,
+        limite_credito: c.limite_credito,
+        saldo_pendiente: c.saldo_pendiente_centavos,
+      }));
+      return {
+        comercioId,
+        productos,
+        clientes,
+      };
+    }
+
+    case 'crear_venta_movil': {
+      const comercioId = payload.comercioId
+        ? String(payload.comercioId)
+        : actor.comercio_id;
+      const res = crearVentaMovilServidor(db, {
+        ventaId: String(payload.ventaId ?? ''),
+        comercioId,
+        usuarioId: String(payload.usuarioId ?? actor.usuario_id),
+        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
+        sesionMovilId: payload.sesionMovilId
+          ? String(payload.sesionMovilId)
+          : undefined,
+        items: (payload.items as ItemPedidoMovilInput[]) ?? [],
+        pagos: (payload.pagos as PagoVentaInput[]) ?? [],
+        descuentoGlobal: Number(payload.descuentoGlobal ?? 0),
+        clienteId: payload.clienteId ? String(payload.clienteId) : null,
+        cajaSesionId: payload.cajaSesionId ? String(payload.cajaSesionId) : null,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'estado_caja_movil': {
+      const comercioId = payload.comercioId
+        ? String(payload.comercioId)
+        : actor.comercio_id;
+      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
+      if (payload.sesionMovilId) {
+        validarYRenovarSesionMovil(db, {
+          sesionId: String(payload.sesionMovilId),
+          comercioId,
+        });
+      }
+      return obtenerEstadoCajaMovilUsuario(db, comercioId, usuarioId);
+    }
+
+    case 'abrir_caja_movil': {
+      const comercioId = payload.comercioId
+        ? String(payload.comercioId)
+        : actor.comercio_id;
+      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
+      if (payload.sesionMovilId) {
+        validarYRenovarSesionMovil(db, {
+          sesionId: String(payload.sesionMovilId),
+          comercioId,
+        });
+      }
+      const res = abrirCajaMovilUsuario(db, {
+        comercioId,
+        usuarioId,
+        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
+        montoInicialCentavos: Number(payload.montoInicialCentavos ?? 0),
+        observaciones: payload.observaciones
+          ? String(payload.observaciones)
+          : undefined,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'cerrar_caja_movil': {
+      const comercioId = payload.comercioId
+        ? String(payload.comercioId)
+        : actor.comercio_id;
+      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
+      if (payload.sesionMovilId) {
+        validarYRenovarSesionMovil(db, {
+          sesionId: String(payload.sesionMovilId),
+          comercioId,
+        });
+      }
+      const res = cerrarCajaMovilUsuario(db, {
+        comercioId,
+        usuarioId,
+        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
+        efectivoContadoCentavos: Number(payload.efectivoContadoCentavos ?? 0),
+        observaciones: payload.observaciones
+          ? String(payload.observaciones)
+          : undefined,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'listar_ventas_movil_dia': {
+      const comercioId = payload.comercioId
+        ? String(payload.comercioId)
+        : actor.comercio_id;
+      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
+      if (payload.sesionMovilId) {
+        validarYRenovarSesionMovil(db, {
+          sesionId: String(payload.sesionMovilId),
+          comercioId,
+        });
+      }
+      return {
+        ventas: listarVentasPropiasDelDiaMovil(db, comercioId, usuarioId),
+      };
     }
 
     default:

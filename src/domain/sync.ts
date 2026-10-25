@@ -9,6 +9,7 @@ export const ORDEN_TABLAS_SYNC = [
   'comercios',
   'usuarios',
   'dispositivos',
+  'sesiones_moviles',
   'categorias',
   'marcas',
   'proveedores',

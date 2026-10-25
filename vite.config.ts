@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -48,6 +49,11 @@ function sqlitePosLocalPlugin(): Plugin {
 
 export default defineConfig({
   plugins: [react(), sqlitePosLocalPlugin()],
+  resolve: {
+    alias: {
+      '@pos/domain': path.resolve(process.cwd(), 'packages/domain/src/index.ts'),
+    },
+  },
   clearScreen: false,
   server: {
     port: 1420,
@@ -69,6 +75,10 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
+      input: {
+        main: path.resolve(process.cwd(), 'index.html'),
+        'web-pos': path.resolve(process.cwd(), 'web-pos/index.html'),
+      },
       external: ['node:sqlite', 'sharp'],
     },
   },

@@ -7,6 +7,7 @@ interface UsuarioFilaUI {
   readonly nombre: string;
   readonly usuario: string;
   readonly rol: RolUsuario;
+  readonly puede_vender_movil?: boolean;
   readonly activo: boolean;
   readonly debe_cambiar_clave: boolean;
 }
@@ -106,6 +107,24 @@ export function PanelUsuarios(): React.ReactElement {
     }
   }
 
+  async function manejarCambiarPermisoMovil(u: UsuarioFilaUI) {
+    setMensajeError(null);
+    try {
+      await invocarPosApi('actualizar_permiso_venta_movil', {
+        rolActivo: 'superadmin',
+        usuarioObjetivoId: u.id,
+        puedeVenderMovil: !u.puede_vender_movil,
+      });
+      await cargarUsuarios();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo actualizar el permiso de venta móvil.'
+      );
+    }
+  }
+
   return (
     <section className="pos-card">
       <div className="card-header">
@@ -172,6 +191,7 @@ export function PanelUsuarios(): React.ReactElement {
             <th>Nombre</th>
             <th>Usuario</th>
             <th>Rol</th>
+            <th>Venta Móvil</th>
             <th>Estado</th>
             <th>Cambio de clave</th>
             <th>Acciones</th>
@@ -185,6 +205,16 @@ export function PanelUsuarios(): React.ReactElement {
                 <code>{u.usuario}</code>
               </td>
               <td>{u.rol}</td>
+              <td>
+                <label className="checkbox-inline" style={{ cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(u.puede_vender_movil)}
+                    onChange={() => void manejarCambiarPermisoMovil(u)}
+                  />
+                  <span>{u.puede_vender_movil ? 'Habilitado' : 'No'}</span>
+                </label>
+              </td>
               <td>{u.activo ? 'Activo' : 'Desactivado'}</td>
               <td>
                 {u.debe_cambiar_clave ? 'Pendiente al ingresar' : 'Al día'}

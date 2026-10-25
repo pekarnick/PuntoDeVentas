@@ -25,6 +25,7 @@ import {
   PanelConfiguracionSync,
   type ConfiguracionSistemaDTO,
   type EstadisticasEspacioImagenesDTO,
+  type EstadoConfigVentaMovilDTO,
   type RegistroHistorialBackupDTO,
 } from './features/configuracion/PanelConfiguracionSync.tsx';
 import { PanelInformes } from './features/informes/PanelInformes.tsx';
@@ -62,6 +63,7 @@ interface EstadoInicialServidor {
   readonly cambiosPendientesSync: number;
   readonly estadoSync?: ResumenEstadoSyncUI;
   readonly configuracionSistema?: ConfiguracionSistemaDTO | null;
+  readonly configVentaMovil?: EstadoConfigVentaMovilDTO | null;
   readonly historialBackups?: readonly RegistroHistorialBackupDTO[];
   readonly espacioImagenes?: EstadisticasEspacioImagenesDTO;
   readonly catalogoVenta: readonly ProductoCatalogoVenta[];
@@ -462,6 +464,7 @@ export function App(): React.ReactElement {
             rolActivo={rolActivo}
             estadoSync={resumenSync}
             configuracionInicial={datosServidor?.configuracionSistema ?? null}
+            configVentaMovilInicial={datosServidor?.configVentaMovil ?? null}
             historialBackupsInicial={[
               ...(datosServidor?.historialBackups ?? []),
             ]}

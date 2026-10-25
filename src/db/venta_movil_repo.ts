@@ -23,9 +23,10 @@ import {
   type MedioPago,
   type PagoVentaInput,
   type ProductoCatalogoMovil,
-} from '@pos/domain';
+} from '../../packages/domain/src/index.ts';
 import { exigirPermiso } from '../domain/permisos.ts';
-import { autenticarUsuario } from './auth_caja_repo.ts';
+import { generarUuidV7 } from '../domain/uuid.ts';
+import { autenticarUsuarioOffline } from './usuarios_auth_repo.ts';
 import {
   calcularEstadoCuentaCorriente,
   validarCargoCuentaCorrienteCliente,
@@ -33,8 +34,7 @@ import {
 import {
   ejecutarEnTransaccion,
   encolarSync,
-  generarUuidV7,
-  insertarAuditoriaEnTransaccion,
+  insertarRegistroAuditoria,
   type ActorContexto,
 } from './repositorios.ts';
 
@@ -185,7 +185,7 @@ export function configurarVentaMovilComercio(
     urlPublica: string;
   }
 ): EstadoConfigVentaMovil {
-  exigirPermiso(params.actor, 'configurar_sistema');
+  exigirPermiso(params.actor.rol, 'configurar_venta_movil_y_arca');
   const urlValidada = validarUrlPublicaVentaMovil(params.urlPublica);
 
   ejecutarEnTransaccion(db, () => {
@@ -228,7 +228,7 @@ export function configurarVentaMovilComercio(
 
     encolarSync(db, 'comercios', params.actor.comercio_id, 'update', ahora);
 
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: params.actor,
       accion: params.habilitada ? 'activar_venta_movil' : 'desactivar_venta_movil',
       entidad: 'comercios',
@@ -243,7 +243,7 @@ export function configurarVentaMovilComercio(
       motivo: params.habilitada
         ? 'Habilitación de canal de Venta Móvil Web (/web-pos)'
         : 'Deshabilitación de canal de Venta Móvil Web (/web-pos)',
-      fecha_hora: ahora,
+      ahoraIso: ahora,
     });
   });
 
@@ -261,7 +261,7 @@ export function actualizarPermisoVentaMovilUsuario(
     puedeVenderMovil: boolean;
   }
 ): void {
-  exigirPermiso(params.actor, 'gestionar_usuarios');
+  exigirPermiso(params.actor.rol, 'gestionar_usuarios');
 
   ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
@@ -294,7 +294,7 @@ export function actualizarPermisoVentaMovilUsuario(
 
     encolarSync(db, 'usuarios', params.usuarioObjetivoId, 'update', ahora);
 
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: params.actor,
       accion: 'cambiar_permiso_venta_movil',
       entidad: 'usuarios',
@@ -304,7 +304,7 @@ export function actualizarPermisoVentaMovilUsuario(
       motivo: `Permiso de venta móvil ${
         params.puedeVenderMovil ? 'habilitado' : 'deshabilitado'
       } para ${actual.nombre}`,
-      fecha_hora: ahora,
+      ahoraIso: ahora,
     });
   });
 }
@@ -313,7 +313,7 @@ export function actualizarPermisoVentaMovilUsuario(
  * Inicia una sesión de Venta Móvil verificando que el comercio tenga habilitada la venta móvil
  * y que el usuario tenga el permiso puede_vender_movil (PLAN.md §6.2).
  */
-export async function iniciarSesionMovil(
+export function iniciarSesionMovil(
   db: DatabaseSync,
   params: {
     comercioId: string;
@@ -324,7 +324,7 @@ export async function iniciarSesionMovil(
     userAgent?: string;
     duracionMinutos?: number;
   }
-): Promise<{
+): {
   sesion_id: string;
   expira_at: string;
   comercio_id: string;
@@ -335,7 +335,7 @@ export async function iniciarSesionMovil(
     usuario: string;
     rol: string;
   };
-}> {
+} {
   const comercio = db
     .prepare(
       `SELECT id, nombre, venta_movil_habilitada
@@ -348,11 +348,11 @@ export async function iniciarSesionMovil(
 
   if (!comercio || comercio.venta_movil_habilitada !== 1) {
     throw new Error(
-      'La Venta Móvil se encuentra deshabilitada en este comercio. Activála desde Configuración > Venta Móvil en la terminal principal.'
+      'VENTA_MOVIL_DESHABILITADA: La Venta Móvil se encuentra deshabilitada en este comercio. Activála desde Configuración > Venta Móvil en la terminal principal.'
     );
   }
 
-  const usuarioAutenticado = await autenticarUsuario(db, {
+  const { usuario: usuarioAutenticado } = autenticarUsuarioOffline(db, {
     comercioId: params.comercioId,
     usuario: params.usuario,
     clave: params.clave,
@@ -361,7 +361,7 @@ export async function iniciarSesionMovil(
 
   if (!usuarioAutenticado.puede_vender_movil) {
     throw new Error(
-      `El usuario "${usuarioAutenticado.nombre}" no tiene habilitado el permiso de Venta Móvil.`
+      `PERMISO_DENEGADO: El usuario "${usuarioAutenticado.nombre}" no tiene habilitado el permiso de Venta Móvil.`
     );
   }
 
@@ -396,7 +396,7 @@ export async function iniciarSesionMovil(
 
     encolarSync(db, 'sesiones_moviles', sesionId, 'insert', ahoraIso);
 
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: {
         comercio_id: params.comercioId,
         usuario_id: usuarioAutenticado.id,
@@ -412,7 +412,7 @@ export async function iniciarSesionMovil(
         dispositivo_nombre: nombreDisp,
         expira_at: expiraIso,
       },
-      fecha_hora: ahoraIso,
+      ahoraIso,
     });
   });
 
@@ -442,7 +442,7 @@ export function revocarSesionMovil(
     motivo?: string;
   }
 ): void {
-  exigirPermiso(params.actor, 'configurar_sistema');
+  exigirPermiso(params.actor.rol, 'configurar_venta_movil_y_arca');
 
   ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
@@ -490,7 +490,7 @@ export function revocarSesionMovil(
 
     encolarSync(db, 'sesiones_moviles', params.sesionId, 'update', ahora);
 
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: params.actor,
       accion: 'revocar_sesion_movil',
       entidad: 'sesiones_moviles',
@@ -502,7 +502,7 @@ export function revocarSesionMovil(
         dispositivo_nombre: sesion.dispositivo_nombre,
       },
       motivo: motivoFinal,
-      fecha_hora: ahora,
+      ahoraIso: ahora,
     });
   });
 }
@@ -648,7 +648,7 @@ export function obtenerCatalogoVentaMovil(
     id: string;
     codigo_interno: string | null;
     nombre: string;
-    unidad: 'unidad' | 'kg' | 'litro' | 'metro' | 'par';
+    unidad: ProductoCatalogoMovil['unidad'];
     permite_decimales: number;
     precio_venta: number;
     alicuota_iva: AlicuotaIva;
@@ -912,26 +912,24 @@ export function crearVentaMovilServidor(
       }
       const movsPrevios = db
         .prepare(
-          `SELECT tipo, monto, deleted_at
+          `SELECT id, tipo, monto, deleted_at
            FROM cuenta_corriente_movimientos
            WHERE comercio_id = ? AND entidad_tipo = 'cliente' AND entidad_id = ? AND deleted_at IS NULL`
         )
         .all(params.comercioId, params.clienteId) as unknown as Array<{
+        id: string;
         tipo: 'cargo' | 'pago';
         monto: Centavos;
         deleted_at: string | null;
       }>;
-      const estadoCc = calcularEstadoCuentaCorriente(
-        movsPrevios,
-        clienteDatos.limite_credito
-      );
+      const estadoCc = calcularEstadoCuentaCorriente(movsPrevios);
       const validacionCc = validarCargoCuentaCorrienteCliente({
-        saldoActualCentavos: estadoCc.saldoActualCentavos,
+        saldoActualCentavos: estadoCc.saldoPendienteCentavos,
         limiteCreditoCentavos: clienteDatos.limite_credito,
         nuevoCargoCentavos: montoCtaCte,
       });
       if (!validacionCc.permitido) {
-        throw new Error(validacionCc.motivoRechazo ?? 'Límite de crédito excedido.');
+        throw new Error(validacionCc.motivo ?? 'Límite de crédito excedido.');
       }
     }
 
@@ -976,9 +974,9 @@ export function crearVentaMovilServidor(
     const stmtInsertMovStock = db.prepare(
       `INSERT INTO movimientos_stock (
         id, comercio_id, producto_id, tipo, cantidad,
-        referencia_tipo, referencia_id, motivo, usuario_id,
+        costo_unitario, referencia_id, motivo, usuario_id,
         created_at, updated_at, device_id, sync_status
-      ) VALUES (?, ?, ?, 'venta', ?, 'venta_movil', ?, 'Venta móvil web', ?, ?, ?, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, 'venta', ?, ?, ?, 'Venta móvil web', ?, ?, ?, ?, 'pendiente')`
     );
 
     for (const item of resumenCalculado.items) {
@@ -1017,6 +1015,7 @@ export function crearVentaMovilServidor(
         params.comercioId,
         item.producto_id,
         cantidadNegativa,
+        costoUnitarioInterno,
         params.ventaId,
         params.usuarioId,
         ahora,
@@ -1073,7 +1072,7 @@ export function crearVentaMovilServidor(
     }
 
     // 10. Auditoría obligatoria en la misma transacción (Regla 13)
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: {
         comercio_id: params.comercioId,
         usuario_id: usuario.id,
@@ -1093,7 +1092,7 @@ export function crearVentaMovilServidor(
         pagos: params.pagos,
       },
       motivo: 'Venta registrada desde aplicación móvil /web-pos',
-      fecha_hora: ahora,
+      ahoraIso: ahora,
     });
 
     const itemsRespuesta = resumenCalculado.items.map((it) => ({
@@ -1292,7 +1291,7 @@ export function abrirCajaMovilUsuario(
 
     encolarSync(db, 'caja_sesiones', cajaId, 'insert', ahora);
 
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: {
         comercio_id: params.comercioId,
         usuario_id: usuario.id,
@@ -1308,7 +1307,7 @@ export function abrirCajaMovilUsuario(
         canal: 'web',
       },
       motivo: obs,
-      fecha_hora: ahora,
+      ahoraIso: ahora,
     });
   });
 
@@ -1388,7 +1387,7 @@ export function cerrarCajaMovilUsuario(
 
     encolarSync(db, 'caja_sesiones', sesion.id, 'update', ahora);
 
-    insertarAuditoriaEnTransaccion(db, {
+    insertarRegistroAuditoria(db, {
       actor: {
         comercio_id: params.comercioId,
         usuario_id: usuario.id,
@@ -1407,7 +1406,7 @@ export function cerrarCajaMovilUsuario(
         diferencia,
       },
       motivo: params.observaciones?.trim() || 'Cierre de caja móvil desde /web-pos',
-      fecha_hora: ahora,
+      ahoraIso: ahora,
     });
   });
 
