@@ -3,7 +3,12 @@ import {
   generarQrSvgUrlPublica,
   validarUrlPublicaVentaMovil,
 } from '@pos/domain';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { formatearFechaHoraAR } from '../../domain/dinero.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import { tienePermiso, type RolUsuario } from '../../domain/permisos.ts';
 import {
   validarConfiguracionSupabaseCliente,
@@ -46,8 +51,11 @@ export interface EstadoConfigVentaMovilDTO {
 
 export interface ConfiguracionSistemaDTO {
   comercio_id: string;
+  proveedor_nube?: 'supabase' | 'firebase' | 'ambos';
   supabase_url: string | null;
   supabase_anon_key: string | null;
+  firebase_project_id?: string | null;
+  firebase_api_key?: string | null;
   sync_automatico_habilitado: boolean;
   sync_intervalo_minutos: number;
   carpeta_backups: string;
@@ -76,11 +84,38 @@ export interface EstadisticasEspacioImagenesDTO {
   porcentajeCuotaGratuita: number;
 }
 
+export interface EstadoConfiguracionArcaDTO {
+  readonly comercio_id: string;
+  readonly nombre_comercio: string;
+  readonly razon_social: string | null;
+  readonly cuit: string | null;
+  readonly condicion_iva:
+    | 'monotributo'
+    | 'responsable_inscripto'
+    | 'exento'
+    | 'consumidor_final';
+  readonly domicilio: string | null;
+  readonly arca_habilitada: boolean;
+  readonly arca_ambiente: 'homologacion' | 'produccion';
+  readonly arca_punto_venta: number;
+  readonly arca_proveedor:
+    | 'afip_sdk'
+    | 'tus_facturas'
+    | 'simulador_homologacion';
+  readonly arca_tope_consumidor_final: number;
+  readonly resumen_comprobantes: {
+    readonly emitidos: number;
+    readonly pendientes: number;
+    readonly con_error: number;
+  };
+}
+
 export interface PanelConfiguracionSyncProps {
   rolActivo: RolUsuario;
   estadoSync: ResumenEstadoSyncUI;
   configuracionInicial: ConfiguracionSistemaDTO | null;
   configVentaMovilInicial?: EstadoConfigVentaMovilDTO | null;
+  configArcaInicial?: EstadoConfiguracionArcaDTO | null;
   historialBackupsInicial: RegistroHistorialBackupDTO[];
   espacioImagenes: EstadisticasEspacioImagenesDTO;
   onSubirAhora: () => Promise<void>;
@@ -115,6 +150,7 @@ export function PanelConfiguracionSync({
   estadoSync,
   configuracionInicial,
   configVentaMovilInicial = null,
+  configArcaInicial = null,
   historialBackupsInicial,
   espacioImagenes,
   onSubirAhora,
@@ -124,11 +160,20 @@ export function PanelConfiguracionSync({
 }: PanelConfiguracionSyncProps): React.ReactElement {
   const puedeConfigurar = tienePermiso(rolActivo, 'configuracion_sensible');
 
+  const [proveedorNube, setProveedorNube] = useState<
+    'supabase' | 'firebase' | 'ambos'
+  >(configuracionInicial?.proveedor_nube ?? 'supabase');
   const [supabaseUrl, setSupabaseUrl] = useState(
     configuracionInicial?.supabase_url ?? ''
   );
   const [supabaseAnonKey, setSupabaseAnonKey] = useState(
     configuracionInicial?.supabase_anon_key ?? ''
+  );
+  const [firebaseProjectId, setFirebaseProjectId] = useState(
+    configuracionInicial?.firebase_project_id ?? ''
+  );
+  const [firebaseApiKey, setFirebaseApiKey] = useState(
+    configuracionInicial?.firebase_api_key ?? ''
   );
   const [syncAuto, setSyncAuto] = useState(
     configuracionInicial?.sync_automatico_habilitado ?? true
@@ -156,14 +201,64 @@ export function PanelConfiguracionSync({
         : 'https://pos-movil.ejemplo.com/web-pos')
   );
 
+  const [configArca, setConfigArca] =
+    useState<EstadoConfiguracionArcaDTO | null>(configArcaInicial);
+  const [arcaHabilitada, setArcaHabilitada] = useState(
+    configArcaInicial?.arca_habilitada ?? false
+  );
+  const [arcaRazonSocial, setArcaRazonSocial] = useState(
+    configArcaInicial?.razon_social ?? ''
+  );
+  const [arcaCuit, setArcaCuit] = useState(
+    configArcaInicial?.cuit ?? '20-11111111-2'
+  );
+  const [arcaCondicionIva, setArcaCondicionIva] = useState<
+    'monotributo' | 'responsable_inscripto' | 'exento' | 'consumidor_final'
+  >(configArcaInicial?.condicion_iva ?? 'monotributo');
+  const [arcaDomicilio, setArcaDomicilio] = useState(
+    configArcaInicial?.domicilio ?? ''
+  );
+  const [arcaPuntoVenta, setArcaPuntoVenta] = useState(
+    String(configArcaInicial?.arca_punto_venta ?? 1)
+  );
+  const [arcaAmbiente, setArcaAmbiente] = useState<
+    'homologacion' | 'produccion'
+  >(configArcaInicial?.arca_ambiente ?? 'homologacion');
+  const [arcaProveedor, setArcaProveedor] = useState<
+    'afip_sdk' | 'tus_facturas' | 'simulador_homologacion'
+  >(configArcaInicial?.arca_proveedor ?? 'afip_sdk');
+
   const [procesando, setProcesando] = useState(false);
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [mensajeError, setMensajeError] = useState<string | null>(null);
 
+  const [paginaBackups, setPaginaBackups] = useState(1);
+  const [paginaUsuariosMoviles, setPaginaUsuariosMoviles] = useState(1);
+  const [paginaSesionesMoviles, setPaginaSesionesMoviles] = useState(1);
+
+  const paginacionBackups = paginarListado(
+    historialBackupsInicial,
+    paginaBackups,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionUsuariosMoviles = paginarListado(
+    configMovil?.usuarios_moviles ?? [],
+    paginaUsuariosMoviles,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionSesionesMoviles = paginarListado(
+    configMovil?.sesiones ?? [],
+    paginaSesionesMoviles,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+
   useEffect(() => {
     if (configuracionInicial) {
+      setProveedorNube(configuracionInicial.proveedor_nube ?? 'supabase');
       setSupabaseUrl(configuracionInicial.supabase_url ?? '');
       setSupabaseAnonKey(configuracionInicial.supabase_anon_key ?? '');
+      setFirebaseProjectId(configuracionInicial.firebase_project_id ?? '');
+      setFirebaseApiKey(configuracionInicial.firebase_api_key ?? '');
       setSyncAuto(configuracionInicial.sync_automatico_habilitado);
       setIntervaloMinutos(String(configuracionInicial.sync_intervalo_minutos));
       setCarpetaBackups(configuracionInicial.carpeta_backups);
@@ -178,6 +273,20 @@ export function PanelConfiguracionSync({
       setVentaMovilUrl(configVentaMovilInicial.venta_movil_url);
     }
   }, [configVentaMovilInicial]);
+
+  useEffect(() => {
+    if (configArcaInicial) {
+      setConfigArca(configArcaInicial);
+      setArcaHabilitada(configArcaInicial.arca_habilitada);
+      setArcaRazonSocial(configArcaInicial.razon_social ?? '');
+      setArcaCuit(configArcaInicial.cuit ?? '20-11111111-2');
+      setArcaCondicionIva(configArcaInicial.condicion_iva);
+      setArcaDomicilio(configArcaInicial.domicilio ?? '');
+      setArcaPuntoVenta(String(configArcaInicial.arca_punto_venta ?? 1));
+      setArcaAmbiente(configArcaInicial.arca_ambiente);
+      setArcaProveedor(configArcaInicial.arca_proveedor);
+    }
+  }, [configArcaInicial]);
 
   if (!puedeConfigurar) {
     return (
@@ -210,8 +319,11 @@ export function PanelConfiguracionSync({
     try {
       await invocarPosApi('guardar_configuracion_sistema', {
         rolActivo,
+        proveedorNube,
         supabaseUrl: supabaseUrl.trim() || null,
         supabaseAnonKey: supabaseAnonKey.trim() || null,
+        firebaseProjectId: firebaseProjectId.trim() || null,
+        firebaseApiKey: firebaseApiKey.trim() || null,
         syncAutomaticoHabilitado: syncAuto,
         syncIntervaloMinutos: Number(intervaloMinutos) || 5,
         carpetaBackups: carpetaBackups.trim() || 'backups',
@@ -348,6 +460,7 @@ export function PanelConfiguracionSync({
   }
 
   const [confirmandoReset, setConfirmandoReset] = useState(false);
+  const [vaciarSupabaseEnReset, setVaciarSupabaseEnReset] = useState(true);
 
   async function manejarGuardarVentaMovil(e: React.FormEvent) {
     e.preventDefault();
@@ -388,6 +501,71 @@ export function PanelConfiguracionSync({
         err instanceof Error
           ? err.message
           : 'No se pudo actualizar la configuración de Venta Móvil.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function manejarGuardarConfigArca(e: React.FormEvent) {
+    e.preventDefault();
+    setMensajeError(null);
+    setMensajeExito(null);
+    setProcesando(true);
+    try {
+      const actualizado = await invocarPosApi<EstadoConfiguracionArcaDTO>(
+        'guardar_configuracion_arca',
+        {
+          rolActivo,
+          arcaHabilitada,
+          razonSocial: arcaRazonSocial,
+          cuit: arcaCuit,
+          condicionIva: arcaCondicionIva,
+          domicilio: arcaDomicilio,
+          puntoVenta: Number(arcaPuntoVenta) || 1,
+          ambiente: arcaAmbiente,
+          proveedor: arcaProveedor,
+        }
+      );
+      setConfigArca(actualizado);
+      setArcaHabilitada(actualizado.arca_habilitada);
+      setMensajeExito(
+        actualizado.arca_habilitada
+          ? `Facturación electrónica ARCA habilitada en ambiente "${actualizado.arca_ambiente.toUpperCase()}" (Punto de Venta ${String(actualizado.arca_punto_venta).padStart(4, '0')}).`
+          : 'Facturación ARCA desactivada. El sistema opera con Ticket No Fiscal.'
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo guardar la configuración de ARCA.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function manejarReintentarPendientesArca() {
+    setMensajeError(null);
+    setMensajeExito(null);
+    setProcesando(true);
+    try {
+      const res = await invocarPosApi<{
+        procesados: number;
+        emitidos: number;
+        siguenPendientes: number;
+        conError: number;
+      }>('reintentar_pendientes_arca', { rolActivo });
+      setMensajeExito(
+        `Cola ARCA procesada: ${res.emitidos} comprobante(s) emitido(s) con CAE (${res.siguenPendientes} pendiente(s), ${res.conError} con error).`
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Error al reintentar comprobantes ARCA pendientes.'
       );
     } finally {
       setProcesando(false);
@@ -522,6 +700,29 @@ export function PanelConfiguracionSync({
       err instanceof Error ? err.message : 'URL inválida.';
   }
 
+  async function manejarCopiarSqlMigracionSupabase() {
+    setMensajeError(null);
+    setMensajeExito(null);
+    try {
+      const res = await invocarPosApi<{ sql: string }>(
+        'obtener_sql_migracion_supabase',
+        { rolActivo }
+      );
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(res.sql);
+      }
+      setMensajeExito(
+        'Script SQL de actualización (sesiones_moviles, variantes, combos, ARCA y resetear_comercio_a_fabrica) copiado al portapapeles. Pegalo y ejecutalo en el SQL Editor de tu proyecto Supabase.'
+      );
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo copiar el script SQL de migración.'
+      );
+    }
+  }
+
   async function manejarResetearBaseDatos() {
     setMensajeError(null);
     setMensajeExito(null);
@@ -530,10 +731,18 @@ export function PanelConfiguracionSync({
       const res = await invocarPosApi<{
         backupResguardoPrevio: RegistroHistorialBackupDTO;
         superadminConservado: string;
-      }>('resetear_base_datos', { rolActivo });
+        nubeVaciada?: boolean;
+        tablasRemotasVaciadas?: number;
+      }>('resetear_base_datos', {
+        rolActivo,
+        vaciarSupabaseTambien: vaciarSupabaseEnReset,
+      });
       setConfirmandoReset(false);
+      const detalleNube = res.nubeVaciada
+        ? ` También se vaciaron ${res.tablasRemotasVaciadas ?? 0} tablas en Supabase.`
+        : '';
       setMensajeExito(
-        `Base de datos reiniciada a cero. Se conservó únicamente al administrador (${res.superadminConservado}), el comercio, la lista General y las credenciales de Supabase. Resguardo previo en: ${res.backupResguardoPrevio.ruta_archivo}`
+        `Base de datos reiniciada a cero.${detalleNube} Se conservó únicamente al administrador (${res.superadminConservado}), el comercio, la lista General y las credenciales de Supabase. Resguardo previo en: ${res.backupResguardoPrevio.ruta_archivo}`
       );
       onDatosActualizados();
     } catch (err) {
@@ -646,12 +855,46 @@ export function PanelConfiguracionSync({
             >
               ⟳ Sincronizar todo (Datos + Imágenes)
             </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={procesando}
+              onClick={() => void manejarCopiarSqlMigracionSupabase()}
+              title="Copia al portapapeles el SQL de actualización de esquema para pegar en el SQL Editor de Supabase"
+            >
+              📋 Copiar SQL actualización Supabase
+            </button>
           </div>
         </section>
 
         <section className="card">
-          <h2>Parámetros de Conexión Supabase y Backups</h2>
+          <h2>Parámetros de Conexión Supabase, Firebase y Backups</h2>
           <form onSubmit={(e) => void manejarGuardarConfiguracion(e)}>
+            <div className="form-group">
+              <label htmlFor="cfg-proveedor-nube">
+                Proveedor de sincronización en la nube
+              </label>
+              <select
+                id="cfg-proveedor-nube"
+                value={proveedorNube}
+                onChange={(e) =>
+                  setProveedorNube(
+                    e.target.value as 'supabase' | 'firebase' | 'ambos'
+                  )
+                }
+              >
+                <option value="supabase">
+                  Supabase (PostgreSQL + RLS + Storage — Principal)
+                </option>
+                <option value="firebase">
+                  Firebase (Cloud Firestore REST + Storage)
+                </option>
+                <option value="ambos">
+                  Ambos en paralelo (Espejo redundante Supabase + Firebase)
+                </option>
+              </select>
+            </div>
+
             <div className="form-group">
               <label htmlFor="cfg-supabase-url">
                 URL del Proyecto Supabase (guardada en tabla{' '}
@@ -685,6 +928,50 @@ export function PanelConfiguracionSync({
                 <code>service_role</code> ni <code>sb_secret_</code>.
               </small>
             </div>
+
+            {(proveedorNube === 'firebase' || proveedorNube === 'ambos') && (
+              <div
+                className="subcard-box"
+                style={{
+                  padding: '0.85rem',
+                  borderRadius: '0.5rem',
+                  marginBottom: '0.85rem',
+                }}
+              >
+                <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.95rem' }}>
+                  🔥 Configuración de Firebase (Cloud Firestore + Storage)
+                </h3>
+                <div className="form-group">
+                  <label htmlFor="cfg-firebase-project-id">
+                    Firebase Project ID
+                  </label>
+                  <input
+                    id="cfg-firebase-project-id"
+                    type="text"
+                    placeholder="ej: mi-pos-comercio-ar"
+                    value={firebaseProjectId}
+                    onChange={(e) => setFirebaseProjectId(e.target.value)}
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label htmlFor="cfg-firebase-api-key">
+                    Firebase Web API Key pública (<code>AIza...</code>)
+                  </label>
+                  <input
+                    id="cfg-firebase-api-key"
+                    type="password"
+                    placeholder="AIzaSy... (Nunca ingreses JSON de Service Account)"
+                    value={firebaseApiKey}
+                    onChange={(e) => setFirebaseApiKey(e.target.value)}
+                  />
+                  <small style={{ color: '#64748b', lineHeight: 1.4 }}>
+                    Regla 8: Usá únicamente la Web API Key pública con Security
+                    Rules en Firestore. Prohibido ingresar claves privadas de
+                    Firebase Admin SDK.
+                  </small>
+                </div>
+              </div>
+            )}
 
             <div
               style={{
@@ -802,6 +1089,7 @@ export function PanelConfiguracionSync({
             </div>
 
             <div
+              className="subcard-box"
               style={{
                 display: 'flex',
                 gap: '1rem',
@@ -809,9 +1097,7 @@ export function PanelConfiguracionSync({
                 flexWrap: 'wrap',
                 margin: '0.75rem 0',
                 padding: '0.75rem',
-                background: '#f8fafc',
                 borderRadius: '0.5rem',
-                border: '1px solid #e2e8f0',
               }}
             >
               {qrPreviewSvg ? (
@@ -905,7 +1191,7 @@ export function PanelConfiguracionSync({
                     </td>
                   </tr>
                 ) : (
-                  (configMovil?.usuarios_moviles ?? []).map((u) => (
+                  paginacionUsuariosMoviles.itemsPagina.map((u) => (
                     <tr key={u.id}>
                       <td>{u.nombre}</td>
                       <td>
@@ -938,6 +1224,16 @@ export function PanelConfiguracionSync({
                 )}
               </tbody>
             </table>
+            <PaginadorTabla
+              paginaActual={paginacionUsuariosMoviles.paginaActual}
+              totalPaginas={paginacionUsuariosMoviles.totalPaginas}
+              totalItems={paginacionUsuariosMoviles.totalItems}
+              desdeRegistro={paginacionUsuariosMoviles.desdeRegistro}
+              hastaRegistro={paginacionUsuariosMoviles.hastaRegistro}
+              tamanioPagina={paginacionUsuariosMoviles.tamanioPagina}
+              onCambiarPagina={setPaginaUsuariosMoviles}
+              etiquetaItems="usuarios móviles"
+            />
           </div>
 
           <h3>Sesiones móviles registradas y revocación inmediata</h3>
@@ -960,7 +1256,7 @@ export function PanelConfiguracionSync({
                     </td>
                   </tr>
                 ) : (
-                  (configMovil?.sesiones ?? []).map((s) => (
+                  paginacionSesionesMoviles.itemsPagina.map((s) => (
                     <tr key={s.id}>
                       <td>
                         {s.usuario_nombre} (<code>{s.usuario_login}</code>)
@@ -995,6 +1291,16 @@ export function PanelConfiguracionSync({
                 )}
               </tbody>
             </table>
+            <PaginadorTabla
+              paginaActual={paginacionSesionesMoviles.paginaActual}
+              totalPaginas={paginacionSesionesMoviles.totalPaginas}
+              totalItems={paginacionSesionesMoviles.totalItems}
+              desdeRegistro={paginacionSesionesMoviles.desdeRegistro}
+              hastaRegistro={paginacionSesionesMoviles.hastaRegistro}
+              tamanioPagina={paginacionSesionesMoviles.tamanioPagina}
+              onCambiarPagina={setPaginaSesionesMoviles}
+              etiquetaItems="sesiones móviles"
+            />
           </div>
         </section>
       </div>
@@ -1112,7 +1418,7 @@ export function PanelConfiguracionSync({
                     </td>
                   </tr>
                 ) : (
-                  historialBackupsInicial.map((b) => (
+                  paginacionBackups.itemsPagina.map((b) => (
                     <tr key={b.id}>
                       <td>{formatearFechaHoraAR(b.fecha)}</td>
                       <td>
@@ -1153,7 +1459,245 @@ export function PanelConfiguracionSync({
                 )}
               </tbody>
             </table>
+            <PaginadorTabla
+              paginaActual={paginacionBackups.paginaActual}
+              totalPaginas={paginacionBackups.totalPaginas}
+              totalItems={paginacionBackups.totalItems}
+              desdeRegistro={paginacionBackups.desdeRegistro}
+              hastaRegistro={paginacionBackups.hastaRegistro}
+              tamanioPagina={paginacionBackups.tamanioPagina}
+              onCambiarPagina={setPaginaBackups}
+              etiquetaItems="backups"
+            />
           </div>
+        </section>
+
+        <section
+          className="card"
+          aria-label="Facturación electrónica ARCA opcional"
+          style={{ marginBottom: '1.25rem' }}
+        >
+          <div className="section-header-row">
+            <div>
+              <h2>
+                Facturación Electrónica ARCA (ex-AFIP, Opcional — PLAN.md §6.3)
+              </h2>
+              <p className="text-muted">
+                Viene <strong>apagada por defecto</strong>. Con ARCA apagada no
+                aparece ninguna opción fiscal y todo funciona con ticket no
+                fiscal. Las credenciales y certificados digitales viven como
+                secretos en la Edge Function{' '}
+                <code>emitir_comprobante_arca</code> de Supabase y{' '}
+                <strong>nunca se guardan en el cliente ni en el repositorio</strong>{' '}
+                (Reglas 18 y 19).
+              </p>
+            </div>
+            <span
+              className={`sync-pill ${
+                arcaHabilitada ? 'sync-pill-ok' : 'sync-pill-offline'
+              }`}
+            >
+              {arcaHabilitada
+                ? `ARCA Activa (${arcaAmbiente.toUpperCase()})`
+                : 'ARCA Apagada (Ticket No Fiscal)'}
+            </span>
+          </div>
+
+          <form
+            onSubmit={(e) => void manejarGuardarConfigArca(e)}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.85rem',
+              marginTop: '0.75rem',
+            }}
+          >
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={arcaHabilitada}
+                onChange={(e) => setArcaHabilitada(e.target.checked)}
+              />
+              <span>
+                <strong>Habilitar Facturación Electrónica ARCA</strong> (emite
+                Factura A, B o C y Nota de Crédito según condición IVA, con QR
+                oficial RG 4892/2020)
+              </span>
+            </label>
+
+            <div className="form-grid-2">
+              <label className="field-label">
+                <span>Razón Social del Emisor</span>
+                <input
+                  type="text"
+                  className="input-base"
+                  placeholder="Comercio Ejemplo S.R.L."
+                  value={arcaRazonSocial}
+                  onChange={(e) => setArcaRazonSocial(e.target.value)}
+                />
+              </label>
+
+              <label className="field-label">
+                <span>CUIT del Comercio (11 dígitos con Módulo 11)</span>
+                <input
+                  type="text"
+                  className="input-base"
+                  placeholder="20-11111111-2"
+                  value={arcaCuit}
+                  onChange={(e) => setArcaCuit(e.target.value)}
+                />
+              </label>
+            </div>
+
+            <div className="form-grid-2">
+              <label className="field-label">
+                <span>Condición frente al IVA del Emisor</span>
+                <select
+                  className="input-base"
+                  value={arcaCondicionIva}
+                  onChange={(e) =>
+                    setArcaCondicionIva(
+                      e.target.value as
+                        | 'monotributo'
+                        | 'responsable_inscripto'
+                        | 'exento'
+                    )
+                  }
+                >
+                  <option value="monotributo">
+                    Monotributo (emite Factura C / NC C)
+                  </option>
+                  <option value="responsable_inscripto">
+                    Responsable Inscripto (emite Factura A o B / NC A o B)
+                  </option>
+                  <option value="exento">
+                    IVA Sujeto Exento (emite Factura C / NC C)
+                  </option>
+                </select>
+              </label>
+
+              <label className="field-label">
+                <span>Punto de Venta Electrónico ARCA</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={99999}
+                  className="input-base"
+                  value={arcaPuntoVenta}
+                  onChange={(e) => setArcaPuntoVenta(e.target.value)}
+                />
+              </label>
+            </div>
+
+            <div className="form-grid-2">
+              <label className="field-label">
+                <span>Ambiente ARCA (Probar siempre primero en Homologación)</span>
+                <select
+                  className="input-base"
+                  value={arcaAmbiente}
+                  onChange={(e) =>
+                    setArcaAmbiente(
+                      e.target.value as 'homologacion' | 'produccion'
+                    )
+                  }
+                >
+                  <option value="homologacion">
+                    Homologación (Pruebas — CAE de prueba sin validez fiscal)
+                  </option>
+                  <option value="produccion">
+                    Producción (Emisión real con secretos en Edge Function)
+                  </option>
+                </select>
+              </label>
+
+              <label className="field-label">
+                <span>Servicio de Terceros en Edge Function</span>
+                <select
+                  className="input-base"
+                  value={arcaProveedor}
+                  onChange={(e) =>
+                    setArcaProveedor(
+                      e.target.value as
+                        | 'afip_sdk'
+                        | 'tus_facturas'
+                        | 'simulador_homologacion'
+                    )
+                  }
+                >
+                  <option value="afip_sdk">Afip SDK (Edge Function)</option>
+                  <option value="tus_facturas">
+                    TusFacturasAPP (Edge Function)
+                  </option>
+                  <option value="simulador_homologacion">
+                    Simulador Homologación Local
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <label className="field-label">
+              <span>Domicilio Comercial</span>
+              <input
+                type="text"
+                className="input-base"
+                placeholder="Av. Corrientes 1234, CABA"
+                value={arcaDomicilio}
+                onChange={(e) => setArcaDomicilio(e.target.value)}
+              />
+            </label>
+
+            <div
+              style={{
+                display: 'flex',
+                gap: '0.75rem',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={procesando}
+              >
+                Guardar configuración ARCA
+              </button>
+
+              {configArca && (
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: '0.6rem',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <span className="badge-neutral">
+                    Emitidos: <strong>{configArca.resumen_comprobantes.emitidos}</strong>
+                  </span>
+                  <span className="badge-neutral">
+                    Pendientes:{' '}
+                    <strong>{configArca.resumen_comprobantes.pendientes}</strong>
+                  </span>
+                  <span className="badge-neutral">
+                    Con error:{' '}
+                    <strong>{configArca.resumen_comprobantes.con_error}</strong>
+                  </span>
+                  {(configArca.resumen_comprobantes.pendientes > 0 ||
+                    configArca.resumen_comprobantes.con_error > 0) && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={procesando}
+                      onClick={() => void manejarReintentarPendientesArca()}
+                    >
+                      Reintentar pendientes ARCA ahora
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </form>
         </section>
 
         <section className="card danger-zone-card">
@@ -1182,13 +1726,26 @@ export function PanelConfiguracionSync({
           ) : (
             <div className="alert-error" style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
               <strong>
-                ¿Confirmás reiniciar la base de datos local a cero?
+                ¿Confirmás reiniciar la base de datos a cero?
               </strong>
               <span>
                 Se creará una copia de seguridad previa en{' '}
                 <code>data/backups/</code> y se eliminarán todos los productos,
                 ventas, movimientos y usuarios no administradores.
               </span>
+              <label className="checkbox-inline" style={{ marginTop: '0.25rem' }}>
+                <input
+                  type="checkbox"
+                  checked={vaciarSupabaseEnReset}
+                  onChange={(e) => setVaciarSupabaseEnReset(e.target.checked)}
+                />
+                <span>
+                  <strong>
+                    Vaciar también las tablas que están en Supabase
+                  </strong>{' '}
+                  (mantiene local y nube limpios y alineados)
+                </span>
+              </label>
               <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
                 <button
                   type="button"

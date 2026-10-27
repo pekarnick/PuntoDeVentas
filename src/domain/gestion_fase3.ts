@@ -554,6 +554,18 @@ export function parsearCsvImportacionCatalogo(
           ? Number(cols[idxStockMinimo]!.replace(',', '.')) || 0
           : 0;
 
+      const rawCodigoBarras =
+        idxCodigoBarras >= 0 && cols[idxCodigoBarras]
+          ? cols[idxCodigoBarras]!.trim()
+          : '';
+      const codigoBarrasLimpio =
+        rawCodigoBarras &&
+        !['0', '-', '--', 'n/a', 'na', 's/c', 'sc', 'null', 'ninguno'].includes(
+          rawCodigoBarras.toLowerCase()
+        )
+          ? rawCodigoBarras
+          : undefined;
+
       filasValidas.push({
         filaNumero: numFila,
         nombre,
@@ -561,10 +573,7 @@ export function parsearCsvImportacionCatalogo(
           idxCodigoInterno >= 0 && cols[idxCodigoInterno]
             ? cols[idxCodigoInterno]
             : undefined,
-        codigoBarras:
-          idxCodigoBarras >= 0 && cols[idxCodigoBarras]
-            ? cols[idxCodigoBarras]
-            : undefined,
+        codigoBarras: codigoBarrasLimpio,
         costoCompraCentavos,
         precioVentaCentavos,
         alicuotaIva,

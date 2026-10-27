@@ -1,10 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   formatearMonedaARS,
   pesosACentavos,
   type Centavos,
 } from '../../domain/dinero.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import {
   actualizarCantidadEnCarrito,
   agregarProductoAlCarrito,
@@ -28,8 +33,43 @@ import {
   formatearTicketNoFiscalTexto,
   type DatosTicketNoFiscal,
 } from '../../domain/ticket.ts';
-import { validarPagosVenta, type MedioPago } from '../../domain/totales.ts';
+import {
+  evaluarPagosCombinados,
+  validarPagosVenta,
+  type MedioPago,
+} from '../../domain/totales.ts';
+import {
+  determinarTipoComprobanteArca,
+  parsearCodigoBarrasBalanza,
+} from '../../domain/arca_fase4.ts';
 import type { ClienteConSaldoUI } from '../clientes/PanelClientesCuentaCorriente.tsx';
+import type { EstadoConfiguracionArcaDTO } from '../configuracion/PanelConfiguracionSync.tsx';
+
+export interface ListaPrecioUI {
+  readonly id: string;
+  readonly nombre: string;
+  readonly es_predeterminada: boolean;
+  readonly cantidad_productos_con_precio: number;
+}
+
+export interface ComboPromocionUI {
+  readonly id: string;
+  readonly nombre: string;
+  readonly descripcion: string | null;
+  readonly codigo_barras: string | null;
+  readonly precio_venta: Centavos;
+  readonly precio_suma_normal: Centavos;
+  readonly ahorro_centavos: Centavos;
+  readonly porcentaje_descuento: number;
+  readonly stock_combos_disponibles: number;
+  readonly items: readonly {
+    readonly producto_id: string;
+    readonly producto_nombre: string;
+    readonly cantidad: number;
+    readonly precio_unitario_normal: Centavos;
+    readonly stock_actual: number;
+  }[];
+}
 
 export interface VentaRecienteResumenUI {
   readonly id: string;
@@ -38,6 +78,14 @@ export interface VentaRecienteResumenUI {
   readonly estado: 'completada' | 'anulada';
   readonly motivo_anulacion?: string | null;
   readonly autorizada_por_nombre?: string | null;
+  readonly tipo_comprobante?: string;
+  readonly punto_venta?: number | null;
+  readonly numero_comprobante?: number | null;
+  readonly cae?: string | null;
+  readonly cae_vencimiento?: string | null;
+  readonly estado_facturacion?: string;
+  readonly nota_credito_tipo?: string | null;
+  readonly nota_credito_cae?: string | null;
 }
 
 export interface PanelVentaPOSProps {
@@ -46,6 +94,9 @@ export interface PanelVentaPOSProps {
   readonly catalogoInicial?: readonly ProductoCatalogoVenta[];
   readonly ventasRecientesIniciales?: readonly VentaRecienteResumenUI[];
   readonly clientesDisponibles?: readonly ClienteConSaldoUI[];
+  readonly configArca?: EstadoConfiguracionArcaDTO | null;
+  readonly listasPrecioDisponibles?: readonly ListaPrecioUI[];
+  readonly combosDisponibles?: readonly ComboPromocionUI[];
   readonly onDatosActualizados?: () => void;
 }
 
@@ -114,6 +165,9 @@ export function PanelVentaPOS({
   catalogoInicial = CATALOGO_FALLBACK_TESTS,
   ventasRecientesIniciales = [],
   clientesDisponibles = [],
+  configArca = null,
+  listasPrecioDisponibles = [],
+  combosDisponibles = [],
   onDatosActualizados,
 }: PanelVentaPOSProps): React.ReactElement {
   const [catalogo, setCatalogo] = useState<ProductoCatalogoVenta[]>(() =>
@@ -124,19 +178,32 @@ export function PanelVentaPOS({
   const [indiceSugerenciaActiva, setIndiceSugerenciaActiva] = useState(0);
   const [desplegableAbierto, setDesplegableAbierto] = useState(true);
   const [descuentoGlobalInput, setDescuentoGlobalInput] = useState('0,00');
+  const [listaPrecioId, setListaPrecioId] = useState<string>('');
+  const [comprobanteFiscalActivo, setComprobanteFiscalActivo] = useState<{
+    readonly numeroFormateado: string;
+    readonly letra: string;
+    readonly codigoNumerico: string;
+    readonly urlQrOficial: string;
+    readonly qrSvg: string;
+    readonly textoTermico: string;
+    readonly htmlImprimible: string;
+  } | null>(null);
 
   useEffect(() => {
     setCatalogo(catalogoInicial.map((p) => sanitizarProductoCatalogoParaPOS(p)));
   }, [catalogoInicial]);
 
-  // Pagos mixtos y cliente (Cuenta Corriente Fase 3)
+  // Pagos mixtos / combinados y cliente (Cuenta Corriente Fase 3)
   const [clienteSeleccionadoId, setClienteSeleccionadoId] =
     useState<string>('');
   const [medioPrincipal, setMedioPrincipal] = useState<MedioPago>('efectivo');
   const [modoPagoMixto, setModoPagoMixto] = useState(false);
-  const [montoEfectivoMixtoInput, setMontoEfectivoMixtoInput] = useState('');
-  const [medioSecundarioMixto, setMedioSecundarioMixto] =
-    useState<MedioPago>('mercado_pago');
+  const [pagosCombinadosUI, setPagosCombinadosUI] = useState<
+    Array<{ id: string; medio: MedioPago; montoInput: string }>
+  >([
+    { id: 'pago-1', medio: 'efectivo', montoInput: '' },
+    { id: 'pago-2', medio: 'mercado_pago', montoInput: '' },
+  ]);
 
   // Alta rápida cuando un código escaneado no existe (PLAN.md §9)
   const [codigoInexistenteDetectado, setCodigoInexistenteDetectado] = useState<
@@ -155,9 +222,16 @@ export function PanelVentaPOS({
   const [ventasSesion, setVentasSesion] = useState<VentaRecienteResumenUI[]>(
     () => [...ventasRecientesIniciales]
   );
+  const [paginaVentasRecientes, setPaginaVentasRecientes] = useState(1);
   useEffect(() => {
     setVentasSesion([...ventasRecientesIniciales]);
   }, [ventasRecientesIniciales]);
+
+  const paginacionVentasRecientes = paginarListado(
+    ventasSesion,
+    paginaVentasRecientes,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
 
   const [ventaAAnularId, setVentaAAnularId] = useState<string | null>(null);
   const [motivoAnulacion, setMotivoAnulacion] = useState('');
@@ -194,6 +268,95 @@ export function PanelVentaPOS({
   const resumen = calcularResumenCarritoPOS(carrito, descuentoGlobalCentavos);
   const botonesRapidos = catalogo.filter((p) => p.boton_rapido);
 
+  function parsearMontoInputCentavos(valor: string): Centavos {
+    const limpio = valor.trim();
+    if (!limpio) return 0;
+    try {
+      const c = pesosACentavos(limpio);
+      return c > 0 ? c : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function centavosAInputPesos(centavos: Centavos): string {
+    return (Math.max(0, centavos) / 100).toFixed(2).replace('.', ',');
+  }
+
+  const pagosCombinadosCalculados = useMemo(
+    () =>
+      pagosCombinadosUI.map((fila) => ({
+        id: fila.id,
+        medio: fila.medio,
+        montoInput: fila.montoInput,
+        monto: parsearMontoInputCentavos(fila.montoInput),
+      })),
+    [pagosCombinadosUI]
+  );
+
+  const estadoPagosCombinados = useMemo(
+    () =>
+      evaluarPagosCombinados(
+        pagosCombinadosCalculados.map((p) => ({
+          medio: p.medio,
+          monto: p.monto,
+        })),
+        resumen.total
+      ),
+    [pagosCombinadosCalculados, resumen.total]
+  );
+
+  function actualizarFilaPagoCombinado(
+    id: string,
+    cambios: Partial<{ medio: MedioPago; montoInput: string }>
+  ) {
+    setPagosCombinadosUI((prev) =>
+      prev.map((fila) => (fila.id === id ? { ...fila, ...cambios } : fila))
+    );
+  }
+
+  function completarRestoEnFilaPago(id: string) {
+    const sumaOtras = pagosCombinadosCalculados
+      .filter((f) => f.id !== id)
+      .reduce((acc, f) => acc + f.monto, 0);
+    const resto = Math.max(0, resumen.total - sumaOtras);
+    actualizarFilaPagoCombinado(id, {
+      montoInput: centavosAInputPesos(resto),
+    });
+  }
+
+  function agregarFilaPagoCombinado() {
+    const ordenMedios: MedioPago[] = [
+      'efectivo',
+      'mercado_pago',
+      'transferencia',
+      'debito',
+      'credito',
+      'qr',
+      'cuenta_corriente',
+      'otro',
+    ];
+    const usados = new Set(pagosCombinadosUI.map((f) => f.medio));
+    const siguienteMedio =
+      ordenMedios.find((m) => !usados.has(m)) ?? 'transferencia';
+    const restoActual = estadoPagosCombinados.faltaCubrirCentavos;
+
+    setPagosCombinadosUI((prev) => [
+      ...prev,
+      {
+        id: `pago-${Date.now()}-${prev.length + 1}`,
+        medio: siguienteMedio,
+        montoInput: restoActual > 0 ? centavosAInputPesos(restoActual) : '',
+      },
+    ]);
+  }
+
+  function quitarFilaPagoCombinado(id: string) {
+    setPagosCombinadosUI((prev) =>
+      prev.length <= 2 ? prev : prev.filter((fila) => fila.id !== id)
+    );
+  }
+
   function enfocarEntradaLector() {
     inputLectorRef.current?.focus();
   }
@@ -204,18 +367,19 @@ export function PanelVentaPOS({
 
   function seleccionarProductoParaCarrito(
     prod: ProductoCatalogoVenta,
-    etiquetaOrigen: string
+    etiquetaOrigen: string,
+    cantidadPersonalizada?: number
   ) {
     setMensajeError(null);
     setCodigoInexistenteDetectado(null);
-    setCarrito((prev) =>
-      agregarProductoAlCarrito(prev, prod, prod.permite_decimales ? 0.5 : 1)
-    );
+    const cantAgregar =
+      cantidadPersonalizada ?? (prod.permite_decimales ? 0.5 : 1);
+    setCarrito((prev) => agregarProductoAlCarrito(prev, prod, cantAgregar));
     setEntradaLector('');
     setIndiceSugerenciaActiva(0);
     setDesplegableAbierto(false);
     setMensajeEstado(
-      `${etiquetaOrigen} Agregado: ${prod.nombre} (${formatearMonedaARS(prod.precio_venta)})`
+      `${etiquetaOrigen} Agregado: ${prod.nombre} x ${cantAgregar} ${prod.unidad} (${formatearMonedaARS(prod.precio_venta)})`
     );
     enfocarEntradaLector();
   }
@@ -227,6 +391,43 @@ export function PanelVentaPOS({
 
     const texto = textoRaw.trim();
     if (!texto) return;
+
+    // 0. Verificar si es un código EAN-13 de balanza con peso/importe embebido (PLAN.md §9 y §10)
+    const balanza = parsearCodigoBarrasBalanza(texto);
+    if (balanza.esCodigoBalanza && balanza.codigoPlu) {
+      const pluNum = String(Number(balanza.codigoPlu));
+      const prodBalanza = catalogo.find(
+        (p) =>
+          p.codigo_interno === balanza.codigoPlu ||
+          p.codigo_interno === pluNum ||
+          p.codigos_barras.some(
+            (cb) =>
+              cb === balanza.codigoPlu ||
+              cb === pluNum ||
+              cb.endsWith(pluNum)
+          )
+      );
+      if (prodBalanza) {
+        const cantKg =
+          balanza.modo === 'peso' && balanza.cantidadKg
+            ? balanza.cantidadKg
+            : balanza.modo === 'importe' &&
+                balanza.importeCentavos &&
+                prodBalanza.precio_venta > 0
+              ? Number(
+                  (balanza.importeCentavos / prodBalanza.precio_venta).toFixed(
+                    3
+                  )
+                )
+              : 1;
+        seleccionarProductoParaCarrito(
+          prodBalanza,
+          '[Balanza EAN-13]',
+          cantKg
+        );
+        return;
+      }
+    }
 
     // 1. Buscar coincidencia exacta por código de barras o código interno
     const porCodigo = catalogo.find(
@@ -436,13 +637,17 @@ export function PanelVentaPOS({
         { medio: medioPrincipal, monto: resumen.total },
       ];
 
-      if (modoPagoMixto && montoEfectivoMixtoInput.trim()) {
-        const montoEfectivo = pesosACentavos(montoEfectivoMixtoInput);
-        const resto = resumen.total - montoEfectivo;
-        pagos = [
-          { medio: 'efectivo', monto: montoEfectivo },
-          { medio: medioSecundarioMixto, monto: resto },
-        ];
+      if (modoPagoMixto) {
+        pagos = pagosCombinadosCalculados.map((fila) => ({
+          medio: fila.medio,
+          monto: fila.monto,
+        }));
+
+        if (pagos.some((p) => p.monto <= 0)) {
+          throw new Error(
+            'Ingresá un monto mayor a $ 0,00 en cada medio de pago combinado (o quitá los medios que no uses).'
+          );
+        }
       }
 
       const usaCuentaCorriente = pagos.some(
@@ -463,6 +668,7 @@ export function PanelVentaPOS({
       }>('registrar_venta', {
         rolActivo,
         clienteId: clienteSeleccionadoId || undefined,
+        listaPrecioId: listaPrecioId || undefined,
         items: carrito.map((it) => ({
           productoId: it.producto_id,
           cantidad: it.cantidad,
@@ -502,7 +708,10 @@ export function PanelVentaPOS({
 
       setCarrito([]);
       setDescuentoGlobalInput('0,00');
-      setMontoEfectivoMixtoInput('');
+      setPagosCombinadosUI([
+        { id: 'pago-1', medio: 'efectivo', montoInput: '' },
+        { id: 'pago-2', medio: 'mercado_pago', montoInput: '' },
+      ]);
       setModoPagoMixto(false);
       setMensajeEstado(
         `Venta #${respuesta.ventaId.slice(-6)} guardada en SQLite por ${formatearMonedaARS(respuesta.totalCentavos)}. Stock descontado y auditado.`
@@ -606,6 +815,74 @@ export function PanelVentaPOS({
       );
     }
   }
+
+  async function manejarVerComprobanteFiscalArca(ventaId: string) {
+    setMensajeError(null);
+    try {
+      const comp = await invocarPosApi<{
+        numeroFormateado: string;
+        letra: string;
+        codigoNumerico: string;
+        urlQrOficial: string;
+        qrSvg: string;
+        textoTermico: string;
+        htmlImprimible: string;
+      }>('obtener_comprobante_fiscal_imprimible', {
+        rolActivo,
+        ventaId,
+      });
+      setComprobanteFiscalActivo(comp);
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo obtener el comprobante fiscal ARCA.'
+      );
+    }
+  }
+
+  function manejarAgregarComboAlCarrito(combo: ComboPromocionUI) {
+    setMensajeError(null);
+    let nuevoCarrito = [...carrito];
+    for (const item of combo.items) {
+      const prod = catalogo.find((p) => p.id === item.producto_id);
+      if (prod) {
+        nuevoCarrito = agregarProductoAlCarrito(
+          nuevoCarrito,
+          prod,
+          item.cantidad
+        );
+      }
+    }
+    setCarrito(nuevoCarrito);
+    if (combo.ahorro_centavos > 0) {
+      const descuentoNuevo = descuentoGlobalCentavos + combo.ahorro_centavos;
+      setDescuentoGlobalInput(
+        (descuentoNuevo / 100).toFixed(2).replace('.', ',')
+      );
+    }
+    setMensajeEstado(
+      `[Combo] Agregado "${combo.nombre}" por ${formatearMonedaARS(combo.precio_venta)} (Ahorro: ${formatearMonedaARS(combo.ahorro_centavos)})`
+    );
+    enfocarEntradaLector();
+  }
+
+  const clienteActualObj = clientesDisponibles.find(
+    (c) => c.id === clienteSeleccionadoId
+  );
+  const infoFiscalPrevia = configArca?.arca_habilitada
+    ? determinarTipoComprobanteArca({
+        arcaHabilitada: true,
+        condicionIvaEmisor: configArca.condicion_iva,
+        condicionIvaReceptor:
+          (clienteActualObj?.condicion_iva as
+            | 'monotributo'
+            | 'responsable_inscripto'
+            | 'exento'
+            | 'consumidor_final'
+            | undefined) ?? 'consumidor_final',
+      })
+    : null;
 
   return (
     <div
@@ -806,8 +1083,36 @@ export function PanelVentaPOS({
                     seleccionarProductoParaCarrito(prod, '[Botón rápido]')
                   }
                 >
+                  {prod.imagen_path && (
+                    <img
+                      src={`/api/pos-imagen/${prod.id}_thumb.webp`}
+                      alt={prod.nombre}
+                      style={{
+                        width: '36px',
+                        height: '36px',
+                        objectFit: 'cover',
+                        borderRadius: '0.35rem',
+                        marginBottom: '0.2rem',
+                      }}
+                      onError={(ev) => {
+                        (ev.currentTarget as HTMLImageElement).style.display =
+                          'none';
+                      }}
+                    />
+                  )}
                   <span>{prod.nombre}</span>
                   <strong>{formatearMonedaARS(prod.precio_venta)}</strong>
+                </button>
+              ))}
+              {combosDisponibles.map((combo) => (
+                <button
+                  key={combo.id}
+                  type="button"
+                  className="btn-secondary quick-btn"
+                  onClick={() => manejarAgregarComboAlCarrito(combo)}
+                >
+                  <span>[Combo] {combo.nombre}</span>
+                  <strong>{formatearMonedaARS(combo.precio_venta)}</strong>
                 </button>
               ))}
             </div>
@@ -937,6 +1242,47 @@ export function PanelVentaPOS({
           </div>
 
           <div className="form-stack">
+            {listasPrecioDisponibles.length > 1 && (
+              <div className="form-row">
+                <label>
+                  Lista de Precios Aplicada:
+                  <select
+                    value={listaPrecioId}
+                    onChange={(e) => setListaPrecioId(e.target.value)}
+                  >
+                    <option value="">Mostrador (Predeterminada)</option>
+                    {listasPrecioDisponibles.map((lp) => (
+                      <option key={lp.id} value={lp.id}>
+                        {lp.nombre}
+                        {lp.es_predeterminada ? ' (Predeterminada)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+
+            {configArca?.arca_habilitada && infoFiscalPrevia && (
+              <div
+                className="alert-info"
+                aria-label="Indicador de facturación electrónica ARCA activa"
+              >
+                <strong>
+                  Facturación ARCA Activa ({configArca.arca_ambiente.toUpperCase()}):
+                </strong>{' '}
+                Se emitirá automáticamente{' '}
+                <strong>
+                  {infoFiscalPrevia.tipoComprobante
+                    .replace(/_/g, ' ')
+                    .toUpperCase()}{' '}
+                  [{infoFiscalPrevia.letra}]
+                </strong>{' '}
+                (Pto. Vta. {String(configArca.arca_punto_venta).padStart(4, '0')}
+                ). Si no hay internet, queda <code>pendiente</code> sin bloquear
+                la caja.
+              </div>
+            )}
+
             <div className="form-row">
               <label>
                 Cliente (opcional o requerido en Cta. Cte.):
@@ -992,33 +1338,162 @@ export function PanelVentaPOS({
             </div>
 
             {modoPagoMixto && (
-              <div className="form-row">
-                <label>
-                  Parte en Efectivo ($):
-                  <input
-                    type="text"
-                    value={montoEfectivoMixtoInput}
-                    onChange={(e) => setMontoEfectivoMixtoInput(e.target.value)}
-                    placeholder="2000,00"
-                  />
-                </label>
-                <label>
-                  Resto con segundo medio:
-                  <select
-                    value={medioSecundarioMixto}
-                    onChange={(e) =>
-                      setMedioSecundarioMixto(e.target.value as MedioPago)
-                    }
+              <div
+                className="arqueo-box"
+                aria-label="Combinación de medios de pago"
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: '0.5rem',
+                    marginBottom: '0.6rem',
+                  }}
+                >
+                  <strong>
+                    Medios de pago combinados ({pagosCombinadosUI.length})
+                  </strong>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={agregarFilaPagoCombinado}
                   >
-                    <option value="mercado_pago">Mercado Pago</option>
-                    <option value="transferencia">Transferencia</option>
-                    <option value="debito">Tarjeta de Débito</option>
-                    <option value="credito">Tarjeta de Crédito</option>
-                    <option value="cuenta_corriente">
-                      Cuenta Corriente (Fiado)
-                    </option>
-                  </select>
-                </label>
+                    + Agregar medio de pago
+                  </button>
+                </div>
+
+                <div className="form-stack">
+                  {pagosCombinadosUI.map((fila, idx) => (
+                    <div
+                      key={fila.id}
+                      className="form-row"
+                      style={{ alignItems: 'flex-end' }}
+                    >
+                      <label style={{ flex: 1 }}>
+                        Medio de pago #{idx + 1}:
+                        <select
+                          aria-label={`Medio de pago combinado ${idx + 1}`}
+                          value={fila.medio}
+                          onChange={(e) =>
+                            actualizarFilaPagoCombinado(fila.id, {
+                              medio: e.target.value as MedioPago,
+                            })
+                          }
+                        >
+                          <option value="efectivo">Efectivo</option>
+                          <option value="mercado_pago">Mercado Pago</option>
+                          <option value="transferencia">Transferencia</option>
+                          <option value="debito">Tarjeta de Débito</option>
+                          <option value="credito">Tarjeta de Crédito</option>
+                          <option value="qr">QR Interoperable</option>
+                          <option value="cuenta_corriente">
+                            Cuenta Corriente (Fiado)
+                          </option>
+                          <option value="otro">Otro</option>
+                        </select>
+                      </label>
+
+                      <label style={{ flex: 1 }}>
+                        Monto #{idx + 1} ($):
+                        <input
+                          type="text"
+                          aria-label={`Monto medio de pago ${idx + 1}`}
+                          value={fila.montoInput}
+                          onChange={(e) =>
+                            actualizarFilaPagoCombinado(fila.id, {
+                              montoInput: e.target.value,
+                            })
+                          }
+                          placeholder="0,00"
+                        />
+                      </label>
+
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        title="Completar automáticamente con el saldo restante a cobrar"
+                        onClick={() => completarRestoEnFilaPago(fila.id)}
+                      >
+                        Completar resto
+                      </button>
+
+                      {pagosCombinadosUI.length > 2 && (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => quitarFilaPagoCombinado(fila.id)}
+                        >
+                          Quitar
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  style={{
+                    marginTop: '0.65rem',
+                    paddingTop: '0.6rem',
+                    borderTop: '1px solid #cbd5e1',
+                  }}
+                >
+                  <div className="arqueo-line">
+                    <span>Suma de pagos ingresados:</span>
+                    <strong>
+                      {formatearMonedaARS(estadoPagosCombinados.sumaPagos)}
+                    </strong>
+                  </div>
+                  <div className="arqueo-line">
+                    <span>Monto total a cobrar:</span>
+                    <strong>
+                      {formatearMonedaARS(estadoPagosCombinados.totalACobrar)}
+                    </strong>
+                  </div>
+                  {resumen.total > 0 && (
+                    <div
+                      className={
+                        estadoPagosCombinados.esValidoParaCobrar
+                          ? 'alert-ok'
+                          : 'alert-error'
+                      }
+                      style={{ marginTop: '0.45rem', marginBottom: 0 }}
+                    >
+                      {estadoPagosCombinados.esValidoParaCobrar ? (
+                        <span>
+                          ✓ Suma verificada: coincide con el monto a cobrar (
+                          {formatearMonedaARS(resumen.total)}).
+                        </span>
+                      ) : estadoPagosCombinados.faltaCubrirCentavos > 0 ? (
+                        <span>
+                          Faltan cubrir{' '}
+                          <strong>
+                            {formatearMonedaARS(
+                              estadoPagosCombinados.faltaCubrirCentavos
+                            )}
+                          </strong>{' '}
+                          para alcanzar el monto a cobrar.
+                        </span>
+                      ) : estadoPagosCombinados.excedenteCentavos > 0 ? (
+                        <span>
+                          La suma excede el monto a cobrar por{' '}
+                          <strong>
+                            {formatearMonedaARS(
+                              estadoPagosCombinados.excedenteCentavos
+                            )}
+                          </strong>
+                          .
+                        </span>
+                      ) : (
+                        <span>
+                          Todos los medios de pago combinados deben tener un
+                          monto mayor a $ 0,00.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1092,7 +1567,7 @@ export function PanelVentaPOS({
                   </tr>
                 </thead>
                 <tbody>
-                  {ventasSesion.map((v) => (
+                  {paginacionVentasRecientes.itemsPagina.map((v) => (
                     <tr key={v.id}>
                       <td>
                         <code>#{v.id.slice(-6)}</code>
@@ -1102,22 +1577,56 @@ export function PanelVentaPOS({
                         {v.estado === 'completada'
                           ? 'Completada'
                           : `Anulada (${v.motivo_anulacion ?? 'Sin motivo'})`}
+                        {configArca?.arca_habilitada &&
+                          v.estado_facturacion &&
+                          v.estado_facturacion !== 'no_aplica' && (
+                            <div style={{ fontSize: '0.78rem', marginTop: '2px' }}>
+                              ARCA: <strong>{v.estado_facturacion}</strong>
+                              {v.cae ? ` (CAE ${v.cae})` : ''}
+                              {v.nota_credito_cae
+                                ? ` · NC CAE ${v.nota_credito_cae}`
+                                : ''}
+                            </div>
+                          )}
                       </td>
                       <td>
-                        {v.estado === 'completada' && (
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            onClick={() => setVentaAAnularId(v.id)}
-                          >
-                            Anular venta
-                          </button>
-                        )}
+                        <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                          {configArca?.arca_habilitada && v.cae && (
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() =>
+                                void manejarVerComprobanteFiscalArca(v.id)
+                              }
+                            >
+                              Factura / QR ARCA
+                            </button>
+                          )}
+                          {v.estado === 'completada' && (
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() => setVentaAAnularId(v.id)}
+                            >
+                              Anular venta
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              <PaginadorTabla
+                paginaActual={paginacionVentasRecientes.paginaActual}
+                totalPaginas={paginacionVentasRecientes.totalPaginas}
+                totalItems={paginacionVentasRecientes.totalItems}
+                desdeRegistro={paginacionVentasRecientes.desdeRegistro}
+                hastaRegistro={paginacionVentasRecientes.hastaRegistro}
+                tamanioPagina={paginacionVentasRecientes.tamanioPagina}
+                onCambiarPagina={setPaginaVentasRecientes}
+                etiquetaItems="ventas"
+              />
             </div>
           )}
 
@@ -1166,6 +1675,59 @@ export function PanelVentaPOS({
                 </button>
               </div>
             </form>
+          )}
+
+          {configArca?.arca_habilitada && comprobanteFiscalActivo && (
+            <div
+              className="ticket-preview"
+              aria-label="Comprobante Fiscal Electrónico ARCA"
+              style={{ marginTop: '1rem' }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  flexWrap: 'wrap',
+                  marginBottom: '0.5rem',
+                }}
+              >
+                <h3>
+                  Comprobante Fiscal [{comprobanteFiscalActivo.letra}]{' '}
+                  {comprobanteFiscalActivo.numeroFormateado} (
+                  {comprobanteFiscalActivo.codigoNumerico})
+                </h3>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setComprobanteFiscalActivo(null)}
+                >
+                  Cerrar vista fiscal
+                </button>
+              </div>
+              <pre>{comprobanteFiscalActivo.textoTermico}</pre>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.75rem',
+                  marginTop: '0.5rem',
+                }}
+              >
+                <div
+                  dangerouslySetInnerHTML={{
+                    __html: comprobanteFiscalActivo.qrSvg,
+                  }}
+                />
+                <div style={{ fontSize: '0.82rem' }}>
+                  <strong>QR Oficial RG 4892/2020 (ARCA)</strong>
+                  <div style={{ wordBreak: 'break-all' }}>
+                    <code>{comprobanteFiscalActivo.urlQrOficial}</code>
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       </div>

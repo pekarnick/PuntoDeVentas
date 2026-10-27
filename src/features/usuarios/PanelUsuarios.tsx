@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import type { RolUsuario } from '../../domain/permisos.ts';
 
 interface UsuarioFilaUI {
@@ -14,6 +19,7 @@ interface UsuarioFilaUI {
 
 export function PanelUsuarios(): React.ReactElement {
   const [usuarios, setUsuarios] = useState<UsuarioFilaUI[]>([]);
+  const [paginaUsuarios, setPaginaUsuarios] = useState(1);
   const [nuevoNombre, setNuevoNombre] = useState('');
   const [nuevoUsuario, setNuevoUsuario] = useState('');
   const [nuevoRol, setNuevoRol] = useState<RolUsuario>('cajero');
@@ -125,6 +131,12 @@ export function PanelUsuarios(): React.ReactElement {
     }
   }
 
+  const paginacionUsuarios = paginarListado(
+    usuarios,
+    paginaUsuarios,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+
   return (
     <section className="pos-card">
       <div className="card-header">
@@ -198,7 +210,7 @@ export function PanelUsuarios(): React.ReactElement {
           </tr>
         </thead>
         <tbody>
-          {usuarios.map((u) => (
+          {paginacionUsuarios.itemsPagina.map((u) => (
             <tr key={u.id}>
               <td>{u.nombre}</td>
               <td>
@@ -239,6 +251,16 @@ export function PanelUsuarios(): React.ReactElement {
           ))}
         </tbody>
       </table>
+      <PaginadorTabla
+        paginaActual={paginacionUsuarios.paginaActual}
+        totalPaginas={paginacionUsuarios.totalPaginas}
+        totalItems={paginacionUsuarios.totalItems}
+        desdeRegistro={paginacionUsuarios.desdeRegistro}
+        hastaRegistro={paginacionUsuarios.hastaRegistro}
+        tamanioPagina={paginacionUsuarios.tamanioPagina}
+        onCambiarPagina={setPaginaUsuarios}
+        etiquetaItems="usuarios"
+      />
     </section>
   );
 }

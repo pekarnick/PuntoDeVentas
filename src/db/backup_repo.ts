@@ -206,7 +206,7 @@ export function listarHistorialBackups(
        FROM backups_historial
        WHERE comercio_id = ?
        ORDER BY fecha DESC
-       LIMIT 30`
+       LIMIT 500`
     )
     .all(comercioId) as unknown as RegistroHistorialBackup[];
 }
@@ -381,6 +381,8 @@ export function resetearBaseDatosAFabrica(
 ): {
   backupResguardoPrevio: RegistroHistorialBackup;
   superadminConservado: string;
+  superadminId: string;
+  listaPrecioId: string;
 } {
   exigirPermiso(actor.rol, 'configuracion_sensible');
 
@@ -412,6 +414,8 @@ export function resetearBaseDatosAFabrica(
     )
     .get(actor.comercio_id) as { id: string } | undefined;
 
+  const listaPrecioIdConservar = listaGeneralFila?.id ?? generarUuidV7();
+
   const triggersActuales = db
     .prepare(
       `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL`
@@ -438,12 +442,16 @@ export function resetearBaseDatosAFabrica(
         'compras_items',
         'compras',
         'movimientos_stock',
+        'combos_items',
+        'combos',
+        'variantes',
         'precios',
         'codigos_barras',
         'productos',
         'proveedores',
         'marcas',
         'categorias',
+        'sesiones_moviles',
         'auditoria',
         'dispositivos',
         'sync_cola',
@@ -452,7 +460,11 @@ export function resetearBaseDatosAFabrica(
       ];
 
       for (const tabla of tablasVaciarPorCompleto) {
-        db.exec(`DELETE FROM ${tabla};`);
+        try {
+          db.exec(`DELETE FROM ${tabla};`);
+        } catch {
+          // Ignorar si una tabla opcional aún no existe en la versión de esquema bajo test
+        }
       }
 
       // Conservar únicamente al administrador principal (superadmin)
@@ -481,7 +493,7 @@ export function resetearBaseDatosAFabrica(
           `INSERT INTO listas_precio (id, comercio_id, nombre, es_predeterminada, created_at, updated_at, deleted_at, device_id, sync_status)
            VALUES (?, ?, 'General', 1, ?, ?, NULL, ?, 'pendiente')`
         ).run(
-          generarUuidV7(),
+          listaPrecioIdConservar,
           actor.comercio_id,
           ahora,
           ahora,
@@ -525,6 +537,8 @@ export function resetearBaseDatosAFabrica(
   return {
     backupResguardoPrevio,
     superadminConservado: `${superadminFila.nombre} (${superadminFila.usuario})`,
+    superadminId: superadminFila.id,
+    listaPrecioId: listaPrecioIdConservar,
   };
 }
 

@@ -63,3 +63,20 @@ Este documento registra las decisiones técnicas, refinamientos del modelo de da
 - **Decisión:** Las copias de seguridad diarias automáticas, manuales y previas a una restauración se generan mediante la sentencia nativa `VACUUM INTO` de SQLite.
 - **Motivo:** Garantiza una copia atómica e íntegra en un único archivo `.db` incluso cuando la base activa está operando en modo `WAL` con transacciones concurrentes. Antes de aplicar cualquier restauración se valida el encabezado binario SQLite, `PRAGMA integrity_check` y la cadena de hash de `auditoria`, generando además un backup automático `previo_restauracion`.
 
+---
+
+## 4. Decisiones de Facturación Electrónica ARCA y Extras (Fase 4)
+
+### 4.1 Facturación ARCA vía Edge Function y Cola de Reintento Offline
+- **Decisión:**
+  - ARCA viene apagada por defecto (`arca_habilitada = 0`). Cuando está apagada, las ventas son `ticket_no_fiscal` con `estado_facturacion = 'no_aplica'` y la interfaz de caja no muestra ninguna opción fiscal (`PLAN.md §6.3` y `§14`).
+  - Las credenciales y certificados digitales (`.crt` / `.key` o token de proveedor como Afip SDK / TusFacturas) **nunca** se guardan en SQLite, ni en el cliente React, ni en `/web-pos`, ni en el repositorio (Reglas 8, 18 y 19). Residen exclusivamente como secretos en la Edge Function `supabase/functions/emitir_comprobante_arca/index.ts`.
+  - Si se vende sin conexión a internet con ARCA activa, la venta se completa localmente con `estado_facturacion = 'pendiente'` sin bloquear jamás la caja y se reintenta automáticamente al recuperar la conexión (`reintentarComprobantesArcaPendientes`).
+  - Anular una venta ya facturada en ARCA emite automáticamente la **Nota de Crédito A/B/C** asociada (`nota_credito_tipo`, `nota_credito_numero`, `nota_credito_cae`, `nota_credito_cae_vencimiento`).
+  - Los comprobantes fiscales incluyen el **QR oficial RG 4892/2020** (`https://www.afip.gob.ar/fe/qr/?p=<base64>`) generado en SVG puro sin exponer costos (`Regla 20`).
+
+### 4.2 Balanzas EAN-13, Múltiples Listas de Precio, Variantes y Combos
+- **Decisión:**
+  - Las etiquetas EAN-13 de balanzas comerciales con prefijo `20` (`20PPPPPPGGGGV`, peso en gramos) y `21` (`21PPPPPPIIIIV`, importe en pesos) se decodifican en `/packages/domain/src/arca_fase4.ts` validando el dígito verificador EAN-13.
+  - Los combos (`combos` y `combos_items`) calculan su stock disponible dinámicamente a partir del stock actual de sus productos componentes (`Math.floor(min(stock / cantidad_requerida))`) y, al venderse, registran los movimientos de stock negativos sobre cada componente, respetando estrictamente la Regla 4 (el stock nunca es un campo editable).
+

@@ -8,6 +8,7 @@ import {
   esCuitValido,
   estaBajoStockMinimo,
   esUuidValido,
+  evaluarPagosCombinados,
   formatearCuit,
   formatearFechaAR,
   formatearMonedaARS,
@@ -25,6 +26,8 @@ import {
   validarPagosVenta,
   validarProteccionUltimoSuperadmin,
   verificarCadenaAuditoria,
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
 } from '../index.ts';
 
 describe('Dominio — Reglas inviolables y cálculos puros', () => {
@@ -141,7 +144,7 @@ describe('Dominio — Reglas inviolables y cálculos puros', () => {
     // Ganancia bruta: 750000 - 500000 = 250000 ($ 2.500,00)
     expect(resumen.ganancia_bruta).toBe(250000);
 
-    // Pagos mixtos válidos
+    // Pagos mixtos válidos (2 y 3+ medios de pago combinados)
     expect(() =>
       validarPagosVenta(
         [
@@ -151,6 +154,31 @@ describe('Dominio — Reglas inviolables y cálculos puros', () => {
         resumen.total
       )
     ).not.toThrow();
+
+    const evaluacionTresMedios = evaluarPagosCombinados(
+      [
+        { medio: 'efectivo', monto: 300000 },
+        { medio: 'transferencia', monto: 250000 },
+        { medio: 'debito', monto: 200000 },
+      ],
+      resumen.total
+    );
+    expect(evaluacionTresMedios.sumaPagos).toBe(750000);
+    expect(evaluacionTresMedios.coincideConTotal).toBe(true);
+    expect(evaluacionTresMedios.esValidoParaCobrar).toBe(true);
+    expect(evaluacionTresMedios.faltaCubrirCentavos).toBe(0);
+    expect(evaluacionTresMedios.excedenteCentavos).toBe(0);
+
+    const evaluacionFaltante = evaluarPagosCombinados(
+      [
+        { medio: 'efectivo', monto: 300000 },
+        { medio: 'mercado_pago', monto: 200000 },
+      ],
+      resumen.total
+    );
+    expect(evaluacionFaltante.sumaPagos).toBe(500000);
+    expect(evaluacionFaltante.faltaCubrirCentavos).toBe(250000);
+    expect(evaluacionFaltante.esValidoParaCobrar).toBe(false);
 
     // Pagos mixtos que no suman el total deben fallar
     expect(() =>
@@ -272,5 +300,36 @@ describe('Dominio — Reglas inviolables y cálculos puros', () => {
     expect(esCuitValido('20-12345678-6')).toBe(true);
     expect(esCuitValido('20-12345678-0')).toBe(false);
     expect(formatearCuit('20123456786')).toBe('20-12345678-6');
+  });
+
+  it('pagina listados mostrando 10 registros por página y acotando páginas fuera de rango', () => {
+    expect(TAMANIO_PAGINA_POR_DEFECTO).toBe(10);
+    const elementos = Array.from({ length: 25 }, (_, idx) => `item-${idx + 1}`);
+
+    const pag1 = paginarListado(elementos, 1);
+    expect(pag1.itemsPagina).toHaveLength(10);
+    expect(pag1.itemsPagina[0]).toBe('item-1');
+    expect(pag1.itemsPagina[9]).toBe('item-10');
+    expect(pag1.paginaActual).toBe(1);
+    expect(pag1.totalPaginas).toBe(3);
+    expect(pag1.desdeRegistro).toBe(1);
+    expect(pag1.hastaRegistro).toBe(10);
+    expect(pag1.tieneAnterior).toBe(false);
+    expect(pag1.tieneSiguiente).toBe(true);
+
+    const pag3 = paginarListado(elementos, 99);
+    expect(pag3.paginaActual).toBe(3);
+    expect(pag3.itemsPagina).toHaveLength(5);
+    expect(pag3.desdeRegistro).toBe(21);
+    expect(pag3.hastaRegistro).toBe(25);
+    expect(pag3.tieneAnterior).toBe(true);
+    expect(pag3.tieneSiguiente).toBe(false);
+
+    const vacia = paginarListado([], 1);
+    expect(vacia.itemsPagina).toHaveLength(0);
+    expect(vacia.paginaActual).toBe(1);
+    expect(vacia.totalPaginas).toBe(1);
+    expect(vacia.desdeRegistro).toBe(0);
+    expect(vacia.hastaRegistro).toBe(0);
   });
 });

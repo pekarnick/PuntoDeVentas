@@ -12,4 +12,5 @@ export * from './ticket.ts';
 export * from './xlsx.ts';
 export * from './informes.ts';
 export * from './sync.ts';
+export * from './paginacion.ts';
 export * from '../../packages/domain/src/venta_movil.ts';

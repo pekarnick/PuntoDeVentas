@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   formatearMonedaARS,
@@ -6,6 +7,10 @@ import {
   type Centavos,
 } from '../../domain/dinero.ts';
 import type { ReglaRedondeoPrecio } from '../../domain/gestion_fase3.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import {
   puedeVerCostos,
   tienePermiso,
@@ -108,6 +113,7 @@ export function PanelProductosStock({
     ...productosIniciales,
   ]);
   const [busqueda, setBusqueda] = useState('');
+  const [paginaProductos, setPaginaProductos] = useState(1);
 
   useEffect(() => {
     setProductos([...productosIniciales]);
@@ -128,6 +134,18 @@ export function PanelProductosStock({
   const [stockMinInput, setStockMinInput] = useState('5');
   const [stockInicialInput, setStockInicialInput] = useState('10');
   const [botonRapidoNuevo, setBotonRapidoNuevo] = useState(false);
+  const [imagenNuevaBase64, setImagenNuevaBase64] = useState<string>('');
+  const [imagenNuevaNombre, setImagenNuevaNombre] = useState<string>('');
+
+  // Edición en línea de producto (nombre, costo, precio, stock_minimo, boton_rapido)
+  const [editandoProductoId, setEditandoProductoId] = useState<string | null>(
+    null
+  );
+  const [editNombre, setEditNombre] = useState('');
+  const [editCostoInput, setEditCostoInput] = useState('');
+  const [editPrecioInput, setEditPrecioInput] = useState('');
+  const [editStockMinInput, setEditStockMinInput] = useState('');
+  const [editBotonRapido, setEditBotonRapido] = useState(false);
 
   // Alta rápida de categoría y marca
   const [nuevaCategoriaNombre, setNuevaCategoriaNombre] = useState('');
@@ -171,6 +189,12 @@ export function PanelProductosStock({
       p.codigos_barras.some((cb) => cb.includes(busqueda.trim()))
   );
 
+  const paginacionProductos = paginarListado(
+    productosFiltrados,
+    paginaProductos,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+
   async function manejarCrearProducto(e: React.FormEvent) {
     e.preventDefault();
     if (!puedeEditarCatalogo) return;
@@ -204,6 +228,8 @@ export function PanelProductosStock({
         stockInicial,
         botonRapido: botonRapidoNuevo,
         codigosBarras: codigos,
+        imagenBase64: imagenNuevaBase64 || undefined,
+        nombreArchivoImagen: imagenNuevaNombre || undefined,
       });
 
       setNombreNuevo('');
@@ -212,6 +238,8 @@ export function PanelProductosStock({
       setCostoInput('');
       setPrecioVentaInput('');
       setBotonRapidoNuevo(false);
+      setImagenNuevaBase64('');
+      setImagenNuevaNombre('');
       setMensajeOk(
         `Producto "${nombreNuevo.trim()}" guardado en SQLite local y auditado.`
       );
@@ -221,6 +249,141 @@ export function PanelProductosStock({
         err instanceof Error ? err.message : 'Error al crear el producto.'
       );
     }
+  }
+
+  function manejarSeleccionImagenAlta(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) {
+      setImagenNuevaBase64('');
+      setImagenNuevaNombre('');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setImagenNuevaBase64(reader.result);
+        setImagenNuevaNombre(file.name);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function iniciarEdicionProducto(p: ProductoAdminItemUI) {
+    setEditandoProductoId(p.id);
+    setEditNombre(p.nombre);
+    const costoPesos = ((p.costo_compra ?? 0) / 100)
+      .toFixed(2)
+      .replace('.', ',');
+    const precioPesos = (p.precio_venta / 100).toFixed(2).replace('.', ',');
+    setEditCostoInput(costoPesos);
+    setEditPrecioInput(precioPesos);
+    setEditStockMinInput(String(p.stock_minimo));
+    setEditBotonRapido(p.boton_rapido);
+  }
+
+  async function manejarGuardarEdicionProducto(productoId: string) {
+    if (!puedeEditarCatalogo) return;
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      const stockMinNum = Number(editStockMinInput.replace(',', '.'));
+      if (!Number.isFinite(stockMinNum) || stockMinNum < 0) {
+        throw new Error('El stock mínimo debe ser un número mayor o igual a 0.');
+      }
+
+      const payload: Record<string, unknown> = {
+        rolActivo,
+        productoId,
+        nombre: editNombre.trim(),
+        precioVentaCentavos: pesosACentavos(editPrecioInput),
+        stockMinimo: stockMinNum,
+        botonRapido: editBotonRapido,
+        motivo: 'Edición directa desde catálogo',
+      };
+      if (mostrarCostos && editCostoInput.trim()) {
+        payload.costoCompraCentavos = pesosACentavos(editCostoInput);
+      }
+
+      await invocarPosApi('actualizar_producto', payload);
+
+      setProductos((prev) =>
+        prev.map((item) =>
+          item.id === productoId
+            ? {
+                ...item,
+                nombre: editNombre.trim() || item.nombre,
+                ...(mostrarCostos && editCostoInput.trim()
+                  ? { costo_compra: pesosACentavos(editCostoInput) }
+                  : {}),
+                precio_venta: pesosACentavos(editPrecioInput),
+                stock_minimo: stockMinNum,
+                boton_rapido: editBotonRapido,
+              }
+            : item
+        )
+      );
+      setEditandoProductoId(null);
+      setMensajeOk(
+        `Producto "${editNombre.trim()}" actualizado (Stock mínimo: ${stockMinNum}).`
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'Error al actualizar el producto.'
+      );
+    }
+  }
+
+  function manejarSubirImagenProductoFila(
+    productoId: string,
+    productoNombre: string,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const file = e.target.files?.[0];
+    if (!file || !puedeEditarCatalogo) return;
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result !== 'string') return;
+      try {
+        const res = await invocarPosApi<{
+          imagenPathRelativo: string;
+          imagenHash: string;
+          bytesPrincipal: number;
+        }>('subir_imagen_producto', {
+          rolActivo,
+          productoId,
+          imagenBase64: reader.result,
+          nombreArchivoImagen: file.name,
+        });
+
+        setProductos((prev) =>
+          prev.map((item) =>
+            item.id === productoId
+              ? {
+                  ...item,
+                  imagen_path: res.imagenPathRelativo,
+                  imagen_hash: res.imagenHash,
+                }
+              : item
+          )
+        );
+        setMensajeOk(
+          `Imagen de "${productoNombre}" optimizada a WebP (${Math.round(res.bytesPrincipal / 1024)} KB) y encolada para sincronizar.`
+        );
+        onDatosActualizados?.();
+      } catch (err) {
+        setMensajeError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudo procesar la imagen del producto.'
+        );
+      }
+    };
+    reader.readAsDataURL(file);
   }
 
   async function manejarCrearCategoriaRapida() {
@@ -515,6 +678,40 @@ export function PanelProductosStock({
                     Mostrar como botón rápido en caja
                   </label>
                 </div>
+                <div className="form-row" style={{ alignItems: 'center' }}>
+                  <label>
+                    Imagen del producto (JPG, PNG, WebP o HEIC — se convierte a WebP ≤ 150 KB):
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/heic,.heic"
+                      onChange={manejarSeleccionImagenAlta}
+                    />
+                  </label>
+                  {imagenNuevaBase64 && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem',
+                      }}
+                    >
+                      <img
+                        src={imagenNuevaBase64}
+                        alt="Previsualización"
+                        style={{
+                          width: '48px',
+                          height: '48px',
+                          objectFit: 'cover',
+                          borderRadius: '0.4rem',
+                          border: '1px solid #cbd5e1',
+                        }}
+                      />
+                      <span className="text-muted" style={{ fontSize: '0.8rem' }}>
+                        {imagenNuevaNombre}
+                      </span>
+                    </div>
+                  )}
+                </div>
                 <button type="submit" className="btn-primary">
                   Guardar Producto en SQLite
                 </button>
@@ -808,7 +1005,10 @@ export function PanelProductosStock({
             <input
               type="text"
               value={busqueda}
-              onChange={(e) => setBusqueda(e.target.value)}
+              onChange={(e) => {
+                setBusqueda(e.target.value);
+                setPaginaProductos(1);
+              }}
               placeholder="Nombre o código..."
             />
           </label>
@@ -823,11 +1023,13 @@ export function PanelProductosStock({
               {mostrarCostos && <th className="num">Costo Compra</th>}
               <th className="num">Precio Venta</th>
               {mostrarCostos && <th className="num">Margen</th>}
+              <th className="num">Stock Mínimo</th>
               <th className="num">Stock Actual (Movimientos)</th>
+              {puedeEditarCatalogo && <th>Acciones</th>}
             </tr>
           </thead>
           <tbody>
-            {productosFiltrados.map((p) => {
+            {paginacionProductos.itemsPagina.map((p) => {
               const stockActual = p.stock_actual;
               const bajoMinimo = estaBajoStockMinimo(
                 stockActual,
@@ -840,24 +1042,94 @@ export function PanelProductosStock({
                       ((p.precio_venta - costoSeguro) / p.precio_venta) * 100
                     )
                   : 0;
+              const enEdicion = editandoProductoId === p.id;
 
               return (
                 <tr key={p.id}>
                   <td>
-                    <span
-                      className="badge-rol"
-                      title={p.imagen_path ?? 'Placeholder local'}
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.45rem',
+                        flexWrap: 'wrap',
+                      }}
                     >
-                      {p.imagen_path ? 'WebP ✓' : 'Sin foto'}
-                    </span>
+                      {p.imagen_path && (
+                        <img
+                          src={`/api/pos-imagen/${p.id}_thumb.webp?h=${p.imagen_hash ?? ''}`}
+                          alt={p.nombre}
+                          style={{
+                            width: '38px',
+                            height: '38px',
+                            objectFit: 'cover',
+                            borderRadius: '0.35rem',
+                            border: '1px solid #cbd5e1',
+                          }}
+                          onError={(ev) => {
+                            (ev.currentTarget as HTMLImageElement).style.display =
+                              'none';
+                          }}
+                        />
+                      )}
+                      <span
+                        className="badge-rol"
+                        title={p.imagen_path ?? 'Placeholder local'}
+                      >
+                        {p.imagen_path ? 'WebP ✓' : 'Sin foto'}
+                      </span>
+                      {puedeEditarCatalogo && (
+                        <label
+                          className="btn-secondary"
+                          style={{
+                            padding: '0.15rem 0.45rem',
+                            fontSize: '0.74rem',
+                            cursor: 'pointer',
+                            margin: 0,
+                          }}
+                          title="Adjuntar o reemplazar imagen del producto (JPG, PNG, WebP, HEIC)"
+                        >
+                          📷 Foto
+                          <input
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp,image/heic,.heic"
+                            style={{ display: 'none' }}
+                            onChange={(e) =>
+                              manejarSubirImagenProductoFila(p.id, p.nombre, e)
+                            }
+                          />
+                        </label>
+                      )}
+                    </div>
                   </td>
                   <td>
-                    <strong>{p.nombre}</strong>
-                    <div className="text-muted">
-                      {p.codigo_interno}
-                      {p.categoria_nombre ? ` • ${p.categoria_nombre}` : ''}
-                      {p.marca_nombre ? ` • ${p.marca_nombre}` : ''}
-                    </div>
+                    {enEdicion ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                        <input
+                          type="text"
+                          value={editNombre}
+                          onChange={(e) => setEditNombre(e.target.value)}
+                          aria-label={`Editar nombre de ${p.nombre}`}
+                        />
+                        <label className="checkbox-inline" style={{ fontSize: '0.78rem' }}>
+                          <input
+                            type="checkbox"
+                            checked={editBotonRapido}
+                            onChange={(e) => setEditBotonRapido(e.target.checked)}
+                          />
+                          Botón rápido en caja
+                        </label>
+                      </div>
+                    ) : (
+                      <>
+                        <strong>{p.nombre}</strong>
+                        <div className="text-muted">
+                          {p.codigo_interno}
+                          {p.categoria_nombre ? ` • ${p.categoria_nombre}` : ''}
+                          {p.marca_nombre ? ` • ${p.marca_nombre}` : ''}
+                        </div>
+                      </>
+                    )}
                   </td>
                   <td>
                     {p.codigos_barras.length > 0 ? (
@@ -871,12 +1143,51 @@ export function PanelProductosStock({
                     )}
                   </td>
                   {mostrarCostos && (
-                    <td className="num">{formatearMonedaARS(costoSeguro)}</td>
+                    <td className="num">
+                      {enEdicion ? (
+                        <input
+                          type="text"
+                          value={editCostoInput}
+                          onChange={(e) => setEditCostoInput(e.target.value)}
+                          style={{ width: '90px', textAlign: 'right' }}
+                          aria-label={`Editar costo de ${p.nombre}`}
+                        />
+                      ) : (
+                        formatearMonedaARS(costoSeguro)
+                      )}
+                    </td>
                   )}
                   <td className="num">
-                    <strong>{formatearMonedaARS(p.precio_venta)}</strong>
+                    {enEdicion ? (
+                      <input
+                        type="text"
+                        value={editPrecioInput}
+                        onChange={(e) => setEditPrecioInput(e.target.value)}
+                        style={{ width: '90px', textAlign: 'right' }}
+                        aria-label={`Editar precio de ${p.nombre}`}
+                      />
+                    ) : (
+                      <strong>{formatearMonedaARS(p.precio_venta)}</strong>
+                    )}
                   </td>
                   {mostrarCostos && <td className="num">{margen}%</td>}
+                  <td className="num">
+                    {enEdicion ? (
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        value={editStockMinInput}
+                        onChange={(e) => setEditStockMinInput(e.target.value)}
+                        style={{ width: '75px', textAlign: 'right' }}
+                        aria-label={`Editar stock mínimo de ${p.nombre}`}
+                      />
+                    ) : (
+                      <span>
+                        {p.stock_minimo} {p.unidad}
+                      </span>
+                    )}
+                  </td>
                   <td className="num">
                     <strong className={bajoMinimo ? 'diff-negativa' : ''}>
                       {stockActual} {p.unidad}
@@ -890,11 +1201,54 @@ export function PanelProductosStock({
                       </span>
                     )}
                   </td>
+                  {puedeEditarCatalogo && (
+                    <td>
+                      {enEdicion ? (
+                        <div style={{ display: 'flex', gap: '0.35rem' }}>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
+                            onClick={() => void manejarGuardarEdicionProducto(p.id)}
+                          >
+                            💾 Guardar
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
+                            onClick={() => setEditandoProductoId(null)}
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
+                          onClick={() => iniciarEdicionProducto(p)}
+                        >
+                          ✏️ Editar
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}
           </tbody>
         </table>
+        <PaginadorTabla
+          paginaActual={paginacionProductos.paginaActual}
+          totalPaginas={paginacionProductos.totalPaginas}
+          totalItems={paginacionProductos.totalItems}
+          desdeRegistro={paginacionProductos.desdeRegistro}
+          hastaRegistro={paginacionProductos.hastaRegistro}
+          tamanioPagina={paginacionProductos.tamanioPagina}
+          onCambiarPagina={setPaginaProductos}
+          etiquetaItems="productos"
+        />
       </div>
     </section>
   );

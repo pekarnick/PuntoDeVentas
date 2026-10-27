@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   aCentavos,
   calcularVentaMovilDesdeCatalogo,
+  evaluarPagosCombinados,
   formatearFechaHoraAR,
   formatearMonedaARS,
+  validarPagosVenta,
   type Centavos,
   type MedioPago,
   type PagoVentaInput,
@@ -130,9 +132,12 @@ export function WebPosApp(): React.ReactElement {
   const [clienteIdSeleccionado, setClienteIdSeleccionado] = useState('');
   const [medioPrincipal, setMedioPrincipal] = useState<MedioPago>('efectivo');
   const [usarPagoMixto, setUsarPagoMixto] = useState(false);
-  const [medioSecundario, setMedioSecundario] =
-    useState<MedioPago>('mercado_pago');
-  const [montoPrincipalPesosInput, setMontoPrincipalPesosInput] = useState('');
+  const [pagosCombinadosMovil, setPagosCombinadosMovil] = useState<
+    Array<{ id: string; medio: MedioPago; montoPesosInput: string }>
+  >([
+    { id: 'movil-pago-1', medio: 'efectivo', montoPesosInput: '' },
+    { id: 'movil-pago-2', medio: 'mercado_pago', montoPesosInput: '' },
+  ]);
   const [ventaUuidPendiente, setVentaUuidPendiente] = useState<string>(() =>
     generarUuidV7()
   );
@@ -458,6 +463,73 @@ export function WebPosApp(): React.ReactElement {
     }
   }
 
+  const pagosCombinadosMovilCalculados = useMemo(
+    () =>
+      pagosCombinadosMovil.map((f) => {
+        const num = Number(f.montoPesosInput.replace(',', '.'));
+        const monto = Number.isFinite(num) && num > 0 ? aCentavos(num) : 0;
+        return {
+          ...f,
+          monto,
+        };
+      }),
+    [pagosCombinadosMovil]
+  );
+
+  const estadoPagosCombinadosMovil = useMemo(
+    () =>
+      evaluarPagosCombinados(
+        pagosCombinadosMovilCalculados.map((p) => ({
+          medio: p.medio,
+          monto: p.monto,
+        })),
+        resumenCarrito?.total ?? 0
+      ),
+    [pagosCombinadosMovilCalculados, resumenCarrito]
+  );
+
+  function actualizarFilaPagoMovil(
+    id: string,
+    cambios: Partial<{ medio: MedioPago; montoPesosInput: string }>
+  ) {
+    setPagosCombinadosMovil((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, ...cambios } : f))
+    );
+  }
+
+  function completarRestoFilaPagoMovil(id: string) {
+    const total = resumenCarrito?.total ?? 0;
+    const sumaOtras = pagosCombinadosMovilCalculados
+      .filter((f) => f.id !== id)
+      .reduce((acc, f) => acc + f.monto, 0);
+    const resto = Math.max(0, total - sumaOtras);
+    actualizarFilaPagoMovil(id, {
+      montoPesosInput: (resto / 100).toFixed(2),
+    });
+  }
+
+  function agregarFilaPagoMovil() {
+    const medios = Object.keys(ETIQUETAS_MEDIO_PAGO) as MedioPago[];
+    const usados = new Set(pagosCombinadosMovil.map((f) => f.medio));
+    const siguiente = medios.find((m) => !usados.has(m)) ?? 'transferencia';
+    const resto = estadoPagosCombinadosMovil.faltaCubrirCentavos;
+
+    setPagosCombinadosMovil((prev) => [
+      ...prev,
+      {
+        id: `movil-pago-${Date.now()}-${prev.length + 1}`,
+        medio: siguiente,
+        montoPesosInput: resto > 0 ? (resto / 100).toFixed(2) : '',
+      },
+    ]);
+  }
+
+  function quitarFilaPagoMovil(id: string) {
+    setPagosCombinadosMovil((prev) =>
+      prev.length <= 2 ? prev : prev.filter((f) => f.id !== id)
+    );
+  }
+
   function cambiarCantidadItem(productoId: string, delta: number) {
     setCarrito((prev) =>
       prev
@@ -479,20 +551,26 @@ export function WebPosApp(): React.ReactElement {
     if (!usarPagoMixto) {
       pagos = [{ medio: medioPrincipal, monto: resumenCarrito.total }];
     } else {
-      const monto1 = aCentavos(
-        Number(montoPrincipalPesosInput.replace(',', '.')) || 0
-      );
-      const monto2 = resumenCarrito.total - monto1;
-      if (monto1 <= 0 || monto2 <= 0) {
+      pagos = pagosCombinadosMovilCalculados.map((f) => ({
+        medio: f.medio,
+        monto: f.monto,
+      }));
+      if (pagos.some((p) => p.monto <= 0)) {
         setMensajeError(
-          'En pago mixto, ambos importes deben ser mayores a $ 0,00.'
+          'Ingresá un monto mayor a $ 0,00 en cada medio de pago combinado (o quitá los que no uses).'
         );
         return;
       }
-      pagos = [
-        { medio: medioPrincipal, monto: monto1 },
-        { medio: medioSecundario, monto: monto2 },
-      ];
+      try {
+        validarPagosVenta(pagos, resumenCarrito.total);
+      } catch (err) {
+        setMensajeError(
+          err instanceof Error
+            ? err.message
+            : 'La suma de los pagos no coincide con el monto a cobrar.'
+        );
+        return;
+      }
     }
 
     setCargando(true);
@@ -967,11 +1045,12 @@ export function WebPosApp(): React.ReactElement {
                     <label
                       style={{ display: 'block', fontSize: '0.8rem', marginBottom: '0.2rem' }}
                     >
-                      Medio de pago
+                      Medio de pago principal
                     </label>
                     <select
                       className="movil-select"
                       value={medioPrincipal}
+                      disabled={usarPagoMixto}
                       onChange={(e) =>
                         setMedioPrincipal(e.target.value as MedioPago)
                       }
@@ -991,53 +1070,154 @@ export function WebPosApp(): React.ReactElement {
                         checked={usarPagoMixto}
                         onChange={(e) => setUsarPagoMixto(e.target.checked)}
                       />
-                      <span>Combinar con un segundo medio de pago (Pago mixto)</span>
+                      <span>Combinar varios medios de pago</span>
                     </label>
                   </div>
 
                   {usarPagoMixto ? (
                     <div
                       style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gap: '0.6rem',
-                        marginTop: '0.5rem',
+                        marginTop: '0.6rem',
+                        padding: '0.65rem',
+                        background: '#f8fafc',
+                        borderRadius: '0.55rem',
+                        border: '1px solid #cbd5e1',
                       }}
                     >
-                      <div>
-                        <label style={{ fontSize: '0.78rem', display: 'block' }}>
-                          Monto 1 ({ETIQUETAS_MEDIO_PAGO[medioPrincipal]}) $
-                        </label>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          className="movil-input"
-                          value={montoPrincipalPesosInput}
-                          onChange={(e) =>
-                            setMontoPrincipalPesosInput(e.target.value)
-                          }
-                        />
-                      </div>
-                      <div>
-                        <label style={{ fontSize: '0.78rem', display: 'block' }}>
-                          Segundo medio
-                        </label>
-                        <select
-                          className="movil-select"
-                          value={medioSecundario}
-                          onChange={(e) =>
-                            setMedioSecundario(e.target.value as MedioPago)
-                          }
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          marginBottom: '0.5rem',
+                        }}
+                      >
+                        <strong style={{ fontSize: '0.82rem' }}>
+                          Medios combinados ({pagosCombinadosMovil.length})
+                        </strong>
+                        <button
+                          type="button"
+                          className="movil-btn movil-btn-secondary"
+                          style={{ minHeight: '30px', padding: '0.25rem 0.55rem', fontSize: '0.76rem' }}
+                          onClick={agregarFilaPagoMovil}
                         >
-                          {Object.entries(ETIQUETAS_MEDIO_PAGO).map(
-                            ([k, label]) => (
-                              <option key={k} value={k}>
-                                {label}
-                              </option>
-                            )
+                          + Agregar medio
+                        </button>
+                      </div>
+
+                      {pagosCombinadosMovil.map((fila, idx) => (
+                        <div
+                          key={fila.id}
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 1fr auto',
+                            gap: '0.4rem',
+                            alignItems: 'end',
+                            marginBottom: '0.5rem',
+                          }}
+                        >
+                          <div>
+                            <label style={{ fontSize: '0.75rem', display: 'block' }}>
+                              Medio #{idx + 1}
+                            </label>
+                            <select
+                              className="movil-select"
+                              value={fila.medio}
+                              onChange={(e) =>
+                                actualizarFilaPagoMovil(fila.id, {
+                                  medio: e.target.value as MedioPago,
+                                })
+                              }
+                            >
+                              {Object.entries(ETIQUETAS_MEDIO_PAGO).map(
+                                ([k, label]) => (
+                                  <option key={k} value={k}>
+                                    {label}
+                                  </option>
+                                )
+                              )}
+                            </select>
+                          </div>
+                          <div>
+                            <label style={{ fontSize: '0.75rem', display: 'block' }}>
+                              Monto #{idx + 1} ($)
+                            </label>
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.01"
+                              className="movil-input"
+                              placeholder="0.00"
+                              value={fila.montoPesosInput}
+                              onChange={(e) =>
+                                actualizarFilaPagoMovil(fila.id, {
+                                  montoPesosInput: e.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                          <div style={{ display: 'flex', gap: '0.25rem' }}>
+                            <button
+                              type="button"
+                              className="movil-btn movil-btn-secondary"
+                              style={{ minHeight: '36px', padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                              onClick={() => completarRestoFilaPagoMovil(fila.id)}
+                            >
+                              Resto
+                            </button>
+                            {pagosCombinadosMovil.length > 2 && (
+                              <button
+                                type="button"
+                                className="movil-btn movil-btn-secondary"
+                                style={{ minHeight: '36px', padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                                onClick={() => quitarFilaPagoMovil(fila.id)}
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+
+                      <div
+                        style={{
+                          fontSize: '0.8rem',
+                          marginTop: '0.45rem',
+                          paddingTop: '0.45rem',
+                          borderTop: '1px solid #e2e8f0',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span>Suma ingresada:</span>
+                          <strong>
+                            {formatearMonedaARS(estadoPagosCombinadosMovil.sumaPagos)}
+                          </strong>
+                        </div>
+                        <div style={{ marginTop: '0.25rem' }}>
+                          {estadoPagosCombinadosMovil.esValidoParaCobrar ? (
+                            <span style={{ color: '#15803d', fontWeight: 600 }}>
+                              ✓ Suma verificada igual al monto a cobrar.
+                            </span>
+                          ) : estadoPagosCombinadosMovil.faltaCubrirCentavos > 0 ? (
+                            <span style={{ color: '#b91c1c', fontWeight: 600 }}>
+                              Faltan cubrir{' '}
+                              {formatearMonedaARS(
+                                estadoPagosCombinadosMovil.faltaCubrirCentavos
+                              )}
+                            </span>
+                          ) : estadoPagosCombinadosMovil.excedenteCentavos > 0 ? (
+                            <span style={{ color: '#b91c1c', fontWeight: 600 }}>
+                              Excede por{' '}
+                              {formatearMonedaARS(
+                                estadoPagosCombinadosMovil.excedenteCentavos
+                              )}
+                            </span>
+                          ) : (
+                            <span style={{ color: '#b45309' }}>
+                              Cada medio debe tener un monto mayor a $ 0,00.
+                            </span>
                           )}
-                        </select>
+                        </div>
                       </div>
                     </div>
                   ) : null}
@@ -1220,6 +1400,17 @@ export function WebPosApp(): React.ReactElement {
             )}
           </section>
         )}
+
+        <footer
+          style={{
+            textAlign: 'center',
+            padding: '0.75rem 0 0.25rem',
+            fontSize: '0.76rem',
+            color: '#64748b',
+          }}
+        >
+          <strong>GAR</strong> - Guillermo Adolfo Rohde
+        </footer>
       </main>
 
       <nav className="movil-nav-bottom" aria-label="Navegación móvil">

@@ -729,11 +729,11 @@ export function listarComprasRecientes(
         u.nombre AS usuario_nombre,
         (SELECT COUNT(*) FROM compras_items ci WHERE ci.compra_id = c.id AND ci.deleted_at IS NULL) AS cantidad_items
        FROM compras c
-       INNER JOIN proveedores p ON p.id = c.proveedor_id
+       LEFT JOIN proveedores p ON p.id = c.proveedor_id
        INNER JOIN usuarios u ON u.id = c.usuario_id
        WHERE c.comercio_id = ? AND c.deleted_at IS NULL
        ORDER BY c.fecha DESC
-       LIMIT 30`
+       LIMIT 500`
     )
     .all(actor.comercio_id) as unknown as Array<{
     id: string;
@@ -1226,6 +1226,7 @@ export function importarProductosDesdeCsv(
 
   let creados = 0;
   let actualizados = 0;
+  const erroresImportacion: string[] = [...parseo.errores];
 
   ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
@@ -1250,81 +1251,213 @@ export function importarProductosDesdeCsv(
         marcaId = crearMarca(db, actor, { nombre: fila.marcaNombre });
       }
 
-      const existentePorCodigo = fila.codigoInterno
+      const codigoInternoLimpio = fila.codigoInterno?.trim() || undefined;
+      const codigoBarrasLimpio = fila.codigoBarras?.trim() || undefined;
+
+      // 1. Buscar producto existente por codigo_interno (activo o borrado lógicamente)
+      let productoExistente = codigoInternoLimpio
         ? (db
             .prepare(
-              `SELECT id FROM productos
-               WHERE comercio_id = ? AND lower(codigo_interno) = lower(?) AND deleted_at IS NULL
+              `SELECT id, codigo_interno, nombre, deleted_at FROM productos
+               WHERE comercio_id = ? AND lower(codigo_interno) = lower(?)
+               ORDER BY deleted_at IS NOT NULL ASC
                LIMIT 1`
             )
-            .get(actor.comercio_id, fila.codigoInterno) as
-            | { id: string }
+            .get(actor.comercio_id, codigoInternoLimpio) as
+            | {
+                id: string;
+                codigo_interno: string | null;
+                nombre: string;
+                deleted_at: string | null;
+              }
             | undefined)
         : undefined;
 
-      if (existentePorCodigo && listaDefault && actualizarExistentes) {
-        db.prepare(
-          `UPDATE productos
-           SET nombre = ?,
-               costo_compra = ?,
-               alicuota_iva = ?,
-               stock_minimo = ?,
-               categoria_id = COALESCE(?, categoria_id),
-               marca_id = COALESCE(?, marca_id),
-               fecha_ultimo_cambio_precio = ?,
-               updated_at = ?,
-               device_id = ?,
-               sync_status = 'pendiente'
-           WHERE id = ?`
-        ).run(
-          fila.nombre,
-          fila.costoCompraCentavos,
-          fila.alicuotaIva,
-          fila.stockMinimo,
-          categoriaId,
-          marcaId,
-          ahora,
-          ahora,
-          actor.device_id,
-          existentePorCodigo.id
-        );
-        encolarSync(db, 'productos', existentePorCodigo.id, 'update', ahora);
+      // 2. Verificar si el código de barras ya existe en codigos_barras para este comercio
+      const barraExistente = codigoBarrasLimpio
+        ? (db
+            .prepare(
+              `SELECT cb.id AS cb_id, cb.producto_id, cb.deleted_at AS cb_deleted_at,
+                      p.codigo_interno AS prod_codigo_interno, p.nombre AS prod_nombre
+               FROM codigos_barras cb
+               INNER JOIN productos p ON p.id = cb.producto_id
+               WHERE cb.comercio_id = ? AND cb.codigo = ?
+               ORDER BY cb.deleted_at IS NOT NULL ASC
+               LIMIT 1`
+            )
+            .get(actor.comercio_id, codigoBarrasLimpio) as
+            | {
+                cb_id: string;
+                producto_id: string;
+                cb_deleted_at: string | null;
+                prod_codigo_interno: string | null;
+                prod_nombre: string;
+              }
+            | undefined)
+        : undefined;
 
-        const precioRow = db
-          .prepare(
-            `SELECT id FROM precios
-             WHERE comercio_id = ? AND producto_id = ? AND lista_precio_id = ? AND deleted_at IS NULL`
-          )
-          .get(actor.comercio_id, existentePorCodigo.id, listaDefault.id) as
-          | { id: string }
-          | undefined;
+      // Si no se encontró por codigo_interno pero el código de barras ya pertenece a un producto
+      // (y la fila no trae un codigo_interno distinto al de ese producto), tratarlo como el mismo producto
+      if (
+        !productoExistente &&
+        barraExistente &&
+        (!codigoInternoLimpio ||
+          !barraExistente.prod_codigo_interno ||
+          barraExistente.prod_codigo_interno.toLowerCase() ===
+            codigoInternoLimpio.toLowerCase())
+      ) {
+        productoExistente = {
+          id: barraExistente.producto_id,
+          codigo_interno: barraExistente.prod_codigo_interno,
+          nombre: barraExistente.prod_nombre,
+          deleted_at: null,
+        };
+      }
 
-        if (precioRow) {
+      if (productoExistente && listaDefault) {
+        if (actualizarExistentes || productoExistente.deleted_at !== null) {
           db.prepare(
-            `UPDATE precios
-             SET precio_venta = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+            `UPDATE productos
+             SET nombre = ?,
+                 codigo_interno = COALESCE(?, codigo_interno),
+                 costo_compra = ?,
+                 alicuota_iva = ?,
+                 stock_minimo = ?,
+                 categoria_id = COALESCE(?, categoria_id),
+                 marca_id = COALESCE(?, marca_id),
+                 activo = 1,
+                 deleted_at = NULL,
+                 fecha_ultimo_cambio_precio = ?,
+                 updated_at = ?,
+                 device_id = ?,
+                 sync_status = 'pendiente'
              WHERE id = ?`
           ).run(
-            fila.precioVentaCentavos,
+            fila.nombre,
+            codigoInternoLimpio ?? null,
+            fila.costoCompraCentavos,
+            fila.alicuotaIva,
+            fila.stockMinimo,
+            categoriaId,
+            marcaId,
+            ahora,
             ahora,
             actor.device_id,
-            precioRow.id
+            productoExistente.id
           );
-          encolarSync(db, 'precios', precioRow.id, 'update', ahora);
+          encolarSync(db, 'productos', productoExistente.id, 'update', ahora);
+
+          const precioRow = db
+            .prepare(
+              `SELECT id FROM precios
+               WHERE comercio_id = ? AND producto_id = ? AND lista_precio_id = ? AND deleted_at IS NULL`
+            )
+            .get(
+              actor.comercio_id,
+              productoExistente.id,
+              listaDefault.id
+            ) as { id: string } | undefined;
+
+          if (precioRow) {
+            db.prepare(
+              `UPDATE precios
+               SET precio_venta = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+               WHERE id = ?`
+            ).run(
+              fila.precioVentaCentavos,
+              ahora,
+              actor.device_id,
+              precioRow.id
+            );
+            encolarSync(db, 'precios', precioRow.id, 'update', ahora);
+          } else {
+            const nuevoPrecioId = generarUuidV7();
+            db.prepare(
+              `INSERT INTO precios (
+                id, comercio_id, producto_id, lista_precio_id, precio_venta,
+                created_at, updated_at, deleted_at, device_id, sync_status
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+            ).run(
+              nuevoPrecioId,
+              actor.comercio_id,
+              productoExistente.id,
+              listaDefault.id,
+              fila.precioVentaCentavos,
+              ahora,
+              ahora,
+              actor.device_id
+            );
+            encolarSync(db, 'precios', nuevoPrecioId, 'insert', ahora);
+          }
+
+          // Asociar el código de barras si aún no estaba activo o pertenecía a este mismo producto
+          if (codigoBarrasLimpio) {
+            if (!barraExistente) {
+              const nuevoCbId = generarUuidV7();
+              db.prepare(
+                `INSERT INTO codigos_barras (
+                  id, comercio_id, producto_id, codigo,
+                  created_at, updated_at, deleted_at, device_id, sync_status
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+              ).run(
+                nuevoCbId,
+                actor.comercio_id,
+                productoExistente.id,
+                codigoBarrasLimpio,
+                ahora,
+                ahora,
+                actor.device_id
+              );
+              encolarSync(db, 'codigos_barras', nuevoCbId, 'insert', ahora);
+            } else if (
+              barraExistente.cb_deleted_at !== null ||
+              barraExistente.producto_id === productoExistente.id
+            ) {
+              db.prepare(
+                `UPDATE codigos_barras
+                 SET producto_id = ?, deleted_at = NULL, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+                 WHERE id = ?`
+              ).run(
+                productoExistente.id,
+                ahora,
+                actor.device_id,
+                barraExistente.cb_id
+              );
+              encolarSync(
+                db,
+                'codigos_barras',
+                barraExistente.cb_id,
+                'update',
+                ahora
+              );
+            }
+          }
+
+          actualizados++;
+        }
+      } else if (!productoExistente) {
+        // Si el código de barras ya está activo en otro producto distinto, importar el producto sin repetir el código de barras
+        let codigosAInsertar: string[] = [];
+        if (codigoBarrasLimpio) {
+          if (barraExistente && barraExistente.cb_deleted_at === null) {
+            erroresImportacion.push(
+              `Fila ${fila.filaNumero} ("${fila.nombre}"): El código de barras "${codigoBarrasLimpio}" ya pertenece a "${barraExistente.prod_nombre}"; se creó el producto sin repetir el código de barras.`
+            );
+          } else {
+            codigosAInsertar = [codigoBarrasLimpio];
+          }
         }
 
-        actualizados++;
-      } else if (!existentePorCodigo) {
         crearProducto(db, actor, {
           nombre: fila.nombre,
-          codigoInterno: fila.codigoInterno,
+          codigoInterno: codigoInternoLimpio,
           categoriaId,
           marcaId,
           costoCompraCentavos: fila.costoCompraCentavos,
           precioVentaCentavos: fila.precioVentaCentavos,
           alicuotaIva: fila.alicuotaIva,
           stockMinimo: fila.stockMinimo,
-          codigosBarras: fila.codigoBarras ? [fila.codigoBarras] : [],
+          codigosBarras: codigosAInsertar,
           stockInicial: fila.stockInicial,
         });
         creados++;
@@ -1339,7 +1472,7 @@ export function importarProductosDesdeCsv(
       valores_despues: {
         productos_creados: creados,
         productos_actualizados: actualizados,
-        errores_count: parseo.errores.length,
+        errores_count: erroresImportacion.length,
       },
       ahoraIso: ahora,
     });
@@ -1350,7 +1483,7 @@ export function importarProductosDesdeCsv(
     actualizados,
     productosCreados: creados,
     productosActualizados: actualizados,
-    errores: parseo.errores,
+    errores: erroresImportacion,
   };
 }
 

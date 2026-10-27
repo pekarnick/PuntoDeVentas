@@ -25,6 +25,7 @@ import {
   PanelConfiguracionSync,
   type ConfiguracionSistemaDTO,
   type EstadisticasEspacioImagenesDTO,
+  type EstadoConfiguracionArcaDTO,
   type EstadoConfigVentaMovilDTO,
   type RegistroHistorialBackupDTO,
 } from './features/configuracion/PanelConfiguracionSync.tsx';
@@ -38,6 +39,8 @@ import {
 import { PanelUsuarios } from './features/usuarios/PanelUsuarios.tsx';
 import {
   PanelVentaPOS,
+  type ComboPromocionUI,
+  type ListaPrecioUI,
   type VentaRecienteResumenUI,
 } from './features/venta/PanelVentaPOS.tsx';
 
@@ -64,6 +67,9 @@ interface EstadoInicialServidor {
   readonly estadoSync?: ResumenEstadoSyncUI;
   readonly configuracionSistema?: ConfiguracionSistemaDTO | null;
   readonly configVentaMovil?: EstadoConfigVentaMovilDTO | null;
+  readonly configArca?: EstadoConfiguracionArcaDTO | null;
+  readonly listasPrecio?: readonly ListaPrecioUI[];
+  readonly combos?: readonly ComboPromocionUI[];
   readonly historialBackups?: readonly RegistroHistorialBackupDTO[];
   readonly espacioImagenes?: EstadisticasEspacioImagenesDTO;
   readonly catalogoVenta: readonly ProductoCatalogoVenta[];
@@ -77,15 +83,53 @@ interface EstadoInicialServidor {
   readonly clientes?: readonly ClienteConSaldoUI[];
 }
 
+type ModoTemaVisual = 'claro' | 'oscuro';
+const CLAVE_TEMA_STORAGE = 'pos_tema_visual';
+
+function leerTemaInicial(): ModoTemaVisual {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const guardado = window.localStorage.getItem(CLAVE_TEMA_STORAGE);
+      if (guardado === 'oscuro' || guardado === 'claro') {
+        return guardado;
+      }
+    }
+  } catch {
+    // En entornos sin localStorage usar claro por defecto
+  }
+  return 'claro';
+}
+
 export function App(): React.ReactElement {
   const [rolActivo, setRolActivo] = useState<RolUsuario>('superadmin');
   const [pestania, setPestania] = useState<PestaniaActiva>('venta');
+  const [modoTema, setModoTema] = useState<ModoTemaVisual>(() =>
+    leerTemaInicial()
+  );
   const [datosServidor, setDatosServidor] =
     useState<EstadoInicialServidor | null>(null);
   const [sinConexionNavegador, setSinConexionNavegador] = useState<boolean>(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
   );
   const [sincronizandoEnCurso, setSincronizandoEnCurso] = useState(false);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-theme', modoTema);
+      document.body.setAttribute('data-theme', modoTema);
+    }
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(CLAVE_TEMA_STORAGE, modoTema);
+      }
+    } catch {
+      // Ignorar fallo de almacenamiento local
+    }
+  }, [modoTema]);
+
+  function alternarTemaVisual() {
+    setModoTema((prev) => (prev === 'claro' ? 'oscuro' : 'claro'));
+  }
 
   const recargarEstadoLocal = useCallback(async () => {
     try {
@@ -256,7 +300,10 @@ export function App(): React.ReactElement {
   }
 
   return (
-    <div className="app-layout">
+    <div
+      className={`app-layout theme-${modoTema}`}
+      data-theme={modoTema}
+    >
       <header className="topbar">
         <div className="topbar-row-top">
           <div className="topbar-brand">
@@ -273,6 +320,19 @@ export function App(): React.ReactElement {
           </div>
 
           <div className="topbar-status">
+            <button
+              type="button"
+              className="nav-btn nav-btn-compact theme-toggle-btn"
+              onClick={alternarTemaVisual}
+              aria-label={
+                modoTema === 'claro'
+                  ? 'Cambiar a modo oscuro'
+                  : 'Cambiar a modo claro'
+              }
+              title="Alternar entre Modo Claro y Modo Oscuro"
+            >
+              {modoTema === 'claro' ? '🌙 Modo Oscuro' : '☀️ Modo Claro'}
+            </button>
             <label className="role-switcher">
               <span>Sesión:</span>
               <select
@@ -416,6 +476,9 @@ export function App(): React.ReactElement {
               datosServidor ? datosServidor.ventasRecientes : []
             }
             clientesDisponibles={datosServidor?.clientes ?? []}
+            configArca={datosServidor?.configArca ?? null}
+            listasPrecioDisponibles={datosServidor?.listasPrecio ?? []}
+            combosDisponibles={datosServidor?.combos ?? []}
             onDatosActualizados={() => void recargarEstadoLocal()}
           />
         )}
@@ -465,6 +528,7 @@ export function App(): React.ReactElement {
             estadoSync={resumenSync}
             configuracionInicial={datosServidor?.configuracionSistema ?? null}
             configVentaMovilInicial={datosServidor?.configVentaMovil ?? null}
+            configArcaInicial={datosServidor?.configArca ?? null}
             historialBackupsInicial={[
               ...(datosServidor?.historialBackups ?? []),
             ]}
@@ -484,6 +548,17 @@ export function App(): React.ReactElement {
           />
         )}
       </main>
+
+      <footer className="app-footer" role="contentinfo">
+        <div className="app-footer-inner">
+          <span className="app-footer-brand">
+            <strong>GAR</strong> - Guillermo Adolfo Rohde
+          </span>
+          <span className="app-footer-meta">
+            Sistema Punto de Venta Offline-First · SQLite + Nube
+          </span>
+        </div>
+      </footer>
     </div>
   );
 }

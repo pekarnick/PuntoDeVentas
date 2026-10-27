@@ -42,8 +42,6 @@ coverage/
 .DS_Store
 Thumbs.db
 credenciales_google.json
-PLAN.md
-PROMPT_BASE.md
-AGENTS.md
+
 decisiones.md
 arreglar.txt

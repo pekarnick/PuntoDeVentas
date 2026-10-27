@@ -17,6 +17,9 @@ export const ORDEN_TABLAS_SYNC = [
   'productos',
   'codigos_barras',
   'precios',
+  'variantes',
+  'combos',
+  'combos_items',
   'clientes',
   'caja_sesiones',
   'caja_movimientos',
@@ -144,6 +147,25 @@ export function resolverConflictoRegistro<T extends RegistroSincronizableBase>(
           huboConflicto: true,
           reglaAplicada: 'append_only_transicion_estado',
           detalleAuditoria: `Venta ${local.id}: prevalece estado 'anulada' (${ganador}).`,
+        };
+      }
+
+      const factLocal = String(local.estado_facturacion ?? 'no_aplica');
+      const factRemoto = String(remoto.estado_facturacion ?? 'no_aplica');
+      if (factLocal !== factRemoto) {
+        const ganador =
+          factRemoto === 'emitida'
+            ? 'remoto'
+            : factLocal === 'emitida'
+              ? 'local'
+              : compararLastWriteWins(local, remoto).ganador;
+        const registroGanador = ganador === 'remoto' ? remoto : local;
+        return {
+          ganador,
+          registroResultante: { ...registroGanador },
+          huboConflicto: true,
+          reglaAplicada: 'append_only_transicion_estado',
+          detalleAuditoria: `Venta ${local.id}: prevalece estado_facturacion (${ganador}).`,
         };
       }
     }

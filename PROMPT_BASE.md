@@ -39,7 +39,7 @@ Sistema de **Punto de Venta (POS) genérico offline-first** para comercios minor
 | **Fase 2** | Sincronización y backup | **100% Completada** | Esquema Supabase con RLS, Storage de imágenes WebP en cola separada, motor sync push/pull, backup automático local y restauración. |
 | **Fase 3** | Gestión completa | **100% Completada** | Compras, proveedores, clientes, cuenta corriente con validación CUIT módulo 11, actualización masiva de precios con redondeo configurable, importación CSV, Libro IVA Ventas/Compras en Excel (.xlsx) y tickets ESC/POS térmicos sin costos. Commit `b4939ab`. |
 | **Fase 3b** | Venta móvil web (`/web-pos`) | **100% Completada** | Paquete compartido `@pos/domain`, migraciones SQLite (`003_venta_movil_sesiones.sql`) y Supabase (`002_venta_movil_rpc.sql`), repositorio `src/db/venta_movil_repo.ts`, UI de configuración QR y sesiones en escritorio, PWA móvil `/web-pos` con cámara `BarcodeDetector`, idempotencia UUIDv7, WhatsApp y Caja Móvil, más suite de tests `src/db/__tests__/venta_movil.test.ts`. |
-| **Fase 4** | Facturación electrónica ARCA y extras | **Pendiente (Siguiente)** | Facturación electrónica opcional vía Edge Function de Supabase (`emitir_comprobante_arca`), CAE y vencimiento, QR reglamentario de ARCA en PDF/ticket, homologación vs producción, múltiples listas de precio, combos y balanzas. |
+| **Fase 4** | Facturación electrónica ARCA y extras | **100% Completada** | Migraciones `migrations/004_arca_y_extras_fase4.sql` y `supabase/migrations/003_arca_y_extras_fase4.sql`, Edge Function `supabase/functions/emitir_comprobante_arca/index.ts`, lógica pura en `packages/domain/src/arca_fase4.ts`, repositorio `src/db/arca_fase4_repo.ts`, CAE y vencimiento en homologación/producción, Nota de Crédito A/B/C al anular, QR oficial RG 4892/2020 sin costos (Regla 20), cola de reintento offline, múltiples listas de precio, variantes, combos y lectura de códigos de balanza EAN-13, con suite de tests `src/db/__tests__/arca_fase4.test.ts`. |
 
 ---
 
@@ -70,13 +70,51 @@ Sistema de **Punto de Venta (POS) genérico offline-first** para comercios minor
 
 ---
 
-## 5. Planificación para Iniciar la Fase 4 — Facturación Electrónica ARCA (ex-AFIP, Opcional)
+## 5. Detalle de la Fase 4 Completada — Facturación Electrónica ARCA y Extras
 
-Al comenzar la **Fase 4** (según `PLAN.md` §6.3 y §10):
-1. **Reglas clave de ARCA (`PLAN.md` §3 Regla 18 y §6.3)**:
-   - ARCA es **100% opcional** y viene **apagada por defecto** (`arca_habilitada = 0`).
-   - Credenciales y certificados digitales nunca se guardan en el cliente ni en el repositorio: se emiten desde una **Edge Function de Supabase (`emitir_comprobante_arca`)**.
-   - Siempre permitir elegir ambiente **`homologacion`** (pruebas, por defecto) o **`produccion`**.
-   - Al emitir una venta sin internet con ARCA activo, la venta queda con `estado_facturacion = 'pendiente'` y se envía cuando vuelve la conexión sin bloquear jamás la caja.
-   - Comprobantes soportados: Factura A, B y C, y Notas de Crédito A, B y C al anular una venta facturada.
-   - Generar comprobante PDF y ticket térmico con CAE, fecha de vencimiento de CAE y código QR oficial exigido por ARCA (sin mostrar `costo_compra`, Regla 20).
+1. **Lógica Pura Compartida (`packages/domain/src/arca_fase4.ts`)**:
+   - `determinarTipoComprobanteArca` y `determinarNotaCreditoArca`: resuelve `ticket_no_fiscal`, `factura_a`, `factura_b`, `factura_c` y sus Notas de Crédito (`nota_credito_a/b/c`) según condición IVA del emisor y del cliente.
+   - `validarReceptorComprobanteArca`: exige CUIT módulo 11 en Factura A y DNI/CUIT cuando supera el tope reglamentario de Consumidor Final.
+   - `construirUrlQrOficialArca` y `generarQrOficialArcaSvg`: genera el código QR oficial RG 4892/2020 (`https://www.afip.gob.ar/fe/qr/?p=<base64>`) en SVG puro sin dependencias externas.
+   - `formatearComprobanteFiscalImprimible`: comprobante fiscal HTML/PDF y térmico con CAE, vencimiento CAE y QR oficial sin exponer jamás `costo_compra` ni ganancias (Regla 20).
+   - `parsearCodigoBarrasBalanza` y `construirCodigoBarrasBalanzaEan13`: lectura de etiquetas EAN-13 de balanzas comerciales con peso en gramos (prefijo `20`) o importe (prefijo `21`).
+   - `calcularPrecioYStockCombo` y `resolverPrecioProductoEnLista`: cálculo de combos (con stock derivado de sus componentes según Regla 4), múltiples listas de precio y variantes.
+
+2. **Migraciones y Edge Function de Supabase**:
+   - SQLite: `migrations/004_arca_y_extras_fase4.sql` (columnas de configuración pública ARCA en `comercios`, campos de cola y Nota de Crédito en `ventas`, y tablas sincronizables `variantes`, `combos` y `combos_items`).
+   - Supabase Postgres: `supabase/migrations/003_arca_y_extras_fase4.sql` (espejo con RLS por `comercio_id`).
+   - Edge Function: `supabase/functions/emitir_comprobante_arca/index.ts` (las credenciales y certificados viven exclusivamente en variables de entorno del servidor, nunca en el cliente ni en el repositorio).
+
+3. **Repositorio, UI y Suite de Pruebas (`src/db/arca_fase4_repo.ts` y `src/db/__tests__/arca_fase4.test.ts`)**:
+   - 9 archivos de test y 45 tests pasando al 100% (`npm test`), `npx tsc --noEmit` sin errores y `npm run build` compilando escritorio y `/web-pos`.
+
+---
+
+## 6. Mejoras Post-Fase 4 Completadas (Etapas 1 a 6)
+
+1. **Etapa 1 — Sincronización Supabase Resiliente, Recuperación tras Borrar Base Local y Vaciado Remoto**:
+   - `src/sync/motor_sync.ts` y `src/db/servidor_local_dev.ts`:
+     - Persistencia de identidad del comercio en `data/comercio_identidad.json` y descubrimiento automático del `comercio_id` remoto cuando `data/pos_local.db` es eliminada o está vacía (`descubrirComercioRemoto` + resolución de colisiones de claves únicas en `insertarFilaRemotaEnSQLite`).
+     - Tolerancia a diferencias de esquema en Supabase (`PGRST204` columnas nuevas de Fase 4 y `PGRST205` tablas opcionales `sesiones_moviles`, `variantes`, `combos`, `combos_items`) y botón **"📋 Copiar SQL actualización Supabase"** en `src/features/configuracion/PanelConfiguracionSync.tsx`.
+     - Vaciado remoto sincronizado al ejecutar **"Resetear base de datos a cero"** (`vaciarDatosComercioRemoto` y RPC `resetear_comercio_a_fabrica` en `supabase/migrations/003_arca_y_extras_fase4.sql`).
+2. **Etapa 2 — Importación CSV Idempotente y Códigos de Barras Repetidos**:
+   - `src/domain/gestion_fase3.ts`, `src/db/repositorios.ts` y `src/db/gestion_fase3_repo.ts`:
+     - Ignora marcadores vacíos (`0`, `-`, `S/C`, `N/A`) en `codigo_barras`.
+     - Reactiva productos/códigos con `deleted_at` y evita abortar toda la importación cuando dos artículos distintos comparten el mismo EAN en una planilla (importa el producto y registra una advertencia clara).
+3. **Etapa 3 — Edición de `stock_minimo` y Carga/Visualización de Imágenes WebP de Productos**:
+   - `src/features/productos/PanelProductosStock.tsx`, `src/db/servidor_local_dev.ts`, `vite.config.ts` y `src/features/venta/PanelVentaPOS.tsx`:
+     - Carga de imagen al crear producto o desde cada fila de la tabla (**"📷 Foto"**), procesando con `guardarImagenProductoLocal` (WebP ≤ 150 KB + miniatura `_thumb.webp` ≤ 25 KB sin EXIF/GPS) y sirviendo miniaturas en `/api/pos-imagen/<id>_thumb.webp`.
+     - Edición directa en la tabla de catálogo (**"✏️ Editar"** / **"💾 Guardar"**) para `stock_minimo`, `nombre`, `costo_compra`, `precio_venta` y `boton_rapido`.
+4. **Etapa 4 — Soporte Multinube Opcional (Supabase + Firebase Firestore/Storage)**:
+   - `migrations/005_firebase_multinube.sql`, `src/sync/adaptador_firebase.ts` y `src/features/configuracion/PanelConfiguracionSync.tsx`:
+     - `AdaptadorFirebaseFirestoreHttp` (Firestore REST v1 + Firebase Storage REST) con validación de seguridad cliente (`validarConfiguracionFirebaseCliente`, Regla 8) y `AdaptadorNubeMultiProveedor` para operar con `'supabase'`, `'firebase'` o `'ambos'` (espejo redundante).
+5. **Etapa 5 — Paginación de Listados (10 por página), Modo Oscuro / Claro y Marca al Pie**:
+   - `src/domain/paginacion.ts` y `src/components/PaginadorTabla.tsx`:
+     - Función pura `paginarListado` (`TAMANIO_PAGINA_POR_DEFECTO = 10`) y barra de paginación aplicada en todos los listados: catálogo de productos, últimas compras registradas, proveedores y movimientos de cuenta corriente, padrón de clientes, informes ("Stock Actual, Alertas Bajo Mínimo y Valorización" y ranking de rentabilidad), registro de auditoría, historial de backups, usuarios y sesiones móviles.
+   - `src/App.tsx`, `src/styles.css` y `web-pos/src/WebPosApp.tsx`:
+     - Selector de tema visual (**"🌙 Modo Oscuro"** / **"☀️ Modo Claro"**) persistido en `localStorage` (`pos_tema_visual`).
+     - Pie de página institucional con la marca **`GAR - Guillermo Adolfo Rohde`**.
+6. **Etapa 6 — Combinación de Múltiples Medios de Pago con Verificación de Suma**:
+   - `packages/domain/src/totales.ts`, `src/features/venta/PanelVentaPOS.tsx` y `web-pos/src/WebPosApp.tsx`:
+     - Función pura `evaluarPagosCombinados` y `validarPagosVenta` para evaluar en tiempo real N medios de pago (`efectivo`, `mercado_pago`, `transferencia`, `debito`, `credito`, `qr`, `cuenta_corriente`, `otro`), calculando la suma ingresada, faltante o excedente respecto al monto total a cobrar.
+     - En la caja de escritorio y en `/web-pos`, **Combinar pagos (`F9`)** permite agregar 2, 3 o más filas de medios de pago (`+ Agregar medio de pago`), elegir cualquier medio en cada fila, usar **"Completar resto"** y verificar que la suma coincida exactamente con el monto a cobrar antes de confirmar la venta.

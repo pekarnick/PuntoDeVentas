@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   aCentavos,
@@ -7,6 +8,10 @@ import {
   pesosACentavos,
 } from '../../domain/dinero.ts';
 import { validarDocumentoArgentino } from '../../domain/cuit.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import type { RolUsuario } from '../../domain/permisos.ts';
 import type { AlicuotaIva } from '../../domain/totales.ts';
 import type { ProductoAdminItemUI } from '../productos/PanelProductosStock.tsx';
@@ -101,6 +106,26 @@ export function PanelComprasProveedores({
 
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [paginaCompras, setPaginaCompras] = useState(1);
+  const [paginaProveedores, setPaginaProveedores] = useState(1);
+  const [paginaMovsProveedor, setPaginaMovsProveedor] = useState(1);
+
+  const paginacionCompras = paginarListado(
+    comprasRecientesServidor,
+    paginaCompras,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionProveedores = paginarListado(
+    proveedoresServidor,
+    paginaProveedores,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionMovsProveedor = paginarListado(
+    movimientosCc,
+    paginaMovsProveedor,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
 
   if (!tienePermisoCompras) {
     return (
@@ -364,11 +389,10 @@ export function PanelComprasProveedores({
             </div>
 
             <div
+              className="subcard-box"
               style={{
-                border: '1px solid #e2e8f0',
                 borderRadius: '0.65rem',
                 padding: '0.85rem',
-                background: '#f8fafc',
                 marginBottom: '0.85rem',
               }}
             >
@@ -634,7 +658,7 @@ export function PanelComprasProveedores({
                   </td>
                 </tr>
               ) : (
-                proveedoresServidor.map((prov) => (
+                paginacionProveedores.itemsPagina.map((prov) => (
                   <tr key={prov.id}>
                     <td>
                       <strong>{prov.razon_social}</strong>
@@ -656,7 +680,10 @@ export function PanelComprasProveedores({
                       <button
                         type="button"
                         className="btn-secondary"
-                        onClick={() => void cargarMovimientosProveedor(prov.id)}
+                        onClick={() => {
+                          setPaginaMovsProveedor(1);
+                          void cargarMovimientosProveedor(prov.id);
+                        }}
                       >
                         Ver / Pagar
                       </button>
@@ -666,15 +693,24 @@ export function PanelComprasProveedores({
               )}
             </tbody>
           </table>
+          <PaginadorTabla
+            paginaActual={paginacionProveedores.paginaActual}
+            totalPaginas={paginacionProveedores.totalPaginas}
+            totalItems={paginacionProveedores.totalItems}
+            desdeRegistro={paginacionProveedores.desdeRegistro}
+            hastaRegistro={paginacionProveedores.hastaRegistro}
+            tamanioPagina={paginacionProveedores.tamanioPagina}
+            onCambiarPagina={setPaginaProveedores}
+            etiquetaItems="proveedores"
+          />
 
           {proveedorDetalleCcId && (
             <div
+              className="subcard-box"
               style={{
                 marginTop: '1rem',
                 padding: '0.85rem',
-                background: '#f8fafc',
                 borderRadius: '0.65rem',
-                border: '1px solid #cbd5e1',
               }}
             >
               <h4>Registrar Pago a Proveedor Seleccionado</h4>
@@ -711,36 +747,48 @@ export function PanelComprasProveedores({
               </form>
 
               {movimientosCc.length > 0 && (
-                <table className="pos-table" style={{ marginTop: '0.75rem' }}>
-                  <thead>
-                    <tr>
-                      <th>Fecha</th>
-                      <th>Tipo</th>
-                      <th>Monto</th>
-                      <th>Observaciones</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {movimientosCc.map((m) => (
-                      <tr key={m.id}>
-                        <td>{formatearFechaAR(new Date(m.fecha))}</td>
-                        <td>
-                          <span
-                            className={`badge-rol ${
-                              m.tipo === 'cargo'
-                                ? 'rol-encargado'
-                                : 'rol-cajero'
-                            }`}
-                          >
-                            {m.tipo.toUpperCase()}
-                          </span>
-                        </td>
-                        <td>{formatearPesos(aCentavos(m.monto_centavos))}</td>
-                        <td>{m.observaciones ?? '—'}</td>
+                <>
+                  <table className="pos-table" style={{ marginTop: '0.75rem' }}>
+                    <thead>
+                      <tr>
+                        <th>Fecha</th>
+                        <th>Tipo</th>
+                        <th>Monto</th>
+                        <th>Observaciones</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {paginacionMovsProveedor.itemsPagina.map((m) => (
+                        <tr key={m.id}>
+                          <td>{formatearFechaAR(new Date(m.fecha))}</td>
+                          <td>
+                            <span
+                              className={`badge-rol ${
+                                m.tipo === 'cargo'
+                                  ? 'rol-encargado'
+                                  : 'rol-cajero'
+                              }`}
+                            >
+                              {m.tipo.toUpperCase()}
+                            </span>
+                          </td>
+                          <td>{formatearPesos(aCentavos(m.monto_centavos))}</td>
+                          <td>{m.observaciones ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <PaginadorTabla
+                    paginaActual={paginacionMovsProveedor.paginaActual}
+                    totalPaginas={paginacionMovsProveedor.totalPaginas}
+                    totalItems={paginacionMovsProveedor.totalItems}
+                    desdeRegistro={paginacionMovsProveedor.desdeRegistro}
+                    hastaRegistro={paginacionMovsProveedor.hastaRegistro}
+                    tamanioPagina={paginacionMovsProveedor.tamanioPagina}
+                    onCambiarPagina={setPaginaMovsProveedor}
+                    etiquetaItems="movimientos"
+                  />
+                </>
               )}
             </div>
           )}
@@ -769,7 +817,7 @@ export function PanelComprasProveedores({
                 </td>
               </tr>
             ) : (
-              comprasRecientesServidor.map((c) => (
+              paginacionCompras.itemsPagina.map((c) => (
                 <tr key={c.id}>
                   <td>{formatearFechaAR(new Date(c.fecha))}</td>
                   <td>{c.numero_comprobante ?? 'S/N'}</td>
@@ -784,6 +832,16 @@ export function PanelComprasProveedores({
             )}
           </tbody>
         </table>
+        <PaginadorTabla
+          paginaActual={paginacionCompras.paginaActual}
+          totalPaginas={paginacionCompras.totalPaginas}
+          totalItems={paginacionCompras.totalItems}
+          desdeRegistro={paginacionCompras.desdeRegistro}
+          hastaRegistro={paginacionCompras.hastaRegistro}
+          tamanioPagina={paginacionCompras.tamanioPagina}
+          onCambiarPagina={setPaginaCompras}
+          etiquetaItems="compras"
+        />
       </section>
     </div>
   );

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
   aCentavos,
@@ -10,6 +11,10 @@ import {
   validarDocumentoArgentino,
   type CondicionIvaReceptor,
 } from '../../domain/cuit.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import type { RolUsuario } from '../../domain/permisos.ts';
 import type { MovimientoCcUI } from '../compras/PanelComprasProveedores.tsx';
 
@@ -65,6 +70,20 @@ export function PanelClientesCuentaCorriente({
 
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [paginaClientes, setPaginaClientes] = useState(1);
+  const [paginaMovsCliente, setPaginaMovsCliente] = useState(1);
+
+  const paginacionClientes = paginarListado(
+    clientesServidor,
+    paginaClientes,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionMovsCliente = paginarListado(
+    movimientosCc,
+    paginaMovsCliente,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
 
   const validacionEnVivo = documento.trim()
     ? validarDocumentoArgentino(documento)
@@ -321,7 +340,7 @@ export function PanelClientesCuentaCorriente({
                 </td>
               </tr>
             ) : (
-              clientesServidor.map((c) => (
+              paginacionClientes.itemsPagina.map((c) => (
                 <tr key={c.id}>
                   <td>
                     <strong>{c.nombre}</strong>
@@ -342,12 +361,11 @@ export function PanelClientesCuentaCorriente({
                   </td>
                   <td>
                     <strong
-                      style={{
-                        color:
-                          c.saldo_pendiente_centavos > 0
-                            ? '#b91c1c'
-                            : '#15803d',
-                      }}
+                      className={
+                        c.saldo_pendiente_centavos > 0
+                          ? 'diff-negativa'
+                          : 'diff-positiva'
+                      }
                     >
                       {formatearPesos(aCentavos(c.saldo_pendiente_centavos))}
                     </strong>
@@ -361,7 +379,10 @@ export function PanelClientesCuentaCorriente({
                     <button
                       type="button"
                       className="btn-secondary"
-                      onClick={() => void seleccionarClienteDetalle(c.id)}
+                      onClick={() => {
+                        setPaginaMovsCliente(1);
+                        void seleccionarClienteDetalle(c.id);
+                      }}
                     >
                       Cta. Cte.
                     </button>
@@ -371,15 +392,24 @@ export function PanelClientesCuentaCorriente({
             )}
           </tbody>
         </table>
+        <PaginadorTabla
+          paginaActual={paginacionClientes.paginaActual}
+          totalPaginas={paginacionClientes.totalPaginas}
+          totalItems={paginacionClientes.totalItems}
+          desdeRegistro={paginacionClientes.desdeRegistro}
+          hastaRegistro={paginacionClientes.hastaRegistro}
+          tamanioPagina={paginacionClientes.tamanioPagina}
+          onCambiarPagina={setPaginaClientes}
+          etiquetaItems="clientes"
+        />
 
         {clienteSeleccionado && (
           <div
+            className="subcard-box"
             style={{
               marginTop: '1.1rem',
               padding: '0.9rem',
-              background: '#f8fafc',
               borderRadius: '0.65rem',
-              border: '1px solid #cbd5e1',
             }}
           >
             <h3>
@@ -439,34 +469,46 @@ export function PanelClientesCuentaCorriente({
             </form>
 
             {movimientosCc.length > 0 && (
-              <table className="pos-table" style={{ marginTop: '0.85rem' }}>
-                <thead>
-                  <tr>
-                    <th>Fecha</th>
-                    <th>Tipo</th>
-                    <th>Monto</th>
-                    <th>Observaciones</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {movimientosCc.map((m) => (
-                    <tr key={m.id}>
-                      <td>{formatearFechaAR(new Date(m.fecha))}</td>
-                      <td>
-                        <span
-                          className={`badge-rol ${
-                            m.tipo === 'cargo' ? 'rol-encargado' : 'rol-cajero'
-                          }`}
-                        >
-                          {m.tipo.toUpperCase()}
-                        </span>
-                      </td>
-                      <td>{formatearPesos(aCentavos(m.monto_centavos))}</td>
-                      <td>{m.observaciones ?? '—'}</td>
+              <>
+                <table className="pos-table" style={{ marginTop: '0.85rem' }}>
+                  <thead>
+                    <tr>
+                      <th>Fecha</th>
+                      <th>Tipo</th>
+                      <th>Monto</th>
+                      <th>Observaciones</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {paginacionMovsCliente.itemsPagina.map((m) => (
+                      <tr key={m.id}>
+                        <td>{formatearFechaAR(new Date(m.fecha))}</td>
+                        <td>
+                          <span
+                            className={`badge-rol ${
+                              m.tipo === 'cargo' ? 'rol-encargado' : 'rol-cajero'
+                            }`}
+                          >
+                            {m.tipo.toUpperCase()}
+                          </span>
+                        </td>
+                        <td>{formatearPesos(aCentavos(m.monto_centavos))}</td>
+                        <td>{m.observaciones ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <PaginadorTabla
+                  paginaActual={paginacionMovsCliente.paginaActual}
+                  totalPaginas={paginacionMovsCliente.totalPaginas}
+                  totalItems={paginacionMovsCliente.totalItems}
+                  desdeRegistro={paginacionMovsCliente.desdeRegistro}
+                  hastaRegistro={paginacionMovsCliente.hastaRegistro}
+                  tamanioPagina={paginacionMovsCliente.tamanioPagina}
+                  onCambiarPagina={setPaginaMovsCliente}
+                  etiquetaItems="movimientos"
+                />
+              </>
             )}
           </div>
         )}

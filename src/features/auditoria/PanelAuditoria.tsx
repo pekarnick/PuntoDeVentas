@@ -1,15 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import type {
   RegistroAuditoriaCompleto,
   ResultadoVerificacionAuditoria,
 } from '../../domain/auditoria.ts';
 import { formatearFechaHoraAR } from '../../domain/dinero.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 
 export function PanelAuditoria(): React.ReactElement {
   const [registros, setRegistros] = useState<RegistroAuditoriaCompleto[]>([]);
   const [filtroAccion, setFiltroAccion] = useState('');
   const [filtroEntidad, setFiltroEntidad] = useState('');
+  const [paginaAuditoria, setPaginaAuditoria] = useState(1);
   const [resultadoIntegridad, setResultadoIntegridad] =
     useState<ResultadoVerificacionAuditoria | null>(null);
 
@@ -44,6 +50,12 @@ export function PanelAuditoria(): React.ReactElement {
       return true;
     });
   }, [registros, filtroAccion, filtroEntidad]);
+
+  const paginacionAuditoria = paginarListado(
+    registrosFiltrados,
+    paginaAuditoria,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
 
   async function manejarVerificarIntegridad() {
     try {
@@ -94,7 +106,10 @@ export function PanelAuditoria(): React.ReactElement {
           <input
             type="text"
             value={filtroAccion}
-            onChange={(e) => setFiltroAccion(e.target.value)}
+            onChange={(e) => {
+              setFiltroAccion(e.target.value);
+              setPaginaAuditoria(1);
+            }}
             placeholder="Ej. venta_crear, producto_crear..."
           />
         </label>
@@ -102,7 +117,10 @@ export function PanelAuditoria(): React.ReactElement {
           Entidad:
           <select
             value={filtroEntidad}
-            onChange={(e) => setFiltroEntidad(e.target.value)}
+            onChange={(e) => {
+              setFiltroEntidad(e.target.value);
+              setPaginaAuditoria(1);
+            }}
           >
             <option value="">Todas</option>
             <option value="comercios">comercios</option>
@@ -127,7 +145,7 @@ export function PanelAuditoria(): React.ReactElement {
           </tr>
         </thead>
         <tbody>
-          {registrosFiltrados.map((r) => (
+          {paginacionAuditoria.itemsPagina.map((r) => (
             <tr key={r.id}>
               <td>{formatearFechaHoraAR(r.fecha_hora)}</td>
               <td>
@@ -149,6 +167,16 @@ export function PanelAuditoria(): React.ReactElement {
           ))}
         </tbody>
       </table>
+      <PaginadorTabla
+        paginaActual={paginacionAuditoria.paginaActual}
+        totalPaginas={paginacionAuditoria.totalPaginas}
+        totalItems={paginacionAuditoria.totalItems}
+        desdeRegistro={paginacionAuditoria.desdeRegistro}
+        hastaRegistro={paginacionAuditoria.hastaRegistro}
+        tamanioPagina={paginacionAuditoria.tamanioPagina}
+        onCambiarPagina={setPaginaAuditoria}
+        etiquetaItems="registros de auditoría"
+      />
     </section>
   );
 }

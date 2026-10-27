@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
@@ -8,6 +9,31 @@ function sqlitePosLocalPlugin(): Plugin {
   return {
     name: 'sqlite-pos-local-middleware',
     configureServer(server) {
+      server.middlewares.use('/api/pos-imagen', (req, res) => {
+        const urlSinQuery = (req.url ?? '').split('?')[0] ?? '';
+        const nombreSeguro = path.basename(decodeURIComponent(urlSinQuery));
+        if (!nombreSeguro || !nombreSeguro.endsWith('.webp')) {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        const rutaImagen = path.resolve(
+          process.cwd(),
+          'data',
+          'imagenes',
+          nombreSeguro
+        );
+        if (!fs.existsSync(rutaImagen)) {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'image/webp');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.end(fs.readFileSync(rutaImagen));
+      });
+
       server.middlewares.use('/api/pos', (req, res, next) => {
         if (req.method !== 'POST') {
           next();

@@ -752,3 +752,279 @@ input[type="checkbox"] {
   border-radius: 0.425rem;
   font-size: 0.85rem;
 }
+
+.alert-success {
+  background-color: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+  padding: 0.75rem 0.95rem;
+  border-radius: 0.5rem;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.subcard-box {
+  background-color: #f8fafc;
+  border: 1px solid #cbd5e1;
+}
+
+/* ==========================================================================
+   Barra de Paginación de Tablas (.pagination-bar)
+   ========================================================================== */
+.pagination-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  margin-top: 0.5rem;
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.pagination-info {
+  font-variant-numeric: tabular-nums;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pagination-btn {
+  padding: 0.28rem 0.6rem;
+  font-size: 0.78rem;
+}
+
+.pagination-page-indicator {
+  padding: 0 0.45rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Pie de Página con Marca (.app-footer)
+   ========================================================================== */
+.app-footer {
+  margin-top: auto;
+  padding: 0.85rem 1.5rem;
+  background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+  color: #cbd5e1;
+  border-top: 1px solid #334155;
+  font-size: 0.84rem;
+}
+
+.app-footer-inner {
+  max-width: 92rem;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.app-footer-brand {
+  color: #f8fafc;
+  letter-spacing: 0.01em;
+}
+
+.app-footer-brand strong {
+  color: #38bdf8;
+  font-weight: 800;
+}
+
+.app-footer-meta {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
+.theme-toggle-btn {
+  border-color: #475569;
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   Modo Oscuro ([data-theme="oscuro"] / .theme-oscuro)
+   ========================================================================== */
+:root[data-theme="oscuro"],
+body[data-theme="oscuro"],
+.app-layout.theme-oscuro {
+  background-color: #0b1120;
+  color: #e2e8f0;
+  color-scheme: dark;
+}
+
+.theme-oscuro .pos-card,
+.theme-oscuro .card {
+  background-color: #1e293b;
+  border-color: #334155;
+  color: #e2e8f0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.theme-oscuro .danger-zone-card {
+  border-color: #7f1d1d;
+  background: linear-gradient(180deg, #1e293b 0%, #2a1215 100%);
+}
+
+.theme-oscuro .card-header {
+  border-bottom-color: #334155;
+}
+
+.theme-oscuro .pos-card h2,
+.theme-oscuro .card h2,
+.theme-oscuro .pos-card h3,
+.theme-oscuro .card h3,
+.theme-oscuro .pos-card h4,
+.theme-oscuro .card h4,
+.theme-oscuro .stat-value,
+.theme-oscuro .total-grande,
+.theme-oscuro .autocomplete-price {
+  color: #f8fafc;
+}
+
+.theme-oscuro .text-muted,
+.theme-oscuro .stat-label,
+.theme-oscuro .autocomplete-codes {
+  color: #94a3b8;
+}
+
+.theme-oscuro label {
+  color: #cbd5e1;
+}
+
+.theme-oscuro code {
+  background-color: #0f172a;
+  color: #7dd3fc;
+  border: 1px solid #334155;
+}
+
+.theme-oscuro .stat-box,
+.theme-oscuro .form-stack,
+.theme-oscuro .arqueo-box,
+.theme-oscuro .subcard-box,
+.theme-oscuro .ticket-preview,
+.theme-oscuro .pagination-bar {
+  background-color: #0f172a;
+  border-color: #334155;
+  color: #cbd5e1;
+}
+
+.theme-oscuro .arqueo-line.destaque {
+  border-top-color: #334155;
+}
+
+.theme-oscuro input[type="text"],
+.theme-oscuro input[type="password"],
+.theme-oscuro input[type="number"],
+.theme-oscuro input[type="date"],
+.theme-oscuro input[type="email"],
+.theme-oscuro input:not([type="checkbox"]):not([type="radio"]),
+.theme-oscuro select,
+.theme-oscuro textarea {
+  background-color: #0f172a;
+  color: #f8fafc;
+  border-color: #475569;
+}
+
+.theme-oscuro input:focus,
+.theme-oscuro select:focus,
+.theme-oscuro textarea:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.theme-oscuro .btn-secondary {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  border-color: #475569;
+}
+
+.theme-oscuro .btn-secondary:hover:not(:disabled) {
+  background-color: #334155;
+  border-color: #64748b;
+}
+
+.theme-oscuro .data-table th,
+.theme-oscuro .pos-table th {
+  background-color: #0f172a;
+  color: #94a3b8;
+  border-bottom-color: #334155;
+}
+
+.theme-oscuro .data-table td,
+.theme-oscuro .pos-table td {
+  border-bottom-color: #334155;
+  color: #e2e8f0;
+}
+
+.theme-oscuro .data-table tbody tr:hover,
+.theme-oscuro .pos-table tbody tr:hover {
+  background-color: rgba(15, 23, 42, 0.65);
+}
+
+.theme-oscuro .scanner-box {
+  background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+  border-color: #38bdf8;
+}
+
+.theme-oscuro .autocomplete-dropdown {
+  background-color: #0f172a;
+  border-color: #38bdf8;
+}
+
+.theme-oscuro .autocomplete-item {
+  border-bottom-color: #334155;
+}
+
+.theme-oscuro .autocomplete-item.active,
+.theme-oscuro .autocomplete-item:hover {
+  background-color: #1e3a8a;
+}
+
+.theme-oscuro .badge-rol {
+  background-color: #334155;
+  color: #e2e8f0;
+}
+
+.theme-oscuro .badge-alerta {
+  background-color: rgba(220, 38, 38, 0.2);
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.theme-oscuro .alert-error {
+  background-color: rgba(153, 27, 27, 0.25);
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.theme-oscuro .alert-ok,
+.theme-oscuro .alert-success {
+  background-color: rgba(22, 101, 52, 0.25);
+  color: #bbf7d0;
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
+.theme-oscuro .alert-info {
+  background-color: rgba(30, 64, 175, 0.25);
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.4);
+}
+
+.theme-oscuro .diff-negativa {
+  color: #f87171;
+}
+
+.theme-oscuro .diff-positiva {
+  color: #4ade80;
+}
+

@@ -1,8 +1,13 @@
 import React, { useEffect, useState } from 'react';
+import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import type { LibroIvaPeriodoResult } from '../../db/gestion_fase3_repo.ts';
 import type { InformeGestionFase1 } from '../../db/informes_repo.ts';
 import { aCentavos, formatearMonedaARS } from '../../domain/dinero.ts';
+import {
+  paginarListado,
+  TAMANIO_PAGINA_POR_DEFECTO,
+} from '../../domain/paginacion.ts';
 import type { RolUsuario } from '../../domain/permisos.ts';
 
 export interface PanelInformesProps {
@@ -19,6 +24,8 @@ export function PanelInformes({
   const [mensajeExportacion, setMensajeExportacion] = useState<string | null>(
     null
   );
+  const [paginaStockValorizado, setPaginaStockValorizado] = useState(1);
+  const [paginaRentabilidad, setPaginaRentabilidad] = useState(1);
 
   async function cargarInformes() {
     try {
@@ -141,6 +148,18 @@ export function PanelInformes({
     totalValorizadoCostoCentavos: aCentavos(0),
     totalValorizadoVentaCentavos: aCentavos(0),
   };
+
+  const paginacionRentabilidad = paginarListado(
+    rentabilidad.porProducto,
+    paginaRentabilidad,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+
+  const paginacionStockValorizado = paginarListado(
+    stockValorizado.items,
+    paginaStockValorizado,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
 
   const ivaVentas = libroIva?.ivaVentas ?? {
     filas: [],
@@ -391,7 +410,7 @@ export function PanelInformes({
                   </td>
                 </tr>
               ) : (
-                rentabilidad.porProducto.map((p) => (
+                paginacionRentabilidad.itemsPagina.map((p) => (
                   <tr key={p.producto_id}>
                     <td>{p.descripcion}</td>
                     <td className="num">{p.cantidad_vendida}</td>
@@ -412,6 +431,16 @@ export function PanelInformes({
               )}
             </tbody>
           </table>
+          <PaginadorTabla
+            paginaActual={paginacionRentabilidad.paginaActual}
+            totalPaginas={paginacionRentabilidad.totalPaginas}
+            totalItems={paginacionRentabilidad.totalItems}
+            desdeRegistro={paginacionRentabilidad.desdeRegistro}
+            hastaRegistro={paginacionRentabilidad.hastaRegistro}
+            tamanioPagina={paginacionRentabilidad.tamanioPagina}
+            onCambiarPagina={setPaginaRentabilidad}
+            etiquetaItems="productos vendidos"
+          />
         </div>
 
         <div className="pos-card">
@@ -426,7 +455,7 @@ export function PanelInformes({
               </tr>
             </thead>
             <tbody>
-              {stockValorizado.items.map((s) => (
+              {paginacionStockValorizado.itemsPagina.map((s) => (
                 <tr key={s.producto_id}>
                   <td>
                     {s.nombre}
@@ -452,6 +481,16 @@ export function PanelInformes({
               ))}
             </tbody>
           </table>
+          <PaginadorTabla
+            paginaActual={paginacionStockValorizado.paginaActual}
+            totalPaginas={paginacionStockValorizado.totalPaginas}
+            totalItems={paginacionStockValorizado.totalItems}
+            desdeRegistro={paginacionStockValorizado.desdeRegistro}
+            hastaRegistro={paginacionStockValorizado.hastaRegistro}
+            tamanioPagina={paginacionStockValorizado.tamanioPagina}
+            onCambiarPagina={setPaginaStockValorizado}
+            etiquetaItems="productos en stock"
+          />
         </div>
       </div>
     </section>

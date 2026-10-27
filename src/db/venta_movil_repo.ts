@@ -12,6 +12,7 @@ import {
   asegurarCentavos,
   calcularArqueoCaja,
   calcularVentaMovilDesdeCatalogo,
+  determinarTipoComprobanteArca,
   formatearComprobanteMovilWhatsApp,
   generarQrSvgUrlPublica,
   normalizarMovimientoStock,
@@ -19,6 +20,7 @@ import {
   validarUrlPublicaVentaMovil,
   type AlicuotaIva,
   type Centavos,
+  type CondicionIva,
   type ItemPedidoMovilInput,
   type MedioPago,
   type PagoVentaInput,
@@ -752,7 +754,7 @@ export function crearVentaMovilServidor(
     // 2. Verificar comercio
     const comercio = db
       .prepare(
-        `SELECT id, nombre, cuit, domicilio, venta_movil_habilitada, precios_incluyen_iva
+        `SELECT id, nombre, cuit, condicion_iva, domicilio, venta_movil_habilitada, precios_incluyen_iva, arca_habilitada, arca_punto_venta
          FROM comercios
          WHERE id = ? AND deleted_at IS NULL`
       )
@@ -761,9 +763,12 @@ export function crearVentaMovilServidor(
           id: string;
           nombre: string;
           cuit: string | null;
+          condicion_iva: CondicionIva;
           domicilio: string | null;
           venta_movil_habilitada: number;
           precios_incluyen_iva: number;
+          arca_habilitada: number;
+          arca_punto_venta: number;
         }
       | undefined;
 
@@ -882,17 +887,26 @@ export function crearVentaMovilServidor(
     });
 
     // 6. Verificar cliente y límite de crédito si hay pago en cuenta_corriente
-    let clienteDatos: { nombre: string; cuit_dni: string | null; limite_credito: Centavos } | null =
-      null;
+    let clienteDatos: {
+      nombre: string;
+      cuit_dni: string | null;
+      condicion_iva: CondicionIva;
+      limite_credito: Centavos;
+    } | null = null;
     if (params.clienteId) {
       const cli = db
         .prepare(
-          `SELECT nombre, cuit_dni, limite_credito
+          `SELECT nombre, cuit_dni, condicion_iva, limite_credito
            FROM clientes
            WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
         )
         .get(params.clienteId, params.comercioId) as
-        | { nombre: string; cuit_dni: string | null; limite_credito: Centavos }
+        | {
+            nombre: string;
+            cuit_dni: string | null;
+            condicion_iva: CondicionIva;
+            limite_credito: Centavos;
+          }
         | undefined;
       if (!cli) {
         throw new Error('El cliente seleccionado no existe.');
@@ -934,15 +948,22 @@ export function crearVentaMovilServidor(
     }
 
     const ahora = new Date().toISOString();
+    const arcaHabilitadaMovil = comercio.arca_habilitada === 1;
+    const detFiscalMovil = determinarTipoComprobanteArca({
+      arcaHabilitada: arcaHabilitadaMovil,
+      condicionIvaEmisor: comercio.condicion_iva ?? 'monotributo',
+      condicionIvaReceptor:
+        clienteDatos?.condicion_iva ?? 'consumidor_final',
+    });
 
     // 7. Insertar cabecera de venta (canal = 'web')
     db.prepare(
       `INSERT INTO ventas (
         id, comercio_id, fecha, usuario_id, cliente_id,
         subtotal, descuento, total, estado, caja_sesion_id,
-        tipo_comprobante, canal, dispositivo_id, estado_facturacion,
+        tipo_comprobante, punto_venta, canal, dispositivo_id, estado_facturacion,
         created_at, updated_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completada', ?, 'ticket_no_fiscal', 'web', ?, 'no_aplica', ?, ?, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completada', ?, ?, ?, 'web', ?, ?, ?, ?, ?, 'pendiente')`
     ).run(
       params.ventaId,
       params.comercioId,
@@ -953,7 +974,10 @@ export function crearVentaMovilServidor(
       resumenCalculado.descuento_global,
       resumenCalculado.total,
       params.cajaSesionId ?? null,
+      detFiscalMovil.tipoComprobante,
+      arcaHabilitadaMovil ? (comercio.arca_punto_venta ?? 1) : null,
       params.dispositivoId,
+      detFiscalMovil.estadoFacturacionInicial,
       ahora,
       ahora,
       params.dispositivoId

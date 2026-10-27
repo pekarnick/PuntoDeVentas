@@ -20,13 +20,19 @@ import {
   validarConfiguracionSupabaseCliente,
 } from '../../domain/sync.ts';
 import {
+  AdaptadorNubeMultiProveedor,
   NubeSimuladaEnMemoria,
   ejecutarCicloSincronizacionCompleto,
   ejecutarPullDatos,
   ejecutarPushDatos,
   guardarConfiguracionSistema,
   obtenerResumenEstadoSyncDb,
+  validarConfiguracionFirebaseCliente,
 } from '../../sync/motor_sync.ts';
+import {
+  deserializarFirestoreDocumentARegistro,
+  serializarRegistroAFirestoreFields,
+} from '../../sync/adaptador_firebase.ts';
 import {
   crearBackupBaseDatosLocal,
   ejecutarBackupDiarioAutomaticoSiCorresponde,
@@ -484,6 +490,146 @@ describe('Fase 2: Sincronización multi-terminal, cola de imágenes, resolución
     } finally {
       db.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('recupera datos remotos tras borrar la base local (adopción de comercio_id), vacía la nube al resetear y soporta multinube Supabase + Firebase', async () => {
+    const tmpDirOrigen = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-origen-'));
+    const tmpDirNueva = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-nueva-'));
+    const dbOrigen = crearBaseDatos(path.join(tmpDirOrigen, 'pos.db'));
+    const dbNueva = crearBaseDatos(path.join(tmpDirNueva, 'pos.db'));
+
+    try {
+      const initOrigen = inicializarComercioYSuperadmin(dbOrigen, {
+        nombreComercio: 'Librería El Estudiante',
+        nombreAdmin: 'María',
+        usuarioAdmin: 'maria',
+        claveHashAdmin: 'argon2id$maria',
+        deviceId: 'terminal-1',
+      });
+      const actorOrigen: ActorContexto = {
+        comercio_id: initOrigen.comercioId,
+        usuario_id: initOrigen.superadminId,
+        usuario_nombre: 'María',
+        rol: 'superadmin',
+        device_id: 'terminal-1',
+      };
+
+      const prodRemotoId = crearProducto(dbOrigen, actorOrigen, {
+        nombre: 'Cuaderno Universitario 84h',
+        codigoInterno: 'LS001',
+        costoCompraCentavos: 180000,
+        precioVentaCentavos: 350000,
+        stockMinimo: 12,
+        stockInicial: 30,
+        codigosBarras: ['7790001119991'],
+      });
+
+      const nubeSupabase = new NubeSimuladaEnMemoria();
+      const nubeFirebase = new NubeSimuladaEnMemoria();
+      const adaptadorMulti = new AdaptadorNubeMultiProveedor(
+        nubeSupabase,
+        nubeFirebase
+      );
+
+      // Subir a ambas nubes simultáneamente
+      await ejecutarPushDatos(dbOrigen, adaptadorMulti, actorOrigen);
+
+      // Simular que el usuario borró pos_local.db y se inicializó una base nueva con OTRO comercio_id aleatorio
+      const initNueva = inicializarComercioYSuperadmin(dbNueva, {
+        nombreComercio: 'Comercio Local POS',
+        nombreAdmin: 'María Superadmin',
+        usuarioAdmin: 'maria',
+        claveHashAdmin: 'argon2id$maria2',
+        deviceId: 'terminal-local-1',
+      });
+      expect(initNueva.comercioId).not.toBe(initOrigen.comercioId);
+
+      const actorNueva: ActorContexto = {
+        comercio_id: initNueva.comercioId,
+        usuario_id: initNueva.superadminId,
+        usuario_nombre: 'María Superadmin',
+        rol: 'superadmin',
+        device_id: 'terminal-local-1',
+      };
+
+      // Ejecutar Pull con forzarBajadaCompleta: debe descubrir y adoptar initOrigen.comercioId y descargar LS001
+      const resPull = await ejecutarPullDatos(
+        dbNueva,
+        adaptadorMulti,
+        actorNueva,
+        tmpDirNueva,
+        { forzarBajadaCompleta: true }
+      );
+      expect(resPull.errores).toHaveLength(0);
+      expect(resPull.registrosBajados).toBeGreaterThan(0);
+
+      const prodDescargado = dbNueva
+        .prepare(
+          'SELECT id, comercio_id, stock_minimo FROM productos WHERE id = ?'
+        )
+        .get(prodRemotoId) as
+        | { id: string; comercio_id: string; stock_minimo: number }
+        | undefined;
+      expect(prodDescargado).toBeDefined();
+      expect(prodDescargado!.comercio_id).toBe(initOrigen.comercioId);
+      expect(prodDescargado!.stock_minimo).toBe(12);
+      expect(
+        obtenerStockProducto(dbNueva, initOrigen.comercioId, prodRemotoId)
+      ).toBe(30);
+
+      // Probar vaciado remoto al resetear la base de datos
+      const resVaciar = await adaptadorMulti.vaciarDatosComercioRemoto({
+        comercioId: initOrigen.comercioId,
+        superadminIdConservar: initOrigen.superadminId,
+        listaPrecioIdConservar: initOrigen.listaPrecioId,
+      });
+      expect(resVaciar.tablasVaciadas).toBeGreaterThan(0);
+
+      const prodsEnSupabasePostWipe = await nubeSupabase.bajarRegistrosTabla(
+        'productos',
+        initOrigen.comercioId,
+        null
+      );
+      const prodsEnFirebasePostWipe = await nubeFirebase.bajarRegistrosTabla(
+        'productos',
+        initOrigen.comercioId,
+        null
+      );
+      expect(prodsEnSupabasePostWipe).toHaveLength(0);
+      expect(prodsEnFirebasePostWipe).toHaveLength(0);
+
+      // Validar reglas de seguridad de Firebase (Regla 8) y serialización de centavos enteros (Regla 2)
+      expect(
+        validarConfiguracionFirebaseCliente(
+          'mi-pos-ar',
+          '-----BEGIN PRIVATE KEY-----'
+        ).valida
+      ).toBe(false);
+      expect(
+        validarConfiguracionFirebaseCliente(
+          'mi-pos-ar',
+          'AIzaSyDummyPublicWebApiKey123456789'
+        ).valida
+      ).toBe(true);
+
+      const fields = serializarRegistroAFirestoreFields({
+        id: 'prod-1',
+        comercio_id: initOrigen.comercioId,
+        precio_venta: 350000,
+        created_at: '2026-10-26T00:00:00.000Z',
+        updated_at: '2026-10-26T00:00:00.000Z',
+        deleted_at: null,
+        device_id: 't1',
+      });
+      expect(fields.precio_venta?.integerValue).toBe('350000');
+      const roundtrip = deserializarFirestoreDocumentARegistro({ fields });
+      expect(roundtrip?.precio_venta).toBe(350000);
+    } finally {
+      dbOrigen.close();
+      dbNueva.close();
+      fs.rmSync(tmpDirOrigen, { recursive: true, force: true });
+      fs.rmSync(tmpDirNueva, { recursive: true, force: true });
     }
   });
 });

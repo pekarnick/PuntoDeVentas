@@ -34,6 +34,15 @@ import {
   type PagoVentaInput,
 } from '../domain/totales.ts';
 import { asegurarCentavos, type Centavos } from '../domain/dinero.ts';
+import {
+  determinarNotaCreditoArca,
+  determinarTipoComprobanteArca,
+  resolverPrecioProductoEnLista,
+  validarReceptorComprobanteArca,
+  type CondicionIva,
+  type EstadoFacturacionArca,
+  type TipoComprobanteFiscal,
+} from '../domain/arca_fase4.ts';
 import { validarCargoCuentaCorrienteCliente } from '../domain/gestion_fase3.ts';
 import { generarUuidV7 } from '../domain/uuid.ts';
 
@@ -208,6 +217,9 @@ export function ejecutarEnTransaccion<T>(
 export function inicializarComercioYSuperadmin(
   db: DatabaseSync,
   params: {
+    comercioId?: string;
+    superadminId?: string;
+    listaPrecioId?: string;
     nombreComercio: string;
     cuit?: string;
     condicionIva?: 'monotributo' | 'responsable_inscripto' | 'exento';
@@ -219,9 +231,9 @@ export function inicializarComercioYSuperadmin(
 ): { comercioId: string; superadminId: string; listaPrecioId: string } {
   return ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
-    const comercioId = generarUuidV7();
-    const superadminId = generarUuidV7();
-    const listaPrecioId = generarUuidV7();
+    const comercioId = params.comercioId ?? generarUuidV7();
+    const superadminId = params.superadminId ?? generarUuidV7();
+    const listaPrecioId = params.listaPrecioId ?? generarUuidV7();
 
     db.prepare(
       `INSERT INTO comercios (
@@ -512,15 +524,58 @@ export function crearProducto(
     );
     encolarSync(db, 'precios', precioId, 'insert', ahora);
 
-    for (const codigo of datos.codigosBarras ?? []) {
-      const cbId = generarUuidV7();
-      db.prepare(
-        `INSERT INTO codigos_barras (
-          id, comercio_id, producto_id, codigo,
-          created_at, updated_at, deleted_at, device_id, sync_status
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
-      ).run(cbId, actor.comercio_id, productoId, codigo.trim(), ahora, ahora, actor.device_id);
-      encolarSync(db, 'codigos_barras', cbId, 'insert', ahora);
+    const codigosUnicos = Array.from(
+      new Set(
+        (datos.codigosBarras ?? [])
+          .map((c) => c.trim())
+          .filter((c) => c.length > 0)
+      )
+    );
+
+    for (const codigo of codigosUnicos) {
+      const existenteCb = db
+        .prepare(
+          `SELECT id, producto_id, deleted_at FROM codigos_barras
+           WHERE comercio_id = ? AND codigo = ?
+           ORDER BY deleted_at IS NOT NULL ASC
+           LIMIT 1`
+        )
+        .get(actor.comercio_id, codigo) as
+        | { id: string; producto_id: string; deleted_at: string | null }
+        | undefined;
+
+      if (existenteCb && existenteCb.deleted_at === null) {
+        if (existenteCb.producto_id === productoId) {
+          continue;
+        }
+        throw new Error(
+          `El código de barras "${codigo}" ya está asignado a otro producto activo del catálogo.`
+        );
+      } else if (existenteCb && existenteCb.deleted_at !== null) {
+        db.prepare(
+          `UPDATE codigos_barras
+           SET producto_id = ?, deleted_at = NULL, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+           WHERE id = ?`
+        ).run(productoId, ahora, actor.device_id, existenteCb.id);
+        encolarSync(db, 'codigos_barras', existenteCb.id, 'update', ahora);
+      } else {
+        const cbId = generarUuidV7();
+        db.prepare(
+          `INSERT INTO codigos_barras (
+            id, comercio_id, producto_id, codigo,
+            created_at, updated_at, deleted_at, device_id, sync_status
+          ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+        ).run(
+          cbId,
+          actor.comercio_id,
+          productoId,
+          codigo,
+          ahora,
+          ahora,
+          actor.device_id
+        );
+        encolarSync(db, 'codigos_barras', cbId, 'insert', ahora);
+      }
     }
 
     if (datos.stockInicial && datos.stockInicial !== 0) {
@@ -774,23 +829,44 @@ export function registrarVenta(
       productoId: string;
       cantidad: number;
       descuentoCentavos?: Centavos;
+      varianteId?: string;
     }[];
     descuentoGlobalCentavos?: Centavos;
     pagos: readonly PagoVentaInput[];
     clienteId?: string;
     cajaSesionId?: string;
     canal?: 'escritorio' | 'web';
+    listaPrecioId?: string;
   }
 ): {
   ventaId: string;
   totalCentavos: Centavos;
   subtotalCentavos: Centavos;
+  tipoComprobante: TipoComprobanteFiscal;
+  estadoFacturacion: EstadoFacturacionArca;
 } {
   exigirPermiso(actor.rol, 'vender_y_caja');
 
   return ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
     const ventaId = generarUuidV7();
+
+    const comercioRow = db
+      .prepare(
+        `SELECT condicion_iva, arca_habilitada, arca_punto_venta, arca_tope_consumidor_final
+         FROM comercios
+         WHERE id = ? AND deleted_at IS NULL`
+      )
+      .get(actor.comercio_id) as
+      | {
+          condicion_iva: CondicionIva;
+          arca_habilitada: number;
+          arca_punto_venta: number;
+          arca_tope_consumidor_final: Centavos;
+        }
+      | undefined;
+
+    const arcaHabilitada = (comercioRow?.arca_habilitada ?? 0) === 1;
 
     const itemsInput: ItemVentaInput[] = params.items.map((it) => {
       const prod = db
@@ -822,11 +898,53 @@ export function registrarVenta(
         throw new Error(`Producto no encontrado o inactivo: ${it.productoId}`);
       }
 
+      let precioListaEspecifica: Centavos | undefined;
+      if (params.listaPrecioId) {
+        const filaPrecioLista = db
+          .prepare(
+            `SELECT precio_venta FROM precios
+             WHERE comercio_id = ? AND producto_id = ? AND lista_precio_id = ? AND deleted_at IS NULL`
+          )
+          .get(actor.comercio_id, prod.id, params.listaPrecioId) as
+          | { precio_venta: Centavos }
+          | undefined;
+        if (filaPrecioLista) {
+          precioListaEspecifica = filaPrecioLista.precio_venta;
+        }
+      }
+
+      let adicionalVarianteCentavos: Centavos = 0;
+      let sufijoVariante = '';
+      if (it.varianteId) {
+        const varRow = db
+          .prepare(
+            `SELECT nombre, precio_adicional FROM variantes
+             WHERE id = ? AND comercio_id = ? AND producto_id = ? AND deleted_at IS NULL AND activo = 1`
+          )
+          .get(it.varianteId, actor.comercio_id, prod.id) as
+          | { nombre: string; precio_adicional: Centavos }
+          | undefined;
+        if (varRow) {
+          adicionalVarianteCentavos = varRow.precio_adicional;
+          sufijoVariante = ` (${varRow.nombre})`;
+        }
+      }
+
+      const precioUnitarioAplicado = resolverPrecioProductoEnLista({
+        precioPredeterminadoCentavos: prod.precio_venta,
+        preciosPorLista:
+          params.listaPrecioId && precioListaEspecifica !== undefined
+            ? { [params.listaPrecioId]: precioListaEspecifica }
+            : undefined,
+        listaPrecioSeleccionadaId: params.listaPrecioId ?? null,
+        precioAdicionalVarianteCentavos: adicionalVarianteCentavos,
+      });
+
       return {
         producto_id: prod.id,
-        descripcion: prod.nombre,
+        descripcion: `${prod.nombre}${sufijoVariante}`,
         cantidad: it.cantidad,
-        precio_unitario: prod.precio_venta,
+        precio_unitario: precioUnitarioAplicado,
         costo_unitario: prod.costo_compra,
         descuento: it.descuentoCentavos ?? 0,
         alicuota_iva: prod.alicuota_iva,
@@ -842,29 +960,47 @@ export function registrarVenta(
 
     validarPagosVenta(params.pagos, resumen.total);
 
+    let clienteSeleccionado:
+      | {
+          id: string;
+          nombre: string;
+          cuit_dni: string | null;
+          condicion_iva: CondicionIva;
+          limite_credito: Centavos;
+        }
+      | undefined;
+
+    if (params.clienteId) {
+      clienteSeleccionado = db
+        .prepare(
+          `SELECT id, nombre, cuit_dni, condicion_iva, limite_credito
+           FROM clientes
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
+        )
+        .get(params.clienteId, actor.comercio_id) as
+        | {
+            id: string;
+            nombre: string;
+            cuit_dni: string | null;
+            condicion_iva: CondicionIva;
+            limite_credito: Centavos;
+          }
+        | undefined;
+
+      if (!clienteSeleccionado) {
+        throw new Error('Cliente seleccionado no encontrado o inactivo.');
+      }
+    }
+
     const montoCuentaCorriente = params.pagos
       .filter((p) => p.medio === 'cuenta_corriente')
       .reduce((acc, p) => acc + p.monto, 0);
 
     if (montoCuentaCorriente > 0) {
-      if (!params.clienteId) {
+      if (!params.clienteId || !clienteSeleccionado) {
         throw new Error(
           'Debe seleccionar un cliente para cobrar en cuenta corriente.'
         );
-      }
-
-      const cliente = db
-        .prepare(
-          `SELECT id, nombre, limite_credito
-           FROM clientes
-           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
-        )
-        .get(params.clienteId, actor.comercio_id) as
-        | { id: string; nombre: string; limite_credito: Centavos }
-        | undefined;
-
-      if (!cliente) {
-        throw new Error('Cliente seleccionado no encontrado o inactivo.');
       }
 
       const saldoRow = db
@@ -880,7 +1016,9 @@ export function registrarVenta(
       const valCc = validarCargoCuentaCorrienteCliente({
         saldoActualCentavos: asegurarCentavos(saldoRow?.saldo_pendiente ?? 0),
         nuevoCargoCentavos: asegurarCentavos(montoCuentaCorriente),
-        limiteCreditoCentavos: asegurarCentavos(cliente.limite_credito ?? 0),
+        limiteCreditoCentavos: asegurarCentavos(
+          clienteSeleccionado.limite_credito ?? 0
+        ),
       });
       if (!valCc.permitido) {
         throw new Error(
@@ -889,25 +1027,59 @@ export function registrarVenta(
       }
     }
 
+    const determinacionFiscal = determinarTipoComprobanteArca({
+      arcaHabilitada,
+      condicionIvaEmisor: comercioRow?.condicion_iva ?? 'monotributo',
+      condicionIvaReceptor:
+        clienteSeleccionado?.condicion_iva ?? 'consumidor_final',
+    });
+
+    if (arcaHabilitada) {
+      const valReceptor = validarReceptorComprobanteArca({
+        tipoComprobante: determinacionFiscal.tipoComprobante,
+        totalCentavos: resumen.total,
+        condicionIvaReceptor:
+          clienteSeleccionado?.condicion_iva ?? 'consumidor_final',
+        cuitDniReceptor: clienteSeleccionado?.cuit_dni ?? null,
+        nombreReceptor: clienteSeleccionado?.nombre ?? null,
+        topeConsumidorFinalCentavos:
+          comercioRow?.arca_tope_consumidor_final ?? 34448800,
+      });
+      if (!valReceptor.valido) {
+        throw new Error(
+          valReceptor.motivo ??
+            'RECEPTOR_ARCA_INVALIDO: Los datos del cliente no cumplen los requisitos fiscales de ARCA.'
+        );
+      }
+    }
+
+    const puntoVentaFiscal = arcaHabilitada
+      ? (comercioRow?.arca_punto_venta ?? 1)
+      : null;
+
     db.prepare(
       `INSERT INTO ventas (
-        id, comercio_id, fecha, usuario_id, cliente_id,
+        id, comercio_id, fecha, usuario_id, cliente_id, lista_precio_id,
         subtotal, descuento, total, estado, caja_sesion_id,
-        tipo_comprobante, canal, dispositivo_id, estado_facturacion,
+        tipo_comprobante, punto_venta, canal, dispositivo_id, estado_facturacion,
         created_at, updated_at, deleted_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completada', ?, 'ticket_no_fiscal', ?, ?, 'no_aplica', ?, ?, NULL, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completada', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
     ).run(
       ventaId,
       actor.comercio_id,
       ahora,
       actor.usuario_id,
       params.clienteId ?? null,
+      params.listaPrecioId ?? null,
       resumen.subtotal,
       resumen.descuento_global,
       resumen.total,
       params.cajaSesionId ?? null,
+      determinacionFiscal.tipoComprobante,
+      puntoVentaFiscal,
       params.canal ?? 'escritorio',
       actor.device_id,
+      determinacionFiscal.estadoFacturacionInicial,
       ahora,
       ahora,
       actor.device_id
@@ -1033,6 +1205,8 @@ export function registrarVenta(
       ventaId,
       totalCentavos: resumen.total,
       subtotalCentavos: resumen.subtotal,
+      tipoComprobante: determinacionFiscal.tipoComprobante,
+      estadoFacturacion: determinacionFiscal.estadoFacturacionInicial,
     };
   });
 }
@@ -1071,7 +1245,7 @@ export function anularVenta(
     const ahora = new Date().toISOString();
     const venta = db
       .prepare(
-        `SELECT id, estado, total, cliente_id FROM ventas
+        `SELECT id, estado, total, cliente_id, tipo_comprobante, estado_facturacion FROM ventas
          WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
       )
       .get(params.ventaId, actor.comercio_id) as
@@ -1080,6 +1254,8 @@ export function anularVenta(
           estado: 'completada' | 'anulada';
           total: Centavos;
           cliente_id: string | null;
+          tipo_comprobante: TipoComprobanteFiscal;
+          estado_facturacion: EstadoFacturacionArca;
         }
       | undefined;
 
@@ -1091,6 +1267,7 @@ export function anularVenta(
     }
 
     const autorizadorId = params.autorizador?.usuario_id ?? actor.usuario_id;
+    const notaCreditoTipo = determinarNotaCreditoArca(venta.tipo_comprobante);
 
     db.prepare(
       `UPDATE ventas
@@ -1099,6 +1276,7 @@ export function anularVenta(
            autorizada_por_id = ?,
            fecha_anulacion = ?,
            motivo_anulacion = ?,
+           nota_credito_tipo = COALESCE(nota_credito_tipo, ?),
            updated_at = ?,
            device_id = ?,
            sync_status = 'pendiente'
@@ -1108,6 +1286,7 @@ export function anularVenta(
       autorizadorId,
       ahora,
       params.motivo.trim(),
+      notaCreditoTipo,
       ahora,
       actor.device_id,
       params.ventaId,

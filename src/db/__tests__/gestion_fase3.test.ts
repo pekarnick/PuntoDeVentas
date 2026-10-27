@@ -350,6 +350,27 @@ describe('Fase 3 — Repositorios SQLite (Compras, Proveedores, Clientes Cta Cte
       )
       .get(comercioId, 'CUA-99') as { id: string };
     expect(obtenerStockProducto(db, comercioId, cuadernoRow.id)).toBe(8);
+
+    // Re-importar el mismo CSV y un producto distinto con código de barras repetido o "0"
+    // No debe lanzar UNIQUE constraint failed: codigos_barras.comercio_id, codigos_barras.codigo
+    const csvConCodigosRepetidos = [
+      'codigo_interno;nombre;costo_compra;precio_venta;stock_inicial;codigo_barras;categoria;marca',
+      'BOL-AZ;Bolígrafo Azul;750;1600;0;7791112223334;Librería;BIC',
+      'BOL-ROJ;Bolígrafo Rojo (comparte EAN en planilla);750;1600;5;7791112223334;Librería;BIC',
+      'SIN-EAN-1;Goma de Borrar Blanca;300;600;10;0;Librería;Dos Banderas',
+      'SIN-EAN-2;Sacapuntas Metal;400;800;12;0;Librería;Maped',
+    ].join('\n');
+
+    const resReimport = importarProductosDesdeCsv(db, actorSuperadmin, {
+      contenidoCsv: csvConCodigosRepetidos,
+      actualizarSiExisteCodigo: true,
+    });
+
+    expect(resReimport.creados).toBe(3);
+    expect(resReimport.actualizados).toBe(1);
+    expect(resReimport.errores.some((e) => e.includes('7791112223334'))).toBe(
+      true
+    );
   });
 
   it('genera Libro IVA Ventas/Compras en Excel (.xlsx) y ticket térmico ESC/POS sin exponer costo_compra (Regla 20)', () => {

@@ -306,7 +306,7 @@ interface VersionInfoQr {
   readonly alignmentCenters: readonly number[];
 }
 
-// Versiones 1 a 10 en nivel L (soporta hasta 271 bytes UTF-8)
+// Versiones 1 a 14 en nivel L (soporta hasta 458 bytes UTF-8, incluye QR oficial ARCA RG 4892/2020)
 const VERSIONES_QR_L: readonly VersionInfoQr[] = [
   { version: 1, size: 21, totalDataCodewords: 19, ecCodewordsPerBlock: 7, numBlocksGroup1: 1, dataCodewordsGroup1: 19, numBlocksGroup2: 0, dataCodewordsGroup2: 0, alignmentCenters: [] },
   { version: 2, size: 25, totalDataCodewords: 34, ecCodewordsPerBlock: 10, numBlocksGroup1: 1, dataCodewordsGroup1: 34, numBlocksGroup2: 0, dataCodewordsGroup2: 0, alignmentCenters: [6, 18] },
@@ -318,6 +318,10 @@ const VERSIONES_QR_L: readonly VersionInfoQr[] = [
   { version: 8, size: 49, totalDataCodewords: 194, ecCodewordsPerBlock: 24, numBlocksGroup1: 2, dataCodewordsGroup1: 97, numBlocksGroup2: 0, dataCodewordsGroup2: 0, alignmentCenters: [6, 24, 42] },
   { version: 9, size: 53, totalDataCodewords: 232, ecCodewordsPerBlock: 30, numBlocksGroup1: 2, dataCodewordsGroup1: 116, numBlocksGroup2: 0, dataCodewordsGroup2: 0, alignmentCenters: [6, 26, 46] },
   { version: 10, size: 57, totalDataCodewords: 274, ecCodewordsPerBlock: 18, numBlocksGroup1: 2, dataCodewordsGroup1: 68, numBlocksGroup2: 2, dataCodewordsGroup2: 69, alignmentCenters: [6, 28, 50] },
+  { version: 11, size: 61, totalDataCodewords: 324, ecCodewordsPerBlock: 20, numBlocksGroup1: 4, dataCodewordsGroup1: 81, numBlocksGroup2: 0, dataCodewordsGroup2: 0, alignmentCenters: [6, 30, 54] },
+  { version: 12, size: 65, totalDataCodewords: 370, ecCodewordsPerBlock: 24, numBlocksGroup1: 2, dataCodewordsGroup1: 92, numBlocksGroup2: 2, dataCodewordsGroup2: 93, alignmentCenters: [6, 32, 58] },
+  { version: 13, size: 69, totalDataCodewords: 428, ecCodewordsPerBlock: 26, numBlocksGroup1: 4, dataCodewordsGroup1: 107, numBlocksGroup2: 0, dataCodewordsGroup2: 0, alignmentCenters: [6, 34, 62] },
+  { version: 14, size: 73, totalDataCodewords: 461, ecCodewordsPerBlock: 30, numBlocksGroup1: 3, dataCodewordsGroup1: 115, numBlocksGroup2: 1, dataCodewordsGroup2: 116, alignmentCenters: [6, 26, 46, 66] },
 ];
 
 const GF_EXP = new Uint8Array(512);
@@ -465,19 +469,16 @@ function codificarDatosQrNivelL(bytes: Uint8Array): {
 }
 
 /**
- * Genera la matriz booleana y el SVG de un código QR estándar para la URL pública de Venta Móvil.
- * Valida previamente la Regla 19 (nunca claves ni tokens en la URL).
+ * Genera la matriz booleana y el SVG de un código QR estándar a partir de bytes UTF-8.
  */
-export function generarQrSvgUrlPublica(
-  urlPublica: string,
-  tamanoPx = 240
+export function generarQrSvgDesdeBytes(
+  bytes: Uint8Array,
+  tamanoPx = 240,
+  ariaLabel = 'Código QR Venta Móvil'
 ): {
-  urlValidada: string;
   matriz: readonly (readonly boolean[])[];
   svg: string;
 } {
-  const urlValidada = validarUrlPublicaVentaMovil(urlPublica);
-  const bytes = new TextEncoder().encode(urlValidada);
   const { info, codewords } = codificarDatosQrNivelL(bytes);
   const n = info.size;
 
@@ -597,11 +598,37 @@ export function generarQrSvgUrlPublica(
     }
   }
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalUnidades} ${totalUnidades}" width="${tamanoPx}" height="${tamanoPx}" shape-rendering="crispEdges" role="img" aria-label="Código QR Venta Móvil"><rect width="100%" height="100%" fill="#ffffff"/><path d="${paths.join('')}" fill="#0f172a"/></svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalUnidades} ${totalUnidades}" width="${tamanoPx}" height="${tamanoPx}" shape-rendering="crispEdges" role="img" aria-label="${ariaLabel}"><rect width="100%" height="100%" fill="#ffffff"/><path d="${paths.join('')}" fill="#0f172a"/></svg>`;
+
+  return {
+    matriz: modulos,
+    svg,
+  };
+}
+
+/**
+ * Genera la matriz booleana y el SVG de un código QR estándar para la URL pública de Venta Móvil.
+ * Valida previamente la Regla 19 (nunca claves ni tokens en la URL).
+ */
+export function generarQrSvgUrlPublica(
+  urlPublica: string,
+  tamanoPx = 240
+): {
+  urlValidada: string;
+  matriz: readonly (readonly boolean[])[];
+  svg: string;
+} {
+  const urlValidada = validarUrlPublicaVentaMovil(urlPublica);
+  const bytes = new TextEncoder().encode(urlValidada);
+  const { matriz, svg } = generarQrSvgDesdeBytes(
+    bytes,
+    tamanoPx,
+    'Código QR Venta Móvil'
+  );
 
   return {
     urlValidada,
-    matriz: modulos,
+    matriz,
     svg,
   };
 }

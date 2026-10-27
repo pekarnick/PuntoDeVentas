@@ -4,7 +4,11 @@
  */
 
 import { aMiliunidades } from './cantidades.ts';
-import { asegurarCentavos, type Centavos } from './dinero.ts';
+import {
+  asegurarCentavos,
+  formatearMonedaARS,
+  type Centavos,
+} from './dinero.ts';
 
 export type AlicuotaIva = 0 | 10.5 | 21 | 27;
 
@@ -237,6 +241,59 @@ export function calcularTotalesVenta(
   };
 }
 
+export interface EstadoPagosCombinados {
+  readonly totalACobrar: Centavos;
+  readonly sumaPagos: Centavos;
+  readonly diferenciaCentavos: Centavos;
+  readonly faltaCubrirCentavos: Centavos;
+  readonly excedenteCentavos: Centavos;
+  readonly coincideConTotal: boolean;
+  readonly todosMontosPositivos: boolean;
+  readonly esValidoParaCobrar: boolean;
+}
+
+/**
+ * Evalúa múltiples medios de pago combinados verificando que todos los importes
+ * sean positivos y que su suma coincida exactamente con el monto total a cobrar.
+ */
+export function evaluarPagosCombinados(
+  pagos: readonly PagoVentaInput[],
+  totalACobrar: Centavos
+): EstadoPagosCombinados {
+  asegurarCentavos(totalACobrar, 'totalACobrar');
+  let sumaPagos = 0;
+  let todosMontosPositivos = pagos.length > 0;
+
+  for (const p of pagos) {
+    asegurarCentavos(p.monto, `pago (${p.medio})`);
+    if (p.monto <= 0) {
+      todosMontosPositivos = false;
+    }
+    sumaPagos += p.monto;
+  }
+
+  const diferenciaCentavos = totalACobrar - sumaPagos;
+  const faltaCubrirCentavos = Math.max(0, diferenciaCentavos);
+  const excedenteCentavos = Math.max(0, -diferenciaCentavos);
+  const coincideConTotal = sumaPagos === totalACobrar;
+  const esValidoParaCobrar =
+    totalACobrar > 0 &&
+    pagos.length > 0 &&
+    todosMontosPositivos &&
+    coincideConTotal;
+
+  return {
+    totalACobrar,
+    sumaPagos,
+    diferenciaCentavos,
+    faltaCubrirCentavos,
+    excedenteCentavos,
+    coincideConTotal,
+    todosMontosPositivos,
+    esValidoParaCobrar,
+  };
+}
+
 /**
  * Valida que la suma de pagos mixtos coincida exactamente con el total de la venta.
  */
@@ -244,23 +301,20 @@ export function validarPagosVenta(
   pagos: readonly PagoVentaInput[],
   totalVenta: Centavos
 ): void {
-  asegurarCentavos(totalVenta, 'totalVenta');
+  const estado = evaluarPagosCombinados(pagos, totalVenta);
   if (pagos.length === 0) {
     throw new Error('Debe indicar al menos un medio de pago.');
   }
 
-  let sumaPagos = 0;
   for (const p of pagos) {
-    asegurarCentavos(p.monto, `pago (${p.medio})`);
     if (p.monto <= 0) {
       throw new Error(`El monto del pago con ${p.medio} debe ser mayor a cero.`);
     }
-    sumaPagos += p.monto;
   }
 
-  if (sumaPagos !== totalVenta) {
+  if (!estado.coincideConTotal) {
     throw new Error(
-      `La suma de los pagos (${sumaPagos}) no coincide con el total de la venta (${totalVenta}).`
+      `La suma de los pagos (${formatearMonedaARS(estado.sumaPagos)}) no coincide con el total de la venta (${formatearMonedaARS(totalVenta)}).`
     );
   }
 }

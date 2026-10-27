@@ -16,6 +16,7 @@ import {
   sanitizarProductoCatalogoParaPOS,
 } from '../../domain/index.ts';
 import { ejecutarAccionPosLocal } from '../servidor_local_dev.ts';
+import { App } from '../../App.tsx';
 import { PanelProductosStock } from '../../features/productos/PanelProductosStock.tsx';
 import { PanelVentaPOS } from '../../features/venta/PanelVentaPOS.tsx';
 import {
@@ -467,5 +468,41 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
         // En Windows el archivo .db abierto puede seguir bloqueado hasta cerrar el proceso
       }
     }
+  });
+
+  it('pagina el catálogo de productos de a 10 por página, incluye selector de Modo Oscuro / Claro y marca GAR al pie', () => {
+    const quinceProductos = Array.from({ length: 15 }, (_, idx) => ({
+      id: `prod-pag-${idx + 1}`,
+      nombre: `Producto Paginado #${idx + 1}`,
+      codigo_interno: `PAG-${idx + 1}`,
+      codigos_barras: [`77900000000${String(idx + 1).padStart(2, '0')}`],
+      unidad: 'unidad' as const,
+      permite_decimales: false,
+      costo_compra: 100000 as never,
+      precio_venta: 200000 as never,
+      stock_minimo: 5,
+      stock_actual: 20,
+      boton_rapido: false,
+      imagen_path: null,
+      imagen_hash: null,
+    }));
+
+    const htmlPaginado = renderToStaticMarkup(
+      React.createElement(PanelProductosStock, {
+        rolActivo: 'superadmin',
+        productosIniciales: quinceProductos,
+      })
+    );
+
+    expect(htmlPaginado).toContain('<strong>Producto Paginado #1</strong>');
+    expect(htmlPaginado).toContain('<strong>Producto Paginado #10</strong>');
+    expect(htmlPaginado).not.toContain('<strong>Producto Paginado #11</strong>');
+    expect(htmlPaginado).toContain('1–10');
+    expect(htmlPaginado).toContain('10 por página');
+
+    const htmlApp = renderToStaticMarkup(React.createElement(App));
+    expect(htmlApp).toContain('Modo Oscuro');
+    expect(htmlApp).toContain('GAR');
+    expect(htmlApp).toContain('Guillermo Adolfo Rohde');
   });
 });

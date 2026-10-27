@@ -31,7 +31,6 @@ import {
 } from './productos_repo.ts';
 import {
   actualizarRolOEstadoUsuario,
-  anularVenta,
   crearProducto,
   crearUsuario,
   inicializarComercioYSuperadmin,
@@ -46,20 +45,28 @@ import {
   resetearClaveUsuario,
 } from './usuarios_auth_repo.ts';
 import {
+  AdaptadorFirebaseFirestoreHttp,
+  AdaptadorNubeMultiProveedor,
   AdaptadorSupabaseHttp,
+  COMERCIO_ID_RESPALDO_CONOCIDO,
   NubeSinConfigurar,
   ejecutarCicloSincronizacionCompleto,
   ejecutarPullDatos,
   ejecutarPushDatos,
   guardarConfiguracionSistema,
+  guardarIdentidadComercioPersistida,
+  leerIdentidadComercioPersistida,
   obtenerConfiguracionSistema,
   obtenerResumenEstadoSyncDb,
   type AdaptadorNubeSupabase,
+  type ProveedorNubeSync,
 } from '../sync/motor_sync.ts';
 import {
   calcularEspacioImagenesLocal,
   procesarColaSincronizacionImagenes,
+  sincronizarColaLocalImagenesSubida,
 } from '../sync/imagenes_sync.ts';
+import { guardarImagenProductoLocal } from './imagenes_repo.ts';
 import {
   crearBackupBaseDatosLocal,
   ejecutarBackupDiarioAutomaticoSiCorresponde,
@@ -103,7 +110,33 @@ import {
   revocarSesionMovil,
   validarYRenovarSesionMovil,
 } from './venta_movil_repo.ts';
-import type { ItemPedidoMovilInput, PagoVentaInput } from '@pos/domain';
+import {
+  AdaptadorArcaHomologacionLocal,
+  anularVentaConNotaCreditoArca,
+  asignarPrecioProductoEnLista,
+  crearComboPromocion,
+  crearListaPrecio,
+  crearVarianteProducto,
+  emitirComprobanteArcaVenta,
+  guardarConfiguracionArca,
+  listarCombosComercio,
+  listarListasPrecio,
+  listarVariantesComercio,
+  obtenerComprobanteFiscalImprimibleDb,
+  obtenerConfiguracionArca,
+  obtenerInformeComprobantesArca,
+  reintentarComprobantesArcaPendientes,
+  resolverEscaneoBalanzaEnCatalogo,
+  venderComboPromocion,
+} from './arca_fase4_repo.ts';
+import type {
+  AmbienteArca,
+  CondicionIva,
+  EstadoFacturacionArca,
+  ItemPedidoMovilInput,
+  PagoVentaInput,
+  ProveedorArca,
+} from '../../packages/domain/src/index.ts';
 
 export const RUTA_DB_POR_DEFECTO = path.resolve(
   process.cwd(),
@@ -128,15 +161,38 @@ function resolverAdaptadorSync(
   comercioId: string
 ): AdaptadorNubeSupabase {
   const cfg = obtenerConfiguracionSistema(db, comercioId);
-  if (cfg.supabase_url && cfg.supabase_anon_key) {
-    return new AdaptadorSupabaseHttp({
-      supabaseUrl: cfg.supabase_url,
-      supabaseAnonKey: cfg.supabase_anon_key,
-      comercioId,
-      rolUsuario: 'superadmin',
-    });
+  const tieneSupabase = Boolean(cfg.supabase_url && cfg.supabase_anon_key);
+  const tieneFirebase = Boolean(cfg.firebase_project_id && cfg.firebase_api_key);
+
+  const adaptadorSupabase = tieneSupabase
+    ? new AdaptadorSupabaseHttp({
+        supabaseUrl: cfg.supabase_url!,
+        supabaseAnonKey: cfg.supabase_anon_key!,
+        comercioId,
+        rolUsuario: 'superadmin',
+      })
+    : null;
+
+  const adaptadorFirebase = tieneFirebase
+    ? new AdaptadorFirebaseFirestoreHttp(
+        cfg.firebase_project_id!,
+        cfg.firebase_api_key!
+      )
+    : null;
+
+  if (cfg.proveedor_nube === 'firebase') {
+    return adaptadorFirebase ?? adaptadorSupabase ?? nubeSinConfigurar;
   }
-  return nubeSinConfigurar;
+  if (cfg.proveedor_nube === 'ambos') {
+    if (adaptadorSupabase && adaptadorFirebase) {
+      return new AdaptadorNubeMultiProveedor(
+        adaptadorSupabase,
+        adaptadorFirebase
+      );
+    }
+    return adaptadorSupabase ?? adaptadorFirebase ?? nubeSinConfigurar;
+  }
+  return adaptadorSupabase ?? adaptadorFirebase ?? nubeSinConfigurar;
 }
 
 export function obtenerConexionLocalDisco(
@@ -153,7 +209,7 @@ export function obtenerConexionLocalDisco(
   fs.mkdirSync(directorio, { recursive: true });
 
   const db = crearBaseDatos(rutaPersonalizada);
-  asegurarDatosInicialesSiVacia(db);
+  asegurarDatosInicialesSiVacia(db, directorio);
   limpiarProductosDemoResiduales(db);
   sincronizarWalADisco(db);
 
@@ -196,7 +252,10 @@ function limpiarProductosDemoResiduales(db: DatabaseSync): void {
   }
 }
 
-function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
+function asegurarDatosInicialesSiVacia(
+  db: DatabaseSync,
+  directorioBaseDatos: string = path.dirname(RUTA_DB_POR_DEFECTO)
+): void {
   const comercioExistente = db
     .prepare('SELECT id FROM comercios WHERE deleted_at IS NULL LIMIT 1')
     .get() as { id: string } | undefined;
@@ -205,8 +264,14 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
     return;
   }
 
+  const persistida = leerIdentidadComercioPersistida(directorioBaseDatos);
   const optsArgon = { m: 4096, t: 2, p: 1 } as const;
-  inicializarComercioYSuperadmin(db, {
+  const creado = inicializarComercioYSuperadmin(db, {
+    comercioId: persistida?.comercio_id ?? COMERCIO_ID_RESPALDO_CONOCIDO,
+    superadminId:
+      persistida?.superadmin_id ?? '01a15523-8a7c-72f8-b204-e9024dcdecd1',
+    listaPrecioId:
+      persistida?.lista_precio_id ?? '01a15523-8a7c-72f9-bee7-fffea53d4571',
     nombreComercio: 'Comercio Local POS',
     cuit: '20-12345678-6',
     condicionIva: 'monotributo',
@@ -215,6 +280,27 @@ function asegurarDatosInicialesSiVacia(db: DatabaseSync): void {
     claveHashAdmin: hashearClaveArgon2id('Admin1234', optsArgon),
     deviceId: 'terminal-local-1',
   });
+
+  if (persistida?.supabase_url && persistida?.supabase_anon_key) {
+    const ahora = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO configuracion_sistema (
+        comercio_id, supabase_url, supabase_anon_key,
+        sync_automatico_habilitado, sync_intervalo_minutos,
+        carpeta_backups, backup_diario_habilitado,
+        ultimo_backup_at, ultimo_backup_archivo, updated_at
+      ) VALUES (?, ?, ?, 1, 5, 'backups', 1, NULL, NULL, ?)
+      ON CONFLICT(comercio_id) DO UPDATE SET
+        supabase_url = excluded.supabase_url,
+        supabase_anon_key = excluded.supabase_anon_key,
+        updated_at = excluded.updated_at`
+    ).run(
+      creado.comercioId,
+      persistida.supabase_url,
+      persistida.supabase_anon_key,
+      ahora
+    );
+  }
 }
 
 function obtenerActorPorRol(db: DatabaseSync, rol: RolUsuario): ActorContexto {
@@ -383,6 +469,11 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
   return { catalogoVenta, catalogoAdmin };
 }
 
+function extraerBufferDesdeBase64(imagenBase64: string): Buffer {
+  const limpio = imagenBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '').trim();
+  return Buffer.from(limpio, 'base64');
+}
+
 /**
  * Ejecuta una acción RPC solicitada por el frontend contra la base SQLite local en disco.
  */
@@ -420,6 +511,9 @@ export function ejecutarAccionPosLocal(
         .prepare(
           `SELECT
             v.id, v.fecha, v.total, v.estado, v.motivo_anulacion,
+            v.tipo_comprobante, v.punto_venta, v.numero_comprobante,
+            v.cae, v.cae_vencimiento, v.estado_facturacion,
+            v.nota_credito_tipo, v.nota_credito_cae,
             u.nombre AS cajero_nombre,
             au.nombre AS autorizada_por_nombre
            FROM ventas v
@@ -427,7 +521,7 @@ export function ejecutarAccionPosLocal(
            LEFT JOIN usuarios au ON au.id = v.autorizada_por_id
            WHERE v.comercio_id = ? AND v.deleted_at IS NULL
            ORDER BY v.fecha DESC
-           LIMIT 20`
+           LIMIT 200`
         )
         .all(actor.comercio_id) as unknown as Array<{
         id: string;
@@ -435,6 +529,14 @@ export function ejecutarAccionPosLocal(
         total: number;
         estado: 'completada' | 'anulada';
         motivo_anulacion: string | null;
+        tipo_comprobante: string;
+        punto_venta: number | null;
+        numero_comprobante: number | null;
+        cae: string | null;
+        cae_vencimiento: string | null;
+        estado_facturacion: string;
+        nota_credito_tipo: string | null;
+        nota_credito_cae: string | null;
         cajero_nombre: string;
         autorizada_por_nombre: string | null;
       }>;
@@ -483,6 +585,10 @@ export function ejecutarAccionPosLocal(
           actor.rol === 'superadmin'
             ? obtenerConfigVentaMovil(db, actor.comercio_id)
             : null,
+        configArca: obtenerConfiguracionArca(db, actor.comercio_id),
+        listasPrecio: listarListasPrecio(db, actor.comercio_id),
+        variantes: listarVariantesComercio(db, actor.comercio_id),
+        combos: listarCombosComercio(db, actor.comercio_id),
         historialBackups:
           actor.rol === 'superadmin'
             ? listarHistorialBackups(db, actor.comercio_id)
@@ -527,12 +633,33 @@ export function ejecutarAccionPosLocal(
           : [],
         stockInicial: Number(payload.stockInicial ?? 0),
       });
+
+      if (
+        typeof payload.imagenBase64 === 'string' &&
+        payload.imagenBase64.trim().length > 0
+      ) {
+        const dirBase = path.dirname(rutaActivaDb);
+        const entradaBuffer = extraerBufferDesdeBase64(payload.imagenBase64);
+        return guardarImagenProductoLocal(db, actor, {
+          productoId,
+          entradaBuffer,
+          nombreArchivoOriginal: payload.nombreArchivoImagen
+            ? String(payload.nombreArchivoImagen)
+            : undefined,
+          directorioBase: dirBase,
+        }).then((resImg) => {
+          sincronizarColaLocalImagenesSubida(db, actor.comercio_id);
+          return { productoId, imagen: resImg };
+        });
+      }
+
       return { productoId };
     }
 
     case 'actualizar_producto': {
+      const productoId = String(payload.productoId);
       actualizarProductoYPrecio(db, actor, {
-        productoId: String(payload.productoId),
+        productoId,
         nombre: payload.nombre !== undefined ? String(payload.nombre) : undefined,
         costoCompraCentavos:
           payload.costoCompraCentavos !== undefined
@@ -552,7 +679,48 @@ export function ejecutarAccionPosLocal(
             : undefined,
         motivo: payload.motivo ? String(payload.motivo) : undefined,
       });
+
+      if (
+        typeof payload.imagenBase64 === 'string' &&
+        payload.imagenBase64.trim().length > 0
+      ) {
+        const dirBase = path.dirname(rutaActivaDb);
+        const entradaBuffer = extraerBufferDesdeBase64(payload.imagenBase64);
+        return guardarImagenProductoLocal(db, actor, {
+          productoId,
+          entradaBuffer,
+          nombreArchivoOriginal: payload.nombreArchivoImagen
+            ? String(payload.nombreArchivoImagen)
+            : undefined,
+          directorioBase: dirBase,
+        }).then((resImg) => {
+          sincronizarColaLocalImagenesSubida(db, actor.comercio_id);
+          return { ok: true, imagen: resImg };
+        });
+      }
+
       return { ok: true };
+    }
+
+    case 'subir_imagen_producto': {
+      const productoId = String(payload.productoId ?? '').trim();
+      const imagenBase64 = String(payload.imagenBase64 ?? '').trim();
+      if (!productoId || !imagenBase64) {
+        throw new Error('Se requiere el producto y el archivo de imagen.');
+      }
+      const dirBase = path.dirname(rutaActivaDb);
+      const entradaBuffer = extraerBufferDesdeBase64(imagenBase64);
+      return guardarImagenProductoLocal(db, actor, {
+        productoId,
+        entradaBuffer,
+        nombreArchivoOriginal: payload.nombreArchivoImagen
+          ? String(payload.nombreArchivoImagen)
+          : undefined,
+        directorioBase: dirBase,
+      }).then((resImg) => {
+        sincronizarColaLocalImagenesSubida(db, actor.comercio_id);
+        return resImg;
+      });
     }
 
     case 'agregar_codigo_barras': {
@@ -599,11 +767,13 @@ export function ejecutarAccionPosLocal(
           productoId: string;
           cantidad: number;
           descuentoCentavos?: number;
+          varianteId?: string;
         }>
       ).map((it) => ({
         productoId: String(it.productoId),
         cantidad: Number(it.cantidad),
         descuentoCentavos: Number(it.descuentoCentavos ?? 0),
+        varianteId: it.varianteId ? String(it.varianteId) : undefined,
       }));
 
       const pagos = (
@@ -619,7 +789,23 @@ export function ejecutarAccionPosLocal(
         pagos,
         clienteId: payload.clienteId ? String(payload.clienteId) : undefined,
         cajaSesionId: sesionAbierta?.id,
+        listaPrecioId: payload.listaPrecioId
+          ? String(payload.listaPrecioId)
+          : undefined,
       });
+
+      const adaptadorArca = new AdaptadorArcaHomologacionLocal();
+      if (payload.sinConexion) {
+        adaptadorArca.fijarConectado(false);
+      }
+      if (resultado.estadoFacturacion === 'pendiente' && !payload.diferirEmisionArca) {
+        void emitirComprobanteArcaVenta(
+          db,
+          actor,
+          resultado.ventaId,
+          adaptadorArca
+        );
+      }
 
       const datosTicket = obtenerDatosTicketDeVentaDb(
         db,
@@ -662,7 +848,7 @@ export function ejecutarAccionPosLocal(
         };
       }
 
-      anularVenta(db, actor, {
+      void anularVentaConNotaCreditoArca(db, actor, {
         ventaId: String(payload.ventaId),
         motivo: String(payload.motivo ?? ''),
         autorizador,
@@ -799,7 +985,12 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'guardar_configuracion_sistema': {
-      return guardarConfiguracionSistema(db, actor, {
+      const dirBase = path.dirname(rutaActivaDb);
+      const cfgGuardada = guardarConfiguracionSistema(db, actor, {
+        proveedorNube:
+          payload.proveedorNube !== undefined
+            ? (payload.proveedorNube as ProveedorNubeSync)
+            : undefined,
         supabaseUrl:
           payload.supabaseUrl !== undefined
             ? (payload.supabaseUrl as string | null)
@@ -807,6 +998,14 @@ export function ejecutarAccionPosLocal(
         supabaseAnonKey:
           payload.supabaseAnonKey !== undefined
             ? (payload.supabaseAnonKey as string | null)
+            : undefined,
+        firebaseProjectId:
+          payload.firebaseProjectId !== undefined
+            ? (payload.firebaseProjectId as string | null)
+            : undefined,
+        firebaseApiKey:
+          payload.firebaseApiKey !== undefined
+            ? (payload.firebaseApiKey as string | null)
             : undefined,
         syncAutomaticoHabilitado:
           payload.syncAutomaticoHabilitado !== undefined
@@ -825,6 +1024,13 @@ export function ejecutarAccionPosLocal(
             ? Boolean(payload.backupDiarioHabilitado)
             : undefined,
       });
+      guardarIdentidadComercioPersistida(dirBase, {
+        comercio_id: cfgGuardada.comercio_id,
+        supabase_url: cfgGuardada.supabase_url,
+        supabase_anon_key: cfgGuardada.supabase_anon_key,
+      });
+      sincronizarWalADisco(db);
+      return cfgGuardada;
     }
 
     case 'crear_backup_manual': {
@@ -847,9 +1053,47 @@ export function ejecutarAccionPosLocal(
 
     case 'resetear_base_datos': {
       const dirBase = path.dirname(rutaActivaDb);
+      const vaciarNube =
+        payload.vaciarSupabaseTambien !== undefined
+          ? Boolean(payload.vaciarSupabaseTambien)
+          : true;
       const res = resetearBaseDatosAFabrica(db, actor, dirBase);
+      const cfg = obtenerConfiguracionSistema(db, actor.comercio_id);
+      guardarIdentidadComercioPersistida(dirBase, {
+        comercio_id: actor.comercio_id,
+        superadmin_id: res.superadminId,
+        lista_precio_id: res.listaPrecioId,
+        supabase_url: cfg.supabase_url,
+        supabase_anon_key: cfg.supabase_anon_key,
+      });
       sincronizarWalADisco(db);
-      return res;
+
+      if (!vaciarNube) {
+        return { ...res, nubeVaciada: false, tablasRemotasVaciadas: 0 };
+      }
+
+      const adaptador = resolverAdaptadorSync(db, actor.comercio_id);
+      return (async () => {
+        let tablasRemotasVaciadas = 0;
+        let nubeVaciada = false;
+        const disponible = await adaptador.estaDisponible();
+        if (disponible && adaptador.vaciarDatosComercioRemoto) {
+          const resRemoto = await adaptador.vaciarDatosComercioRemoto({
+            comercioId: actor.comercio_id,
+            superadminIdConservar: res.superadminId,
+            listaPrecioIdConservar: res.listaPrecioId,
+          });
+          tablasRemotasVaciadas = resRemoto.tablasVaciadas;
+          nubeVaciada = true;
+          await ejecutarPushDatos(db, adaptador, actor);
+        }
+        sincronizarWalADisco(db);
+        return {
+          ...res,
+          nubeVaciada,
+          tablasRemotasVaciadas,
+        };
+      })();
     }
 
     case 'exportar_todo_excel': {
@@ -885,15 +1129,23 @@ export function ejecutarAccionPosLocal(
       const dirBase = path.dirname(rutaActivaDb);
       const adaptador = resolverAdaptadorSync(db, actor.comercio_id);
       return (async () => {
-        const pull = await ejecutarPullDatos(db, adaptador, actor, dirBase);
+        const pull = await ejecutarPullDatos(db, adaptador, actor, dirBase, {
+          forzarBajadaCompleta: true,
+        });
+        const comercioIdFinal =
+          (
+            db
+              .prepare(`SELECT id FROM comercios WHERE deleted_at IS NULL LIMIT 1`)
+              .get() as { id: string } | undefined
+          )?.id ?? actor.comercio_id;
         const imagenes = await procesarColaSincronizacionImagenes(db, adaptador, {
-          comercioId: actor.comercio_id,
+          comercioId: comercioIdFinal,
           directorioBaseDatos: dirBase,
         });
         const online = await adaptador.estaDisponible();
         const estadoUI = obtenerResumenEstadoSyncDb(
           db,
-          actor.comercio_id,
+          comercioIdFinal,
           !online
         );
         sincronizarWalADisco(db);
@@ -914,6 +1166,24 @@ export function ejecutarAccionPosLocal(
         sincronizarWalADisco(db);
         return res;
       })();
+    }
+
+    case 'obtener_sql_migracion_supabase': {
+      const dirMig = path.resolve(process.cwd(), 'supabase', 'migrations');
+      const m002 = fs.existsSync(path.join(dirMig, '002_venta_movil_rpc.sql'))
+        ? fs.readFileSync(path.join(dirMig, '002_venta_movil_rpc.sql'), 'utf-8')
+        : '';
+      const m003 = fs.existsSync(
+        path.join(dirMig, '003_arca_y_extras_fase4.sql')
+      )
+        ? fs.readFileSync(
+            path.join(dirMig, '003_arca_y_extras_fase4.sql'),
+            'utf-8'
+          )
+        : '';
+      return {
+        sql: `${m002}\n\n${m003}`.trim(),
+      };
     }
 
     case 'crear_categoria': {
@@ -1259,6 +1529,185 @@ export function ejecutarAccionPosLocal(
       return {
         ventas: listarVentasPropiasDelDiaMovil(db, comercioId, usuarioId),
       };
+    }
+
+    // =========================================================================
+    // Fase 4: Facturación Electrónica ARCA y Extras (Listas, Variantes, Combos, Balanzas)
+    // =========================================================================
+
+    case 'obtener_config_arca': {
+      return obtenerConfiguracionArca(db, actor.comercio_id);
+    }
+
+    case 'guardar_configuracion_arca': {
+      const res = guardarConfiguracionArca(db, actor, {
+        arcaHabilitada: Boolean(payload.arcaHabilitada),
+        razonSocial:
+          payload.razonSocial !== undefined
+            ? String(payload.razonSocial)
+            : undefined,
+        cuit: payload.cuit !== undefined ? String(payload.cuit) : undefined,
+        condicionIva: payload.condicionIva as CondicionIva | undefined,
+        domicilio:
+          payload.domicilio !== undefined
+            ? String(payload.domicilio)
+            : undefined,
+        puntoVenta:
+          payload.puntoVenta !== undefined
+            ? Number(payload.puntoVenta)
+            : undefined,
+        ambiente: payload.ambiente as AmbienteArca | undefined,
+        proveedor: payload.proveedor as ProveedorArca | undefined,
+        topeConsumidorFinalCentavos:
+          payload.topeConsumidorFinalCentavos !== undefined
+            ? Number(payload.topeConsumidorFinalCentavos)
+            : undefined,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'emitir_comprobante_arca_venta': {
+      const adaptador = new AdaptadorArcaHomologacionLocal();
+      if (payload.sinConexion) {
+        adaptador.fijarConectado(false);
+      }
+      return emitirComprobanteArcaVenta(
+        db,
+        actor,
+        String(payload.ventaId),
+        adaptador
+      ).then((r) => {
+        sincronizarWalADisco(db);
+        return r;
+      });
+    }
+
+    case 'reintentar_pendientes_arca': {
+      const adaptador = new AdaptadorArcaHomologacionLocal();
+      if (payload.sinConexion) {
+        adaptador.fijarConectado(false);
+      }
+      return reintentarComprobantesArcaPendientes(db, actor, adaptador).then(
+        (r) => {
+          sincronizarWalADisco(db);
+          return r;
+        }
+      );
+    }
+
+    case 'obtener_comprobante_fiscal_imprimible': {
+      return obtenerComprobanteFiscalImprimibleDb(
+        db,
+        actor.comercio_id,
+        String(payload.ventaId)
+      );
+    }
+
+    case 'obtener_informe_comprobantes_arca': {
+      return obtenerInformeComprobantesArca(db, actor.comercio_id, {
+        estadoFacturacion: payload.estadoFacturacion as
+          | EstadoFacturacionArca
+          | 'todos'
+          | undefined,
+        desdeIso: payload.desdeIso ? String(payload.desdeIso) : undefined,
+        hastaIso: payload.hastaIso ? String(payload.hastaIso) : undefined,
+      });
+    }
+
+    case 'crear_lista_precio': {
+      const id = crearListaPrecio(db, actor, {
+        nombre: String(payload.nombre ?? ''),
+        porcentajeSobreMostrador:
+          payload.porcentajeSobreMostrador !== undefined
+            ? Number(payload.porcentajeSobreMostrador)
+            : undefined,
+      });
+      sincronizarWalADisco(db);
+      return { id, listasPrecio: listarListasPrecio(db, actor.comercio_id) };
+    }
+
+    case 'asignar_precio_en_lista': {
+      asignarPrecioProductoEnLista(db, actor, {
+        productoId: String(payload.productoId),
+        listaPrecioId: String(payload.listaPrecioId),
+        precioVentaCentavos: Number(payload.precioVentaCentavos ?? 0),
+      });
+      sincronizarWalADisco(db);
+      return { ok: true, listasPrecio: listarListasPrecio(db, actor.comercio_id) };
+    }
+
+    case 'crear_variante_producto': {
+      const id = crearVarianteProducto(db, actor, {
+        productoId: String(payload.productoId),
+        nombre: String(payload.nombre ?? ''),
+        atributo1: payload.atributo1 ? String(payload.atributo1) : null,
+        atributo2: payload.atributo2 ? String(payload.atributo2) : null,
+        skuVariante: payload.skuVariante ? String(payload.skuVariante) : null,
+        codigoBarras: payload.codigoBarras
+          ? String(payload.codigoBarras)
+          : null,
+        precioAdicionalCentavos: Number(payload.precioAdicionalCentavos ?? 0),
+      });
+      sincronizarWalADisco(db);
+      return { id, variantes: listarVariantesComercio(db, actor.comercio_id) };
+    }
+
+    case 'crear_combo_promocion': {
+      const id = crearComboPromocion(db, actor, {
+        nombre: String(payload.nombre ?? ''),
+        descripcion: payload.descripcion ? String(payload.descripcion) : null,
+        codigoBarras: payload.codigoBarras
+          ? String(payload.codigoBarras)
+          : null,
+        precioVentaCentavos: Number(payload.precioVentaCentavos ?? 0),
+        componentes: (
+          (payload.componentes as Array<{
+            productoId: string;
+            cantidad: number;
+          }>) ?? []
+        ).map((c) => ({
+          productoId: String(c.productoId),
+          cantidad: Number(c.cantidad),
+        })),
+      });
+      sincronizarWalADisco(db);
+      return { id, combos: listarCombosComercio(db, actor.comercio_id) };
+    }
+
+    case 'vender_combo_promocion': {
+      const sesionAbierta = db
+        .prepare(
+          `SELECT id FROM caja_sesiones
+           WHERE comercio_id = ? AND estado = 'abierta' AND deleted_at IS NULL
+           ORDER BY fecha_apertura DESC LIMIT 1`
+        )
+        .get(actor.comercio_id) as { id: string } | undefined;
+
+      const pagos = (
+        payload.pagos as Array<{ medio: MedioPago; monto: number }>
+      ).map((p) => ({
+        medio: p.medio,
+        monto: Number(p.monto),
+      }));
+
+      const res = venderComboPromocion(db, actor, {
+        comboId: String(payload.comboId),
+        cantidadCombos: Number(payload.cantidadCombos ?? 1),
+        pagos,
+        clienteId: payload.clienteId ? String(payload.clienteId) : undefined,
+        cajaSesionId: sesionAbierta?.id,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'resolver_escaneo_balanza': {
+      return resolverEscaneoBalanzaEnCatalogo(
+        db,
+        actor.comercio_id,
+        String(payload.codigoBarras ?? '')
+      );
     }
 
     default:
