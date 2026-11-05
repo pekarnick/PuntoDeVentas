@@ -613,7 +613,7 @@ export function PanelVentaPOS({
       setAltaRapidaPrecioInput('');
       setAltaRapidaCostoInput('');
       setMensajeEstado(
-        `Producto "${nuevoProd.nombre}" guardado en SQLite y agregado al carrito.`
+        `Producto "${nuevoProd.nombre}" guardado en la base de datos y agregado al carrito.`
       );
       onDatosActualizados?.();
       enfocarEntradaLector();
@@ -714,7 +714,7 @@ export function PanelVentaPOS({
       ]);
       setModoPagoMixto(false);
       setMensajeEstado(
-        `Venta #${respuesta.ventaId.slice(-6)} guardada en SQLite por ${formatearMonedaARS(respuesta.totalCentavos)}. Stock descontado y auditado.`
+        `Venta #${respuesta.ventaId.slice(-6)} registrada por ${formatearMonedaARS(respuesta.totalCentavos)}. Stock descontado y auditado.`
       );
       onDatosActualizados?.();
       enfocarEntradaLector();
@@ -805,7 +805,7 @@ export function PanelVentaPOS({
       setMotivoAnulacion('');
       setAutorizadorClave('');
       setMensajeEstado(
-        'Venta anulada en SQLite. Stock devuelto y rastro registrado en auditoría.'
+        'Venta anulada correctamente. Stock devuelto y rastro registrado en auditoría.'
       );
       onDatosActualizados?.();
       enfocarEntradaLector();
@@ -1060,7 +1060,7 @@ export function PanelVentaPOS({
                     />
                   </label>
                   <button type="submit" className="btn-primary">
-                    Crear en SQLite y agregar al carrito
+                    Crear y agregar al carrito
                   </button>
                 </form>
               ) : (
@@ -1503,7 +1503,7 @@ export function PanelVentaPOS({
               onClick={() => void confirmarCobroVenta()}
               disabled={carrito.length === 0}
             >
-              Confirmar Venta y Guardar en SQLite (F4)
+              Confirmar y Registrar Venta (F4)
             </button>
           </div>
 

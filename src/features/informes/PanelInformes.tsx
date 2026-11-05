@@ -93,7 +93,7 @@ export function PanelInformes({
       );
 
       setMensajeExportacion(
-        `Archivo Excel (.xlsx, ${res.bytesLength} bytes) descargado y registrado en la auditoría de SQLite.`
+        `Archivo Excel (.xlsx, ${res.bytesLength} bytes) descargado y registrado en la auditoría de la base de datos.`
       );
     } catch {
       // Fallback
@@ -187,7 +187,7 @@ export function PanelInformes({
         <div className="card-header">
           <div>
             <h2>
-              Informes de Gestión en Vivo desde SQLite (Superadmin y Encargado)
+              Informes de Gestión en Vivo (Superadmin y Encargado)
             </h2>
             <p className="text-muted">
               Ganancia bruta calculada con el costo histórico copiado en cada

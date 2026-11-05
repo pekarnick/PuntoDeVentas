@@ -74,7 +74,7 @@ export function PanelAuditoria(): React.ReactElement {
     <section className="pos-card">
       <div className="card-header">
         <div>
-          <h2>Registro Inmutable de Auditoría en SQLite (Solo Superadmin)</h2>
+          <h2>Registro Inmutable de Auditoría en Base de Datos (Solo Superadmin)</h2>
           <p className="text-muted">
             Tabla append-only con hash encadenado SHA-256. Ningún rol puede editar ni borrar registros.
           </p>
@@ -95,7 +95,7 @@ export function PanelAuditoria(): React.ReactElement {
           }
         >
           {resultadoIntegridad.integra
-            ? `Cadena SHA-256 íntegra: se verificaron ${resultadoIntegridad.totalRegistros} eslabones en SQLite desde GENESIS sin alteraciones.`
+            ? `Cadena SHA-256 íntegra: se verificaron ${resultadoIntegridad.totalRegistros} eslabones en la base de datos desde GENESIS sin alteraciones.`
             : `Alerta de alteración en registro ${resultadoIntegridad.registroAlteradoId}: ${resultadoIntegridad.motivoFallo}`}
         </div>
       )}

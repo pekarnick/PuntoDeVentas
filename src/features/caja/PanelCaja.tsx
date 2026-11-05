@@ -110,7 +110,7 @@ export function PanelCaja({
       setConceptoMov('');
       setMontoMovInput('');
       setMensajeExito(
-        'Movimiento guardado en SQLite local y auditado en la sesión de caja.'
+        'Movimiento guardado en la base de datos local y auditado en la sesión de caja.'
       );
       onDatosActualizados?.();
     } catch (err) {
@@ -135,7 +135,7 @@ export function PanelCaja({
         rolActivo,
         montoInicialCentavos: inicial,
       });
-      setMensajeExito('Sesión de caja abierta y guardada en SQLite.');
+      setMensajeExito('Sesión de caja abierta correctamente.');
       onDatosActualizados?.();
     } catch (err) {
       setMensajeError(
@@ -154,7 +154,7 @@ export function PanelCaja({
         efectivoContadoCentavos,
       });
       setMensajeExito(
-        `Caja cerrada en SQLite y auditada. Diferencia de efectivo: ${formatearMonedaARS(diferenciaEfectivo)}.`
+        `Caja cerrada y auditada. Diferencia de efectivo: ${formatearMonedaARS(diferenciaEfectivo)}.`
       );
       onDatosActualizados?.();
     } catch (err) {
@@ -194,7 +194,7 @@ export function PanelCaja({
               />
             </label>
             <button type="submit" className="btn-primary">
-              Abrir Caja en SQLite
+              Abrir Caja
             </button>
           </form>
         ) : (
@@ -235,7 +235,7 @@ export function PanelCaja({
                 />
               </label>
               <button type="submit" className="btn-secondary">
-                Registrar en SQLite
+                Registrar Movimiento
               </button>
             </div>
           </form>
@@ -269,7 +269,7 @@ export function PanelCaja({
       <div className="pos-card">
         <h2>Arqueo y Cierre por Medio de Pago</h2>
         <p className="text-muted">
-          Desglose real de cobros de ventas completadas en SQLite y cálculo de diferencia de efectivo.
+          Desglose real de cobros de ventas completadas y cálculo de diferencia de efectivo.
         </p>
 
         <table className="data-table">
@@ -361,7 +361,7 @@ export function PanelCaja({
               className="btn-primary full-width"
               onClick={() => void manejarCerrarCaja()}
             >
-              Cerrar Caja y Guardar Arqueo en SQLite
+              Cerrar Caja y Guardar Arqueo
             </button>
           )}
         </div>

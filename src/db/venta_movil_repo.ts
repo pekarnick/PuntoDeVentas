@@ -1521,3 +1521,175 @@ export function listarVentasPropiasDelDiaMovil(
     }>,
   }));
 }
+
+export interface ConfiguracionNetlifyDTO {
+  readonly netlify_token: string | null;
+  readonly netlify_site_id: string | null;
+  readonly netlify_site_name: string | null;
+  readonly netlify_site_url: string | null;
+  readonly netlify_ultimo_despliegue_at: string | null;
+  readonly venta_movil_url: string | null;
+  readonly venta_movil_habilitada: boolean;
+}
+
+export function obtenerConfiguracionNetlify(
+  db: DatabaseSync,
+  comercioId: string
+): ConfiguracionNetlifyDTO {
+  const comercio = db
+    .prepare('SELECT venta_movil_habilitada FROM comercios WHERE id = ?')
+    .get(comercioId) as { venta_movil_habilitada: number } | undefined;
+
+  const config = db
+    .prepare(
+      `SELECT netlify_token, netlify_site_id, netlify_site_name, netlify_site_url,
+              netlify_ultimo_despliegue_at, venta_movil_url
+       FROM configuracion_sistema
+       WHERE comercio_id = ?`
+    )
+    .get(comercioId) as
+    | {
+        netlify_token: string | null;
+        netlify_site_id: string | null;
+        netlify_site_name: string | null;
+        netlify_site_url: string | null;
+        netlify_ultimo_despliegue_at: string | null;
+        venta_movil_url: string | null;
+      }
+    | undefined;
+
+  return {
+    netlify_token: config?.netlify_token ?? null,
+    netlify_site_id: config?.netlify_site_id ?? null,
+    netlify_site_name: config?.netlify_site_name ?? null,
+    netlify_site_url: config?.netlify_site_url ?? null,
+    netlify_ultimo_despliegue_at: config?.netlify_ultimo_despliegue_at ?? null,
+    venta_movil_url: config?.venta_movil_url ?? null,
+    venta_movil_habilitada: comercio?.venta_movil_habilitada === 1,
+  };
+}
+
+export function guardarConfiguracionNetlify(
+  db: DatabaseSync,
+  params: {
+    actor: ActorContexto;
+    netlifyToken?: string | null;
+    netlifySiteName?: string | null;
+  }
+): ConfiguracionNetlifyDTO {
+  exigirPermiso(params.actor.rol, 'configurar_venta_movil_y_arca');
+  const ahora = new Date().toISOString();
+
+  ejecutarEnTransaccion(db, () => {
+    const existe = db
+      .prepare('SELECT comercio_id FROM configuracion_sistema WHERE comercio_id = ?')
+      .get(params.actor.comercio_id);
+
+    if (existe) {
+      db.prepare(
+        `UPDATE configuracion_sistema
+         SET netlify_token = COALESCE(?, netlify_token),
+             netlify_site_name = COALESCE(?, netlify_site_name),
+             updated_at = ?
+         WHERE comercio_id = ?`
+      ).run(
+        params.netlifyToken !== undefined ? params.netlifyToken?.trim() || null : null,
+        params.netlifySiteName !== undefined ? params.netlifySiteName?.trim() || null : null,
+        ahora,
+        params.actor.comercio_id
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO configuracion_sistema (
+          comercio_id, netlify_token, netlify_site_name, updated_at
+        ) VALUES (?, ?, ?, ?)`
+      ).run(
+        params.actor.comercio_id,
+        params.netlifyToken?.trim() || null,
+        params.netlifySiteName?.trim() || null,
+        ahora
+      );
+    }
+
+    insertarRegistroAuditoria(db, {
+      actor: params.actor,
+      accion: 'configurar_despliegue_netlify',
+      entidad: 'configuracion_sistema',
+      entidad_id: params.actor.comercio_id,
+      valores_antes: null,
+      valores_despues: {
+        netlify_site_name: params.netlifySiteName ?? null,
+        token_configurado: Boolean(params.netlifyToken),
+      },
+      motivo: 'Actualización de credenciales y parámetros de despliegue Netlify',
+    });
+  });
+
+  return obtenerConfiguracionNetlify(db, params.actor.comercio_id);
+}
+
+export function registrarDespliegueNetlifyExitoso(
+  db: DatabaseSync,
+  params: {
+    actor: ActorContexto;
+    siteId: string;
+    siteName: string;
+    siteUrl: string;
+    urlVentaMovil: string;
+    token?: string;
+  }
+): EstadoConfigVentaMovil {
+  exigirPermiso(params.actor.rol, 'configurar_venta_movil_y_arca');
+  const ahora = new Date().toISOString();
+
+  ejecutarEnTransaccion(db, () => {
+    db.prepare(
+      `UPDATE configuracion_sistema
+       SET netlify_site_id = ?,
+           netlify_site_name = ?,
+           netlify_site_url = ?,
+           netlify_ultimo_despliegue_at = ?,
+           netlify_token = COALESCE(?, netlify_token),
+           venta_movil_url = ?,
+           updated_at = ?
+       WHERE comercio_id = ?`
+    ).run(
+      params.siteId,
+      params.siteName,
+      params.siteUrl,
+      ahora,
+      params.token?.trim() || null,
+      params.urlVentaMovil,
+      ahora,
+      params.actor.comercio_id
+    );
+
+    // Activamos la venta móvil en comercios
+    db.prepare(
+      `UPDATE comercios
+       SET venta_movil_habilitada = 1, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+       WHERE id = ?`
+    ).run(ahora, params.actor.device_id, params.actor.comercio_id);
+
+    encolarSync(db, 'comercios', params.actor.comercio_id, 'update', ahora);
+
+    insertarRegistroAuditoria(db, {
+      actor: params.actor,
+      accion: 'desplegar_cajero_movil_netlify',
+      entidad: 'configuracion_sistema',
+      entidad_id: params.actor.comercio_id,
+      valores_antes: null,
+      valores_despues: {
+        site_id: params.siteId,
+        site_name: params.siteName,
+        site_url: params.siteUrl,
+        url_venta_movil: params.urlVentaMovil,
+        desplegado_at: ahora,
+      },
+      motivo: 'Publicación exitosa del cajero móvil en Netlify con bloqueo de buscadores',
+    });
+  });
+
+  return obtenerConfigVentaMovil(db, params.actor.comercio_id);
+}
+

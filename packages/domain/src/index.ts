@@ -5,3 +5,4 @@ export * from './stock.ts';
 export * from './cuit.ts';
 export * from './venta_movil.ts';
 export * from './arca_fase4.ts';
+export * from './despliegue_web.ts';

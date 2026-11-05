@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   generarQrSvgUrlPublica,
+  validarTokenNetlify,
   validarUrlPublicaVentaMovil,
 } from '@pos/domain';
 import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
@@ -288,6 +289,48 @@ export function PanelConfiguracionSync({
     }
   }, [configArcaInicial]);
 
+  // Estados para Despliegue en Netlify
+  const [netlifyToken, setNetlifyToken] = useState('');
+  const [netlifySiteId, setNetlifySiteId] = useState('');
+  const [netlifySiteName, setNetlifySiteName] = useState('');
+  const [netlifySiteUrl, setNetlifySiteUrl] = useState('');
+  const [netlifyUltimoDespliegue, setNetlifyUltimoDespliegue] = useState<string | null>(null);
+  const [mostrarGuiaNetlify, setMostrarGuiaNetlify] = useState(false);
+  const [mostrarTokenNetlify, setMostrarTokenNetlify] = useState(false);
+  const [verificandoTokenNetlify, setVerificandoTokenNetlify] = useState(false);
+  const [cuentaNetlifyInfo, setCuentaNetlifyInfo] = useState<{
+    email?: string;
+    nombre?: string;
+  } | null>(null);
+  const [desplegandoNetlify, setDesplegandoNetlify] = useState(false);
+  const [logDespliegueNetlify, setLogDespliegueNetlify] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function cargarConfigNetlify() {
+      try {
+        const res = await invocarPosApi<{
+          netlify_token: string | null;
+          netlify_site_id: string | null;
+          netlify_site_name: string | null;
+          netlify_site_url: string | null;
+          netlify_ultimo_despliegue_at: string | null;
+          venta_movil_url: string | null;
+          venta_movil_habilitada: boolean;
+        }>('obtener_configuracion_netlify');
+        if (res.netlify_token) setNetlifyToken(res.netlify_token);
+        if (res.netlify_site_id) setNetlifySiteId(res.netlify_site_id);
+        if (res.netlify_site_name) setNetlifySiteName(res.netlify_site_name);
+        if (res.netlify_site_url) setNetlifySiteUrl(res.netlify_site_url);
+        if (res.netlify_ultimo_despliegue_at) {
+          setNetlifyUltimoDespliegue(res.netlify_ultimo_despliegue_at);
+        }
+      } catch {
+        // En caso de que no esté cargado
+      }
+    }
+    void cargarConfigNetlify();
+  }, []);
+
   if (!puedeConfigurar) {
     return (
       <section className="card" aria-label="Acceso restringido a configuración">
@@ -330,7 +373,7 @@ export function PanelConfiguracionSync({
         backupDiarioHabilitado: backupDiario,
       });
       setMensajeExito(
-        'Configuración guardada en SQLite y registrada en la auditoría.'
+        'Configuración guardada en la base de datos y registrada en la auditoría.'
       );
       onDatosActualizados();
     } catch (err) {
@@ -700,6 +743,115 @@ export function PanelConfiguracionSync({
       err instanceof Error ? err.message : 'URL inválida.';
   }
 
+  async function manejarVerificarTokenNetlify() {
+    setMensajeError(null);
+    setMensajeExito(null);
+    setVerificandoTokenNetlify(true);
+    setCuentaNetlifyInfo(null);
+    try {
+      const res = await invocarPosApi<{
+        ok: boolean;
+        email?: string;
+        nombre?: string;
+        error?: string;
+      }>('verificar_token_netlify', { token: netlifyToken });
+
+      if (!res.ok) {
+        throw new Error(res.error || 'Token de Netlify inválido.');
+      }
+      setCuentaNetlifyInfo({ email: res.email, nombre: res.nombre });
+      setMensajeExito(
+        `✓ Token verificado con éxito: Cuenta "${res.nombre}" (${res.email ?? 'sin email público'}).`
+      );
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo verificar el token de Netlify.'
+      );
+    } finally {
+      setVerificandoTokenNetlify(false);
+    }
+  }
+
+  async function manejarGuardarParametrosNetlify(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    setMensajeError(null);
+    setMensajeExito(null);
+    try {
+      await invocarPosApi('guardar_configuracion_netlify', {
+        rolActivo,
+        netlifyToken,
+        netlifySiteName,
+      });
+      setMensajeExito('Parámetros de Netlify guardados en la base local.');
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Error al guardar configuración de Netlify.'
+      );
+    }
+  }
+
+  async function manejarDesplegarNetlify() {
+    setMensajeError(null);
+    setMensajeExito(null);
+    setDesplegandoNetlify(true);
+    setLogDespliegueNetlify('Iniciando empaquetado del sitio web móvil...');
+    try {
+      const validacion = validarTokenNetlify(netlifyToken);
+      if (!validacion.valido) {
+        throw new Error(validacion.motivo);
+      }
+
+      setLogDespliegueNetlify(
+        'Generando paquete ZIP con robots.txt, headers anti-indexación y Netlify Function...'
+      );
+
+      const res = await invocarPosApi<{
+        despliegue: {
+          ok: boolean;
+          siteId: string;
+          siteName: string;
+          siteUrl: string;
+          urlVentaMovil: string;
+        };
+        configMovil: EstadoConfigVentaMovilDTO;
+      }>('desplegar_cajero_movil_netlify', {
+        rolActivo,
+        token: netlifyToken,
+        siteId: netlifySiteId || undefined,
+        siteName: netlifySiteName || undefined,
+      });
+
+      setNetlifySiteId(res.despliegue.siteId);
+      setNetlifySiteName(res.despliegue.siteName);
+      setNetlifySiteUrl(res.despliegue.siteUrl);
+      setNetlifyUltimoDespliegue(new Date().toISOString());
+
+      // Actualizamos automáticamente la URL de venta móvil y el QR
+      setConfigMovil(res.configMovil);
+      setVentaMovilHabilitada(true);
+      setVentaMovilUrl(res.despliegue.urlVentaMovil);
+
+      setLogDespliegueNetlify(null);
+      setMensajeExito(
+        `🎉 ¡Cajero móvil publicado exitosamente en Netlify! Dirección: ${res.despliegue.urlVentaMovil}. El código QR se actualizó automáticamente y ya está listo para imprimir o escanear.`
+      );
+      onDatosActualizados();
+    } catch (err) {
+      setLogDespliegueNetlify(null);
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'Error durante la publicación en Netlify.'
+      );
+    } finally {
+      setDesplegandoNetlify(false);
+    }
+  }
+
   async function manejarCopiarSqlMigracionSupabase() {
     setMensajeError(null);
     setMensajeExito(null);
@@ -712,13 +864,13 @@ export function PanelConfiguracionSync({
         await navigator.clipboard.writeText(res.sql);
       }
       setMensajeExito(
-        'Script SQL de actualización (sesiones_moviles, variantes, combos, ARCA y resetear_comercio_a_fabrica) copiado al portapapeles. Pegalo y ejecutalo en el SQL Editor de tu proyecto Supabase.'
+        'Script de base de datos para actualización copiado al portapapeles. Pegalo y ejecutalo en el editor SQL de tu proyecto Supabase.'
       );
     } catch (err) {
       setMensajeError(
         err instanceof Error
           ? err.message
-          : 'No se pudo copiar el script SQL de migración.'
+          : 'No se pudo copiar el script de actualización.'
       );
     }
   }
@@ -773,7 +925,7 @@ export function PanelConfiguracionSync({
         <section className="card" style={{ marginBottom: '1.25rem' }}>
           <h2>Estado de Sincronización (Nube Supabase)</h2>
           <p className="text-muted">
-            La base SQLite local es la fuente de verdad de trabajo. Primero
+            La base de datos local es la fuente de verdad de trabajo. Primero
             sincronizan los datos y después, en segundo plano y con su propia
             cola, las imágenes WebP de los productos (PLAN.md §5 y §5.1).
           </p>
@@ -860,9 +1012,9 @@ export function PanelConfiguracionSync({
               className="btn btn-secondary"
               disabled={procesando}
               onClick={() => void manejarCopiarSqlMigracionSupabase()}
-              title="Copia al portapapeles el SQL de actualización de esquema para pegar en el SQL Editor de Supabase"
+              title="Copia al portapapeles el script de actualización de esquema para pegar en el panel de Supabase"
             >
-              📋 Copiar SQL actualización Supabase
+              📋 Copiar script actualización Supabase
             </button>
           </div>
         </section>
@@ -884,7 +1036,7 @@ export function PanelConfiguracionSync({
                 }
               >
                 <option value="supabase">
-                  Supabase (PostgreSQL + RLS + Storage — Principal)
+                  Supabase (Nube con Base de Datos Segura + Almacenamiento — Principal)
                 </option>
                 <option value="firebase">
                   Firebase (Cloud Firestore REST + Storage)
@@ -897,8 +1049,7 @@ export function PanelConfiguracionSync({
 
             <div className="form-group">
               <label htmlFor="cfg-supabase-url">
-                URL del Proyecto Supabase (guardada en tabla{' '}
-                <code>configuracion_sistema</code> de SQLite)
+                URL del Proyecto Supabase (guardada en la configuración local)
               </label>
               <input
                 id="cfg-supabase-url"
@@ -1029,7 +1180,7 @@ export function PanelConfiguracionSync({
                   checked={backupDiario}
                   onChange={(e) => setBackupDiario(e.target.checked)}
                 />
-                <span>Realizar copia diaria automática del archivo SQLite</span>
+                <span>Realizar copia diaria automática de la base de datos</span>
               </label>
             </div>
 
@@ -1169,6 +1320,333 @@ export function PanelConfiguracionSync({
               </div>
             </div>
           </form>
+
+          {/* Tarjeta de Publicación en Netlify con Bloqueo de Buscadores */}
+          <div
+            className="subcard-box"
+            style={{
+              marginTop: '1.25rem',
+              marginBottom: '1.25rem',
+              padding: '1.2rem',
+              border: '2px solid #38bdf8',
+              borderRadius: '0.75rem',
+              background: 'rgba(56, 189, 248, 0.04)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                flexWrap: 'wrap',
+                gap: '0.75rem',
+              }}
+            >
+              <div>
+                <h3
+                  style={{
+                    margin: '0 0 0.35rem 0',
+                    color: '#0284c7',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                  }}
+                >
+                  <span>🌐</span>
+                  <span>Publicación Automática en Netlify (Hosting Gratuito HTTPS)</span>
+                </h3>
+                <p
+                  className="text-muted"
+                  style={{ fontSize: '0.88rem', margin: 0, maxWidth: '750px' }}
+                >
+                  Permite publicar el sitio del cajero móvil (<code>/web-pos</code>) en la nube con un solo clic.
+                  Netlify incluye un plan <strong>100% gratuito de por vida</strong> con 100 GB/mes y certificados SSL automáticos.
+                  Como la PWA móvil pesa menos de 300 KB, <strong>nunca alcanzarás los límites gratuitos</strong> (soporta más de 300.000 visitas al mes sin pagar nada).
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ fontSize: '0.82rem', padding: '0.35rem 0.75rem' }}
+                onClick={() => setMostrarGuiaNetlify(!mostrarGuiaNetlify)}
+              >
+                {mostrarGuiaNetlify ? '▲ Ocultar instructivo' : '❓ ¿Cómo obtener mi Token gratis?'}
+              </button>
+            </div>
+
+            {/* Consideraciones de Seguridad y Bloqueo de Indexación */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                gap: '0.75rem',
+                margin: '0.9rem 0',
+                padding: '0.75rem',
+                background: 'rgba(15, 23, 42, 0.03)',
+                borderRadius: '0.5rem',
+                border: '1px solid #e2e8f0',
+                fontSize: '0.83rem',
+              }}
+            >
+              <div>
+                <strong>🛡️ Bloqueo Total a Buscadores:</strong>
+                <p style={{ margin: '0.2rem 0 0 0', color: '#475569' }}>
+                  El sitio se empaqueta con <code>robots.txt</code> (<code>Disallow: /</code>) y encabezado <code>X-Robots-Tag: noindex, nofollow, noimageindex</code>. Ni Google ni ningún rastreador indexarán la página.
+                </p>
+              </div>
+              <div>
+                <strong>🔒 Regla 20 (Protección de Costos):</strong>
+                <p style={{ margin: '0.2rem 0 0 0', color: '#475569' }}>
+                  El cajero móvil accede solo a la vista <code>productos_venta</code>: nunca incluye costos de compra, márgenes ni balances comerciales.
+                </p>
+              </div>
+              <div>
+                <strong>🔑 Token Protegido (Regla 8 y 19):</strong>
+                <p style={{ margin: '0.2rem 0 0 0', color: '#475569' }}>
+                  El token de Netlify solo se guarda en esta terminal de escritorio. Nunca se sube a internet, no viaja al celular y no aparece en el código QR.
+                </p>
+              </div>
+            </div>
+
+            {/* Instructivo paso a paso colapsable */}
+            {mostrarGuiaNetlify ? (
+              <div
+                style={{
+                  background: '#f8fafc',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '0.5rem',
+                  padding: '1rem',
+                  marginBottom: '1rem',
+                  fontSize: '0.87rem',
+                  color: '#334155',
+                }}
+              >
+                <h4 style={{ margin: '0 0 0.5rem 0', color: '#0f172a' }}>
+                  📋 Guía para obtener tu Personal Access Token en Netlify (Gratis y sin tarjeta):
+                </h4>
+                <ol style={{ margin: '0 0 0.75rem 1.25rem', padding: 0, lineHeight: 1.6 }}>
+                  <li>
+                    Ingresá en <a href="https://app.netlify.com/signup" target="_blank" rel="noopener noreferrer" style={{ color: '#0284c7', fontWeight: 600 }}>app.netlify.com/signup ↗</a> y registrate gratis con tu correo electrónico o cuenta de GitHub (no pide tarjeta de crédito).
+                  </li>
+                  <li>
+                    Una vez dentro de Netlify, hacé clic en tu <strong>avatar / foto de perfil</strong> a la izquierda abajo y seleccioná <strong>User settings</strong> (Configuración de usuario).
+                  </li>
+                  <li>
+                    En el menú lateral izquierdo, hacé clic en <strong>Applications</strong> y luego en la pestaña <strong>Personal access tokens</strong>.
+                  </li>
+                  <li>
+                    Hacé clic en el botón azul <strong>"New access token"</strong>, escribí un nombre (por ejemplo: <code>POS Celular Mostrador</code>) y selecciona el tiempo de expiración (por ejemplo: <code>7 days</code>) y confirmá en <strong>Generate token</strong>.
+                  </li>
+                  <li>
+                    <strong>Copiá el token</strong> generado (comienza con <code>nfp_...</code>) y pegalo en la casilla de abajo.
+                  </li>
+                </ol>
+                <div style={{ fontSize: '0.8rem', color: '#64748b', fontStyle: 'italic' }}>
+                  💡 Podés revocar o borrar el token en cualquier momento desde tu panel de Netlify si alguna vez cambiás de equipo.
+                </div>
+              </div>
+            ) : null}
+
+            {/* Formulario de configuración de Netlify */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+                gap: '0.9rem',
+                marginBottom: '0.9rem',
+              }}
+            >
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label htmlFor="cfg-netlify-token" style={{ fontWeight: 600 }}>
+                  Personal Access Token de Netlify (<code>nfp_...</code>)
+                </label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    id="cfg-netlify-token"
+                    type={mostrarTokenNetlify ? 'text' : 'password'}
+                    placeholder="nfp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    value={netlifyToken}
+                    onChange={(e) => setNetlifyToken(e.target.value)}
+                    style={{ flex: 1, fontFamily: 'monospace' }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setMostrarTokenNetlify(!mostrarTokenNetlify)}
+                    title={mostrarTokenNetlify ? 'Ocultar token' : 'Mostrar token'}
+                    style={{ padding: '0.4rem 0.75rem' }}
+                  >
+                    {mostrarTokenNetlify ? '👁️ Ocultar' : '👁️ Ver'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void manejarVerificarTokenNetlify()}
+                    disabled={verificandoTokenNetlify || !netlifyToken.trim()}
+                    style={{ padding: '0.4rem 0.75rem', whiteSpace: 'nowrap' }}
+                  >
+                    {verificandoTokenNetlify ? 'Verificando...' : '🔍 Probar Token'}
+                  </button>
+                </div>
+                {cuentaNetlifyInfo ? (
+                  <small style={{ color: '#15803d', display: 'block', marginTop: '0.3rem', fontWeight: 500 }}>
+                    ✓ Conectado a la cuenta de: <strong>{cuentaNetlifyInfo.nombre}</strong> ({cuentaNetlifyInfo.email})
+                  </small>
+                ) : null}
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label htmlFor="cfg-netlify-site-name" style={{ fontWeight: 600 }}>
+                  Nombre deseado del subdominio (opcional)
+                </label>
+                <input
+                  id="cfg-netlify-site-name"
+                  type="text"
+                  placeholder="ej: mi-kiosco-pos (dejar en blanco para autogenerar)"
+                  value={netlifySiteName}
+                  onChange={(e) => setNetlifySiteName(e.target.value)}
+                />
+                <small style={{ color: '#64748b', display: 'block', marginTop: '0.25rem' }}>
+                  Se desplegará en <code>https://{netlifySiteName.trim() || '&lt;nombre&gt;'}.netlify.app/web-pos</code>
+                </small>
+              </div>
+            </div>
+
+            {/* Estado del despliegue actual si ya existe */}
+            {netlifySiteUrl ? (
+              <div
+                style={{
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  borderRadius: '0.5rem',
+                  padding: '0.75rem 1rem',
+                  marginBottom: '1rem',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '0.75rem',
+                }}
+              >
+                <div>
+                  <div style={{ color: '#166534', fontWeight: 600, fontSize: '0.9rem' }}>
+                    ✓ Sitio publicado en Netlify (Activo y Protegido)
+                  </div>
+                  <div style={{ fontSize: '0.85rem', color: '#14532d', marginTop: '0.2rem' }}>
+                    Dirección:{' '}
+                    <a
+                      href={`${netlifySiteUrl.replace(/\/+$/, '')}/web-pos`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: '#0284c7', fontWeight: 600, textDecoration: 'underline' }}
+                    >
+                      {netlifySiteUrl.replace(/\/+$/, '')}/web-pos ↗
+                    </a>
+                    {netlifyUltimoDespliegue ? (
+                      <span style={{ color: '#475569', marginLeft: '0.75rem' }}>
+                        (Última actualización: {formatearFechaHoraAR(netlifyUltimoDespliegue)})
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <a
+                    href={`${netlifySiteUrl.replace(/\/+$/, '')}/web-pos`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.82rem', padding: '0.4rem 0.8rem', textDecoration: 'none' }}
+                  >
+                    Abrir sitio web ↗
+                  </a>
+                </div>
+              </div>
+            ) : null}
+
+            {logDespliegueNetlify ? (
+              <div
+                style={{
+                  background: '#0f172a',
+                  color: '#38bdf8',
+                  padding: '0.65rem 1rem',
+                  borderRadius: '0.4rem',
+                  fontSize: '0.84rem',
+                  marginBottom: '0.9rem',
+                  fontFamily: 'monospace',
+                }}
+              >
+                ⏳ {logDespliegueNetlify}
+              </div>
+            ) : null}
+
+            <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '15px' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void manejarDesplegarNetlify()}
+                disabled={desplegandoNetlify || !netlifyToken.trim()}
+                style={{
+                  background: '#0284c7',
+                  borderColor: '#0284c7',
+                  padding: '0.55rem 1.25rem',
+                  fontWeight: 600,
+                  fontSize: '0.92rem',
+                }}
+              >
+                {desplegandoNetlify
+                  ? 'Subiendo a Netlify (aguarde)...'
+                  : netlifySiteUrl
+                  ? '🔄 Actualizar / Re-desplegar en Netlify'
+                  : '🚀 Publicar Cajero Móvil en Netlify'}
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => void manejarGuardarParametrosNetlify()}
+                disabled={desplegandoNetlify}
+                style={{ fontSize: '0.85rem' }}
+              >
+                Guardar credenciales sin subir
+              </button>
+
+            </div>
+            {mostrarGuiaNetlify ? (
+              <div
+                style={{
+                  background: '#f8fafc',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '0.5rem',
+                  padding: '1rem',
+                  marginBottom: '1rem',
+                  fontSize: '0.87rem',
+                  color: '#334155',
+                }}
+              >
+                <h4 style={{ margin: '0 0 0.5rem 0', color: '#0f172a' }}>
+                  📋 Copiar la Dirección pública de la PWA móvil para pegarla en el apartado anterior:
+                </h4>
+                <ol style={{ margin: '0 0 0.75rem 1.25rem', padding: 0, lineHeight: 1.6 }}>
+                  <li>
+                    En el menu lateral izquierdo hacer clic en <strong>Project</strong>
+                  </li>
+                  <li>
+                    En el listado aparece un item que en algun lugar dice <strong>Last deployed from Netlify Drop</strong> hacer clic ahí
+                  </li>
+                  <li>
+                    Hacer clic en el boton que dice <strong>"Make public"</strong> y nuevamente en el boton que dice <strong>"Make public"</strong>
+                  </li>
+                  <li>
+                    Click en el enlace que aparece en verde y se abre el sitio web del cajero
+                  </li>
+                  <li>
+                    Copiar la URL de la barra de direcciones y pegarla en el apartado anterior en el campo que dice: <strong>Dirección pública de la PWA móvil</strong>
+                  </li>
+                </ol>
+              </div>
+            ) : null}
+          </div>
 
           <h3 style={{ marginTop: '1rem' }}>
             Usuarios autorizados para Venta Móvil (<code>puede_vender_movil</code>)
@@ -1355,7 +1833,7 @@ export function PanelConfiguracionSync({
               disabled={procesando}
               onClick={() => void manejarCrearBackupAhora()}
             >
-              Crear backup SQLite ahora
+              Crear copia de respaldo ahora
             </button>
             <button
               type="button"

@@ -315,7 +315,7 @@ export function App(): React.ReactElement {
                 datosServidor?.rutaBaseDatos ?? 'data/pos_local.db'
               }
             >
-              SQLite: data/pos_local.db
+              Base de Datos: local
             </span>
           </div>
 
@@ -555,7 +555,7 @@ export function App(): React.ReactElement {
             <strong>GAR</strong> - Guillermo Adolfo Rohde
           </span>
           <span className="app-footer-meta">
-            Sistema Punto de Venta Offline-First · SQLite + Nube
+            Sistema Punto de Venta Offline-First · Base de Datos Local + Nube
           </span>
         </div>
       </footer>

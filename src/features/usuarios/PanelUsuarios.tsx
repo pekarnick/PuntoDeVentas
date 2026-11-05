@@ -64,7 +64,7 @@ export function PanelUsuarios(): React.ReactElement {
       setNuevoNombre('');
       setNuevoUsuario('');
       setMensajeClaveTemporal(
-        `Usuario "${nuevoUsuario.trim().toLowerCase()}" guardado en SQLite. Clave temporal asignada: Temporal2026!`
+        `Usuario "${nuevoUsuario.trim().toLowerCase()}" guardado en la base de datos. Clave temporal asignada: Temporal2026!`
       );
       await cargarUsuarios();
     } catch (err) {
@@ -103,7 +103,7 @@ export function PanelUsuarios(): React.ReactElement {
         }
       );
       setMensajeClaveTemporal(
-        `Clave reseteada en SQLite para "${u.usuario}". Nueva clave temporal: ${res.claveTemporal}`
+        `Clave reseteada en la base de datos para "${u.usuario}". Nueva clave temporal: ${res.claveTemporal}`
       );
       await cargarUsuarios();
     } catch (err) {
@@ -193,7 +193,7 @@ export function PanelUsuarios(): React.ReactElement {
           </select>
         </label>
         <button type="submit" className="btn-primary">
-          Crear Usuario en SQLite
+          Crear Usuario
         </button>
       </form>
 

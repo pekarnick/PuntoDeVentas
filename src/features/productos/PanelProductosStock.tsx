@@ -241,7 +241,7 @@ export function PanelProductosStock({
       setImagenNuevaBase64('');
       setImagenNuevaNombre('');
       setMensajeOk(
-        `Producto "${nombreNuevo.trim()}" guardado en SQLite local y auditado.`
+        `Producto "${nombreNuevo.trim()}" guardado en la base de datos y auditado.`
       );
       onDatosActualizados?.();
     } catch (err) {
@@ -447,7 +447,7 @@ export function PanelProductosStock({
       setCantidadMovimientoInput('');
       setMotivoMovimiento('');
       setMensajeOk(
-        `Movimiento de stock (${tipoMovimiento}: ${cantidadConSigno > 0 ? `+${cantidadConSigno}` : cantidadConSigno}) guardado en SQLite y auditado.`
+        `Movimiento de stock (${tipoMovimiento}: ${cantidadConSigno > 0 ? `+${cantidadConSigno}` : cantidadConSigno}) guardado en la base de datos y auditado.`
       );
       onDatosActualizados?.();
     } catch (err) {
@@ -554,7 +554,7 @@ export function PanelProductosStock({
         <>
           <div className="panel-grid">
             <div className="pos-card">
-              <h2>Alta de Producto (Persistencia SQLite)</h2>
+              <h2>Alta de Producto</h2>
               <form
                 onSubmit={(e) => void manejarCrearProducto(e)}
                 className="form-stack"
@@ -713,7 +713,7 @@ export function PanelProductosStock({
                   )}
                 </div>
                 <button type="submit" className="btn-primary">
-                  Guardar Producto en SQLite
+                  Guardar Producto
                 </button>
               </form>
 
@@ -820,7 +820,7 @@ export function PanelProductosStock({
                   </label>
                 </div>
                 <button type="submit" className="btn-primary">
-                  Registrar Movimiento en SQLite
+                  Registrar Movimiento
                 </button>
               </form>
             </div>

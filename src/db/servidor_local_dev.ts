@@ -106,10 +106,18 @@ import {
   listarVentasPropiasDelDiaMovil,
   obtenerCatalogoVentaMovil,
   obtenerConfigVentaMovil,
+  obtenerConfiguracionNetlify,
+  guardarConfiguracionNetlify,
+  registrarDespliegueNetlifyExitoso,
   obtenerEstadoCajaMovilUsuario,
   revocarSesionMovil,
   validarYRenovarSesionMovil,
 } from './venta_movil_repo.ts';
+import {
+  desplegarSitioNetlify,
+  prepararPaqueteVentaMovilNetlify,
+  verificarTokenNetlifyApi,
+} from '../sync/desplegador_netlify.ts';
 import {
   AdaptadorArcaHomologacionLocal,
   anularVentaConNotaCreditoArca,
@@ -1356,6 +1364,85 @@ export function ejecutarAccionPosLocal(
 
     case 'obtener_config_venta_movil': {
       return obtenerConfigVentaMovil(db, actor.comercio_id);
+    }
+
+    case 'obtener_configuracion_netlify': {
+      return obtenerConfiguracionNetlify(db, actor.comercio_id);
+    }
+
+    case 'verificar_token_netlify': {
+      const token = String(payload.token ?? '');
+      return verificarTokenNetlifyApi(token);
+    }
+
+    case 'guardar_configuracion_netlify': {
+      const res = guardarConfiguracionNetlify(db, {
+        actor,
+        netlifyToken:
+          payload.netlifyToken !== undefined
+            ? String(payload.netlifyToken)
+            : undefined,
+        netlifySiteName:
+          payload.netlifySiteName !== undefined
+            ? String(payload.netlifySiteName)
+            : undefined,
+      });
+      sincronizarWalADisco(db);
+      return res;
+    }
+
+    case 'desplegar_cajero_movil_netlify': {
+      return (async () => {
+        const configSistema = obtenerConfiguracionSistema(db, actor.comercio_id);
+        const configNetlify = obtenerConfiguracionNetlify(db, actor.comercio_id);
+        const token = String(payload.token ?? configNetlify.netlify_token ?? '');
+        if (!token) {
+          throw new Error('Debe proporcionar un Personal Access Token de Netlify.');
+        }
+
+        const comercio = db
+          .prepare('SELECT nombre FROM comercios WHERE id = ?')
+          .get(actor.comercio_id) as { nombre: string } | undefined;
+
+        const zipBuffer = prepararPaqueteVentaMovilNetlify({
+          supabaseUrl: configSistema.supabase_url,
+          supabaseAnonKey: configSistema.supabase_anon_key,
+          comercioId: actor.comercio_id,
+          comercioNombre: comercio?.nombre || 'Comercio',
+        });
+
+        const resDeploy = await desplegarSitioNetlify({
+          token,
+          zipBuffer,
+          siteId: payload.siteId
+            ? String(payload.siteId)
+            : configNetlify.netlify_site_id,
+          siteName: payload.siteName
+            ? String(payload.siteName)
+            : configNetlify.netlify_site_name,
+        });
+
+        if (!resDeploy.ok) {
+          throw new Error(
+            resDeploy.error || 'Fallo durante el despliegue en Netlify.'
+          );
+        }
+
+        const estadoMovil = registrarDespliegueNetlifyExitoso(db, {
+          actor,
+          siteId: resDeploy.siteId,
+          siteName: resDeploy.siteName,
+          siteUrl: resDeploy.siteUrl,
+          urlVentaMovil: resDeploy.urlVentaMovil,
+          token,
+        });
+
+        sincronizarWalADisco(db);
+        return {
+          despliegue: resDeploy,
+          configMovil: estadoMovil,
+        };
+      })();
     }
 
     case 'configurar_venta_movil': {
