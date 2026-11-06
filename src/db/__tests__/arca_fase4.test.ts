@@ -10,6 +10,7 @@ import {
   crearComboPromocion,
   crearListaPrecio,
   crearVarianteProducto,
+  eliminarComboPromocion,
   emitirComprobanteArcaVenta,
   guardarConfiguracionArca,
   listarCombosComercio,
@@ -37,6 +38,7 @@ import {
   parsearCodigoBarrasBalanza,
   validarConfiguracionArcaCliente,
 } from '../../domain/arca_fase4.ts';
+import { PanelProductosStock } from '../../features/productos/PanelProductosStock.tsx';
 import { PanelVentaPOS } from '../../features/venta/PanelVentaPOS.tsx';
 
 function crearContextoFase4() {
@@ -434,6 +436,31 @@ describe('Fase 4 — Facturación Electrónica ARCA (Opcional) y Extras (PLAN.md
     // El stock de ambos componentes se descontó mediante movimientos_stock (Regla 4)
     expect(obtenerStockProducto(db, comercioId, prodTaladroId)).toBe(18);
     expect(obtenerStockProducto(db, comercioId, prodMechaId)).toBe(26);
+
+    // Nuevo stock disponible de combos tras la venta: min(18/1, 26/2) = 13 combos
+    const combosPostVenta = listarCombosComercio(db, comercioId);
+    expect(combosPostVenta[0]?.stock_combos_disponibles).toBe(13);
+
+    // Renderizado del Panel de Armado de Combos en Productos
+    const htmlProductos = renderToStaticMarkup(
+      React.createElement(PanelProductosStock, {
+        rolActivo: 'encargado',
+        combosIniciales: combosPostVenta,
+      })
+    );
+    expect(htmlProductos).toContain(
+      'Combos y Promociones — Armado de Paquetes con Stock Inteligente'
+    );
+    expect(htmlProductos).toContain('Kit Profesional Taladro + 2 Mechas');
+    expect(htmlProductos).toContain('13 combo(s)');
+
+    // Baja lógica del combo y verificación de auditoría encadenada
+    eliminarComboPromocion(db, actorSuperadmin, {
+      comboId,
+      motivo: 'Fin de promoción',
+    });
+    expect(listarCombosComercio(db, comercioId)).toHaveLength(0);
+    expect(verificarIntegridadAuditoriaDb(db, comercioId).integra).toBe(true);
 
     // 6.4 Lector de Códigos de Barras de Balanza EAN-13 (Prefijo 20 + PLU 00105 + 01250 gramos = 1,250 kg)
     const etiquetaBalanzaPeso = construirCodigoBarrasBalanzaEan13({

@@ -1664,6 +1664,75 @@ export function crearComboPromocion(
   });
 }
 
+export function eliminarComboPromocion(
+  db: DatabaseSync,
+  actor: ActorContexto,
+  params: {
+    readonly comboId: string;
+    readonly motivo?: string;
+  }
+): void {
+  exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
+
+  ejecutarEnTransaccion(db, () => {
+    const existente = db
+      .prepare(
+        `SELECT id, nombre, precio_venta
+         FROM combos
+         WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
+      )
+      .get(params.comboId, actor.comercio_id) as
+      | { id: string; nombre: string; precio_venta: Centavos }
+      | undefined;
+
+    if (!existente) {
+      throw new Error('Combo no encontrado o ya eliminado.');
+    }
+
+    const ahora = new Date().toISOString();
+    db.prepare(
+      `UPDATE combos
+       SET activo = 0, deleted_at = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+       WHERE id = ? AND comercio_id = ?`
+    ).run(ahora, ahora, actor.device_id, params.comboId, actor.comercio_id);
+    encolarSync(db, 'combos', params.comboId, 'delete_logico', ahora);
+
+    const itemsCombo = db
+      .prepare(
+        `SELECT id FROM combos_items
+         WHERE combo_id = ? AND comercio_id = ? AND deleted_at IS NULL`
+      )
+      .all(params.comboId, actor.comercio_id) as unknown as { id: string }[];
+
+    for (const item of itemsCombo) {
+      db.prepare(
+        `UPDATE combos_items
+         SET deleted_at = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+         WHERE id = ? AND comercio_id = ?`
+      ).run(ahora, ahora, actor.device_id, item.id, actor.comercio_id);
+      encolarSync(db, 'combos_items', item.id, 'delete_logico', ahora);
+    }
+
+    insertarRegistroAuditoria(db, {
+      actor,
+      accion: 'combo_eliminar',
+      entidad: 'combos',
+      entidad_id: params.comboId,
+      valores_antes: {
+        nombre: existente.nombre,
+        precio_venta: existente.precio_venta,
+        activo: 1,
+      },
+      valores_despues: {
+        activo: 0,
+        deleted_at: ahora,
+      },
+      motivo: params.motivo ?? 'Baja lógica de combo promocional',
+      ahoraIso: ahora,
+    });
+  });
+}
+
 export function listarCombosComercio(
   db: DatabaseSync,
   comercioId: string

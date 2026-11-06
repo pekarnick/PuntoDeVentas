@@ -1,5 +1,12 @@
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { inspeccionarEntradasXlsx } from '../../domain/index.ts';
+import {
+  crearCategoria,
+  crearMarca,
+  crearProveedor,
+} from '../gestion_fase3_repo.ts';
 import {
   abrirSesionCaja,
   actualizarProductoYPrecio,
@@ -10,6 +17,7 @@ import {
   crearUsuario,
   exportarAuditoriaAXlsx,
   exportarInformeGestionFase1AXlsx,
+  exportarPedidoReposicionBajoStockAPdf,
   inicializarComercioYSuperadmin,
   obtenerInformeGestionFase1,
   registrarMovimientoManualCaja,
@@ -17,6 +25,8 @@ import {
   verificarIntegridadAuditoriaDb,
   type ActorContexto,
 } from '../index.ts';
+import { PanelComprasProveedores } from '../../features/compras/PanelComprasProveedores.tsx';
+import { PanelInformes } from '../../features/informes/PanelInformes.tsx';
 
 describe('Tarea 4 — Informes de Fase 1, Ganancia Histórica, Stock Valorizado y Exportación a Excel .xlsx (PLAN.md §7, §10, §13)', () => {
   function prepararEscenarioInformes() {
@@ -229,5 +239,233 @@ describe('Tarea 4 — Informes de Fase 1, Ganancia Histórica, Stock Valorizado 
     );
     expect(registrosExportacion.length).toBe(2);
     expect(verificarIntegridadAuditoriaDb(db, comercioId).integra).toBe(true);
+  });
+
+  it('calcula todas las métricas clave de docs/manual/08_informes_y_fiscal.md (Margen sobre costo/venta, Ticket Promedio, Ganancia Proyectada) y renderiza PanelInformes completo', () => {
+    const { db, actorEncargado, actorCajero } = prepararEscenarioInformes();
+
+    const prodId = crearProducto(db, actorEncargado, {
+      nombre: 'Pintura Látex Interior 20L',
+      costoCompraCentavos: 2000000, // $ 20.000,00
+      precioVentaCentavos: 3000000, // $ 30.000,00
+      stockMinimo: 2,
+      stockInicial: 5,
+    });
+
+    registrarVenta(db, actorCajero, {
+      items: [{ productoId: prodId, cantidad: 2 }],
+      pagos: [{ medio: 'efectivo', monto: 6000000 }],
+    });
+
+    const informe = obtenerInformeGestionFase1(db, actorEncargado);
+
+    // Métricas clave del período (§1 de 08_informes_y_fiscal.md)
+    expect(informe.metricasClave.totalVentasCentavos).toBe(6000000);
+    expect(informe.metricasClave.costoHistoricoTotalCentavos).toBe(4000000);
+    expect(informe.metricasClave.gananciaBrutaCentavos).toBe(2000000);
+    // Margen sobre costo: (20.000 / 40.000) * 100 = 50%
+    expect(informe.metricasClave.margenSobreCostoPorcentaje).toBe(50);
+    // Margen sobre venta: (20.000 / 60.000) * 100 = 33.33%
+    expect(informe.metricasClave.margenRentabilidadVentaPorcentaje).toBe(33.33);
+    expect(informe.metricasClave.cantidadOperaciones).toBe(1);
+    expect(informe.metricasClave.ticketPromedioCentavos).toBe(6000000);
+
+    // Stock valorizado (§3 de 08_informes_y_fiscal.md): quedan 3 unidades
+    // Costo reposición: 3 * $20.000 = $60.000 (6.000.000 centavos)
+    // Precio venta: 3 * $30.000 = $90.000 (9.000.000 centavos)
+    // Ganancia proyectada: $90.000 - $60.000 = $30.000 (3.000.000 centavos)
+    expect(informe.stockValorizado.totalValorizadoCostoCentavos).toBe(6000000);
+    expect(informe.stockValorizado.totalValorizadoVentaCentavos).toBe(9000000);
+    expect(informe.stockValorizado.gananciaProyectadaTotalCentavos).toBe(
+      3000000
+    );
+
+    const htmlInformes = renderToStaticMarkup(
+      React.createElement(PanelInformes, {
+        rolActivo: 'superadmin',
+        informeInicial: informe,
+      })
+    );
+
+    expect(htmlInformes).toContain(
+      '1. Informes de Gestión en Tiempo Real (Superadmin y Encargado)'
+    );
+    expect(htmlInformes).toContain('Total de Ventas ($)');
+    expect(htmlInformes).toContain('Ganancia Bruta Real ($)');
+    expect(htmlInformes).toContain('Margen de Rentabilidad (%)');
+    expect(htmlInformes).toContain('Cantidad de Operaciones');
+    expect(htmlInformes).toContain('Ticket Promedio');
+    expect(htmlInformes).toContain('Desglose de Medios de Pago');
+    expect(htmlInformes).toContain('Ganancia Proyectada');
+    expect(htmlInformes).toContain(
+      '4. Libro IVA Ventas y Libro IVA Compras (Excel Oficial)'
+    );
+  });
+
+  it('arma automáticamente listas de pedido de productos con stock bajo por proveedor, por marca y por categoría y exporta el PDF auditado', () => {
+    const { db, comercioId, actorSuperadmin, actorEncargado, actorCajero } =
+      prepararEscenarioInformes();
+
+    const provNorteId = crearProveedor(db, actorEncargado, {
+      razonSocial: 'Distribuidora Norte S.A.',
+      cuit: '30-71234567-1',
+    });
+    const provSurId = crearProveedor(db, actorEncargado, {
+      razonSocial: 'Mayorista Ferretero Sur',
+    });
+
+    const marcaStanleyId = crearMarca(db, actorEncargado, {
+      nombre: 'Stanley',
+    });
+    const marcaAlbaId = crearMarca(db, actorEncargado, {
+      nombre: 'Alba',
+    });
+
+    const catHerramientasId = crearCategoria(db, actorEncargado, {
+      nombre: 'Herramientas Manuales',
+    });
+    const catPinturasId = crearCategoria(db, actorEncargado, {
+      nombre: 'Pinturería',
+    });
+
+    // Producto 1: Bajo stock (stock actual 2 <= mínimo 6)
+    crearProducto(db, actorEncargado, {
+      nombre: 'Destornillador Phillips PH2',
+      codigoInterno: 'DES-002',
+      proveedorId: provNorteId,
+      marcaId: marcaStanleyId,
+      categoriaId: catHerramientasId,
+      costoCompraCentavos: 450000,
+      precioVentaCentavos: 790000,
+      stockMinimo: 6,
+      stockInicial: 2,
+    });
+
+    // Producto 2: Bajo stock en el límite (stock actual 4 <= mínimo 4)
+    crearProducto(db, actorEncargado, {
+      nombre: 'Esmalte Sintético Blanco 4L',
+      codigoInterno: 'ESM-004',
+      proveedorId: provSurId,
+      marcaId: marcaAlbaId,
+      categoriaId: catPinturasId,
+      costoCompraCentavos: 1800000,
+      precioVentaCentavos: 2900000,
+      stockMinimo: 4,
+      stockInicial: 4,
+    });
+
+    // Producto 3: Stock holgado (stock actual 20 > mínimo 5) -> NO debe entrar al pedido
+    crearProducto(db, actorEncargado, {
+      nombre: 'Cinta Enmascarar 24mm',
+      codigoInterno: 'CIN-024',
+      proveedorId: provNorteId,
+      marcaId: marcaAlbaId,
+      categoriaId: catPinturasId,
+      costoCompraCentavos: 150000,
+      precioVentaCentavos: 280000,
+      stockMinimo: 5,
+      stockInicial: 20,
+    });
+
+    // El cajero NO puede exportar pedidos con costos a PDF (Regla 20)
+    expect(() =>
+      exportarPedidoReposicionBajoStockAPdf(db, actorCajero, {
+        criterio: 'proveedor',
+      })
+    ).toThrow(/PERMISO_DENEGADO/);
+
+    // 1. Exportar PDF agrupado por Proveedor
+    const pdfPorProveedor = exportarPedidoReposicionBajoStockAPdf(
+      db,
+      actorEncargado,
+      {
+        criterio: 'proveedor',
+      }
+    );
+    expect(pdfPorProveedor.resumen.total_productos_bajo_stock).toBe(2);
+    expect(pdfPorProveedor.resumen.total_grupos).toBe(2);
+    const cabeceraPdfProv = new TextDecoder('latin1').decode(
+      pdfPorProveedor.pdfBytes.subarray(0, 8)
+    );
+    expect(cabeceraPdfProv).toBe('%PDF-1.4');
+    const textoPdfProv = new TextDecoder('latin1').decode(
+      pdfPorProveedor.pdfBytes
+    );
+    expect(textoPdfProv).toContain('Distribuidora Norte S.A.');
+    expect(textoPdfProv).toContain('Mayorista Ferretero Sur');
+    expect(textoPdfProv).toContain('Destornillador Phillips PH2');
+
+    // 2. Exportar PDF agrupado por Marca
+    const pdfPorMarca = exportarPedidoReposicionBajoStockAPdf(
+      db,
+      actorEncargado,
+      {
+        criterio: 'marca',
+      }
+    );
+    expect(pdfPorMarca.resumen.total_grupos).toBe(2);
+    expect(
+      pdfPorMarca.resumen.grupos.map((g) => g.grupo_nombre)
+    ).toEqual(['Alba', 'Stanley']);
+
+    // 3. Exportar PDF agrupado por Categoría (filtrado solo por Herramientas Manuales)
+    const pdfPorCategoria = exportarPedidoReposicionBajoStockAPdf(
+      db,
+      actorEncargado,
+      {
+        criterio: 'categoria',
+        filtroGrupoId: catHerramientasId,
+      }
+    );
+    expect(pdfPorCategoria.resumen.total_grupos).toBe(1);
+    expect(pdfPorCategoria.resumen.grupos[0]?.grupo_nombre).toBe(
+      'Herramientas Manuales'
+    );
+    expect(pdfPorCategoria.resumen.total_productos_bajo_stock).toBe(1);
+
+    // Verificar que las 3 exportaciones a PDF quedaron auditadas con SHA-256 íntegro
+    const auditoriasPdf = consultarRegistrosAuditoria(db, actorSuperadmin, {
+      accion: 'informe_exportar',
+    });
+    expect(auditoriasPdf.length).toBe(3);
+    expect(verificarIntegridadAuditoriaDb(db, comercioId).integra).toBe(true);
+
+    // Verificar renderizado en PanelComprasProveedores
+    const htmlCompras = renderToStaticMarkup(
+      React.createElement(PanelComprasProveedores, {
+        rolActivo: 'encargado',
+        catalogoProductos: [
+          {
+            id: 'prod-1',
+            nombre: 'Destornillador Phillips PH2',
+            codigo_interno: 'DES-002',
+            codigos_barras: [],
+            unidad: 'unidad',
+            permite_decimales: false,
+            costo_compra: 450000,
+            precio_venta: 790000,
+            stock_minimo: 6,
+            stock_actual: 2,
+            boton_rapido: false,
+            imagen_path: null,
+            imagen_hash: null,
+            proveedor_id: provNorteId,
+            proveedor_nombre: 'Distribuidora Norte S.A.',
+            marca_id: marcaStanleyId,
+            marca_nombre: 'Stanley',
+            categoria_id: catHerramientasId,
+            categoria_nombre: 'Herramientas Manuales',
+          },
+        ],
+      })
+    );
+    expect(htmlCompras).toContain(
+      'Lista Automática de Productos con Stock Bajo (Pedidos de Reposición)'
+    );
+    expect(htmlCompras).toContain('Por Proveedor');
+    expect(htmlCompras).toContain('Por Marca');
+    expect(htmlCompras).toContain('Por Categoría');
+    expect(htmlCompras).toContain('Exportar PDF');
+    expect(htmlCompras).toContain('Distribuidora Norte S.A.');
   });
 });

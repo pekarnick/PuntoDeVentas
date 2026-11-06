@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import { calcularPrecioYStockCombo } from '../../domain/arca_fase4.ts';
 import {
   formatearMonedaARS,
   pesosACentavos,
@@ -21,6 +22,7 @@ import {
   normalizarMovimientoStock,
   type TipoMovimientoStock,
 } from '../../domain/stock.ts';
+import type { ComboPromocionUI } from '../venta/PanelVentaPOS.tsx';
 
 export interface CategoriaItemUI {
   readonly id: string;
@@ -62,6 +64,7 @@ export interface ProductoAdminItemUI {
 export interface PanelProductosStockProps {
   readonly rolActivo: RolUsuario;
   readonly productosIniciales?: readonly ProductoAdminItemUI[];
+  readonly combosIniciales?: readonly ComboPromocionUI[];
   readonly categoriasServidor?: readonly CategoriaItemUI[];
   readonly marcasServidor?: readonly MarcaItemUI[];
   readonly proveedoresServidor?: readonly ProveedorBasicoUI[];
@@ -104,6 +107,7 @@ const PRODUCTOS_FALLBACK_TESTS: ProductoAdminItemUI[] = [
 export function PanelProductosStock({
   rolActivo,
   productosIniciales = PRODUCTOS_FALLBACK_TESTS,
+  combosIniciales = [],
   categoriasServidor = [],
   marcasServidor = [],
   proveedoresServidor = [],
@@ -112,15 +116,38 @@ export function PanelProductosStock({
   const [productos, setProductos] = useState<ProductoAdminItemUI[]>(() => [
     ...productosIniciales,
   ]);
+  const [combos, setCombos] = useState<ComboPromocionUI[]>(() => [
+    ...combosIniciales,
+  ]);
   const [busqueda, setBusqueda] = useState('');
   const [paginaProductos, setPaginaProductos] = useState(1);
+
+  // Estado de Armado de Combo con sus componentes, cantidades requeridas y precio especial
+  const [comboNombre, setComboNombre] = useState('');
+  const [comboCodigoBarras, setComboCodigoBarras] = useState('');
+  const [comboDescripcion, setComboDescripcion] = useState('');
+  const [comboPrecioEspecialInput, setComboPrecioEspecialInput] = useState('');
+  const [comboComponenteProdId, setComboComponenteProdId] = useState<string>(
+    productosIniciales[0]?.id ?? ''
+  );
+  const [comboComponenteCantInput, setComboComponenteCantInput] = useState('1');
+  const [comboComponentesBorrador, setComboComponentesBorrador] = useState<
+    Array<{ productoId: string; cantidad: number }>
+  >([]);
 
   useEffect(() => {
     setProductos([...productosIniciales]);
     if (productosIniciales.length > 0 && !productoAjusteId) {
       setProductoAjusteId(productosIniciales[0]!.id);
     }
+    if (productosIniciales.length > 0 && !comboComponenteProdId) {
+      setComboComponenteProdId(productosIniciales[0]!.id);
+    }
   }, [productosIniciales]);
+
+  useEffect(() => {
+    setCombos([...combosIniciales]);
+  }, [combosIniciales]);
 
   // Alta de producto
   const [nombreNuevo, setNombreNuevo] = useState('');
@@ -543,6 +570,219 @@ export function PanelProductosStock({
       }
     };
     reader.readAsText(file, 'utf-8');
+  }
+
+  // =========================================================================
+  // Armado de Combos con cálculo inteligente de stock por componente menor
+  // =========================================================================
+
+  const componentesBorradorDetallados = useMemo(() => {
+    return comboComponentesBorrador.map((comp) => {
+      const prod = productos.find((p) => p.id === comp.productoId);
+      const stockActual = prod?.stock_actual ?? 0;
+      const precioUnitarioNormal = (prod?.precio_venta ?? 0) as Centavos;
+      const combosPosiblesPorComponente =
+        comp.cantidad > 0 ? Math.floor(Math.max(0, stockActual) / comp.cantidad) : 0;
+      return {
+        productoId: comp.productoId,
+        nombreProducto: prod?.nombre ?? 'Producto',
+        unidad: prod?.unidad ?? 'unidad',
+        cantidadPorCombo: comp.cantidad,
+        precioUnitarioNormalCentavos: precioUnitarioNormal,
+        subtotalNormalCentavos: Math.round(
+          comp.cantidad * precioUnitarioNormal
+        ) as Centavos,
+        stockActualComponente: stockActual,
+        combosPosiblesPorComponente,
+      };
+    });
+  }, [comboComponentesBorrador, productos]);
+
+  const calculoBorradorCombo = useMemo(() => {
+    if (componentesBorradorDetallados.length === 0) return null;
+    let precioEspecialCentavos = 0 as Centavos;
+    try {
+      precioEspecialCentavos = comboPrecioEspecialInput.trim()
+        ? pesosACentavos(comboPrecioEspecialInput)
+        : (0 as Centavos);
+    } catch {
+      precioEspecialCentavos = 0 as Centavos;
+    }
+
+    const sumaNormal = componentesBorradorDetallados.reduce(
+      (acc, c) => acc + c.subtotalNormalCentavos,
+      0
+    ) as Centavos;
+
+    const precioParaCalculo =
+      precioEspecialCentavos > 0
+        ? precioEspecialCentavos
+        : Math.max(1, sumaNormal);
+
+    const resultado = calcularPrecioYStockCombo({
+      componentes: componentesBorradorDetallados,
+      precioComboCentavos: precioParaCalculo,
+    });
+
+    const componenteLimitante = componentesBorradorDetallados.reduce(
+      (min, actual) =>
+        actual.combosPosiblesPorComponente < min.combosPosiblesPorComponente
+          ? actual
+          : min,
+      componentesBorradorDetallados[0]!
+    );
+
+    return {
+      ...resultado,
+      precioEspecialIngresado: precioEspecialCentavos,
+      componenteLimitante,
+    };
+  }, [componentesBorradorDetallados, comboPrecioEspecialInput]);
+
+  // Recalcular stock disponible de cada combo activo usando el stock actual en vivo de sus componentes
+  const combosConStockEnVivo = useMemo(() => {
+    return combos.map((combo) => {
+      const itemsActualizados = combo.items.map((it) => {
+        const prodEnVivo = productos.find((p) => p.id === it.producto_id);
+        return {
+          ...it,
+          stock_actual: prodEnVivo ? prodEnVivo.stock_actual : it.stock_actual,
+          precio_unitario_normal: prodEnVivo
+            ? prodEnVivo.precio_venta
+            : it.precio_unitario_normal,
+        };
+      });
+
+      if (itemsActualizados.length === 0) {
+        return combo;
+      }
+
+      const calc = calcularPrecioYStockCombo({
+        precioComboCentavos: Math.max(1, combo.precio_venta),
+        componentes: itemsActualizados.map((it) => ({
+          productoId: it.producto_id,
+          nombreProducto: it.producto_nombre,
+          cantidadPorCombo: it.cantidad,
+          precioUnitarioNormalCentavos: it.precio_unitario_normal,
+          stockActualComponente: it.stock_actual,
+        })),
+      });
+
+      return {
+        ...combo,
+        precio_suma_normal: calc.precioSumaNormalCentavos,
+        ahorro_centavos: calc.ahorroCentavos,
+        porcentaje_descuento: calc.porcentajeDescuento,
+        stock_combos_disponibles: calc.stockCombosDisponibles,
+        items: itemsActualizados,
+      };
+    });
+  }, [combos, productos]);
+
+  function agregarComponenteAlComboBorrador() {
+    setMensajeError(null);
+    const idEfectivo = comboComponenteProdId || productos[0]?.id || '';
+    const prod = productos.find((p) => p.id === idEfectivo);
+    if (!prod) {
+      setMensajeError('Seleccioná un producto del catálogo para agregar al combo.');
+      return;
+    }
+
+    const cantidad = Number(comboComponenteCantInput.replace(',', '.'));
+    if (!Number.isFinite(cantidad) || cantidad <= 0) {
+      setMensajeError('La cantidad requerida del componente debe ser mayor a cero.');
+      return;
+    }
+
+    setComboComponentesBorrador((prev) => {
+      const existe = prev.find((c) => c.productoId === prod.id);
+      if (existe) {
+        return prev.map((c) =>
+          c.productoId === prod.id
+            ? { ...c, cantidad: Number((c.cantidad + cantidad).toFixed(3)) }
+            : c
+        );
+      }
+      return [...prev, { productoId: prod.id, cantidad }];
+    });
+    setComboComponenteCantInput('1');
+  }
+
+  function quitarComponenteDelComboBorrador(productoId: string) {
+    setComboComponentesBorrador((prev) =>
+      prev.filter((c) => c.productoId !== productoId)
+    );
+  }
+
+  async function manejarGuardarComboPromocion(e: React.FormEvent) {
+    e.preventDefault();
+    if (!puedeEditarCatalogo) return;
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      if (!comboNombre.trim()) {
+        throw new Error('Ingresá un nombre para el combo o promoción.');
+      }
+      if (comboComponentesBorrador.length === 0) {
+        throw new Error('Agregá al menos un producto componente al combo.');
+      }
+      const precioEspecial = pesosACentavos(comboPrecioEspecialInput);
+      if (precioEspecial <= 0) {
+        throw new Error('El precio especial de venta del combo debe ser mayor a $ 0,00.');
+      }
+
+      const res = await invocarPosApi<{
+        id: string;
+        combos: readonly ComboPromocionUI[];
+      }>('crear_combo_promocion', {
+        rolActivo,
+        nombre: comboNombre.trim(),
+        descripcion: comboDescripcion.trim() || null,
+        codigoBarras: comboCodigoBarras.trim() || null,
+        precioVentaCentavos: precioEspecial,
+        componentes: comboComponentesBorrador,
+      });
+
+      setCombos([...res.combos]);
+      setComboNombre('');
+      setComboCodigoBarras('');
+      setComboDescripcion('');
+      setComboPrecioEspecialInput('');
+      setComboComponentesBorrador([]);
+      setMensajeOk(
+        `Combo "${comboNombre.trim()}" creado con éxito. Al venderlo en caja se descontará automáticamente el stock de cada uno de sus componentes.`
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo guardar el combo.'
+      );
+    }
+  }
+
+  async function manejarEliminarCombo(comboId: string, nombreCombo: string) {
+    if (!puedeEditarCatalogo) return;
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      const res = await invocarPosApi<{
+        ok: boolean;
+        combos: readonly ComboPromocionUI[];
+      }>('eliminar_combo_promocion', {
+        rolActivo,
+        comboId,
+        motivo: `Baja de combo "${nombreCombo}" desde panel de productos`,
+      });
+      setCombos([...res.combos]);
+      setMensajeOk(`Combo "${nombreCombo}" desactivado y registrado en auditoría.`);
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo desactivar el combo.'
+      );
+    }
   }
 
   return (
@@ -991,6 +1231,366 @@ export function PanelProductosStock({
           </div>
         </>
       )}
+
+      {/* Panel de Armado de Combos y Promociones (docs/manual/04_productos_y_stock.md §3) */}
+      <div className="pos-card">
+        <div className="card-header">
+          <div>
+            <h2>
+              Combos y Promociones — Armado de Paquetes con Stock Inteligente
+            </h2>
+            <p className="text-muted">
+              Cada vez que se vende un combo, el sistema descuenta automáticamente
+              del inventario la cantidad correspondiente de cada uno de sus
+              componentes individuales. El stock disponible del combo se calcula de
+              manera inteligente en base al componente que tenga menor existencia
+              en el local.
+            </p>
+          </div>
+        </div>
+
+        {puedeEditarCatalogo && (
+          <form
+            onSubmit={(e) => void manejarGuardarComboPromocion(e)}
+            className="form-stack"
+            style={{
+              marginBottom: '1.25rem',
+              paddingBottom: '1rem',
+              borderBottom: '1px solid #e2e8f0',
+            }}
+          >
+            <h3>Panel de Armado de Combo</h3>
+            <div className="form-row">
+              <label>
+                Nombre del combo / promoción:
+                <input
+                  type="text"
+                  value={comboNombre}
+                  onChange={(e) => setComboNombre(e.target.value)}
+                  placeholder="Ej. Promo Fernet 750ml + 2 Gaseosas Cola 1.5L"
+                />
+              </label>
+              <label>
+                Precio especial de venta ($):
+                <input
+                  type="text"
+                  value={comboPrecioEspecialInput}
+                  onChange={(e) => setComboPrecioEspecialInput(e.target.value)}
+                  placeholder="Ej. 14500,00"
+                />
+              </label>
+              <label>
+                Código de barras del combo (opcional):
+                <input
+                  type="text"
+                  value={comboCodigoBarras}
+                  onChange={(e) => setComboCodigoBarras(e.target.value)}
+                  placeholder="Ej. 7799990001112"
+                />
+              </label>
+              <label>
+                Descripción (opcional):
+                <input
+                  type="text"
+                  value={comboDescripcion}
+                  onChange={(e) => setComboDescripcion(e.target.value)}
+                  placeholder="Ej. Oferta fin de semana"
+                />
+              </label>
+            </div>
+
+            <div className="subcard-box" style={{ padding: '0.85rem', borderRadius: '0.6rem' }}>
+              <strong style={{ display: 'block', marginBottom: '0.5rem' }}>
+                Componentes y cantidades requeridas por cada combo
+              </strong>
+              <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                <label style={{ flex: 2 }}>
+                  Producto componente:
+                  <select
+                    value={comboComponenteProdId || productos[0]?.id || ''}
+                    onChange={(e) => setComboComponenteProdId(e.target.value)}
+                  >
+                    {productos.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.nombre} ({p.codigo_interno}) — Precio normal:{' '}
+                        {formatearMonedaARS(p.precio_venta)} — Existencia actual:{' '}
+                        {p.stock_actual} {p.unidad}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ flex: 1 }}>
+                  Cantidad requerida:
+                  <input
+                    type="number"
+                    min="0.001"
+                    step="any"
+                    value={comboComponenteCantInput}
+                    onChange={(e) => setComboComponenteCantInput(e.target.value)}
+                    placeholder="1"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={agregarComponenteAlComboBorrador}
+                >
+                  + Agregar Componente al Combo
+                </button>
+              </div>
+
+              {componentesBorradorDetallados.length > 0 && (
+                <div style={{ marginTop: '0.85rem' }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Componente</th>
+                        <th className="num">Cant. Requerida</th>
+                        <th className="num">Precio Unit. Normal</th>
+                        <th className="num">Subtotal Normal</th>
+                        <th className="num">Existencia en Local</th>
+                        <th className="num">Combos Armables</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {componentesBorradorDetallados.map((comp) => {
+                        const esLimitante =
+                          calculoBorradorCombo?.componenteLimitante.productoId ===
+                          comp.productoId;
+                        return (
+                          <tr key={comp.productoId}>
+                            <td>
+                              <strong>{comp.nombreProducto}</strong>
+                              {esLimitante && (
+                                <span
+                                  className="badge-rol"
+                                  style={{ marginLeft: '0.4rem' }}
+                                >
+                                  Menor existencia (define tope)
+                                </span>
+                              )}
+                            </td>
+                            <td className="num">
+                              {comp.cantidadPorCombo} {comp.unidad}
+                            </td>
+                            <td className="num">
+                              {formatearMonedaARS(
+                                comp.precioUnitarioNormalCentavos
+                              )}
+                            </td>
+                            <td className="num">
+                              {formatearMonedaARS(comp.subtotalNormalCentavos)}
+                            </td>
+                            <td className="num">
+                              {comp.stockActualComponente} {comp.unidad}
+                            </td>
+                            <td className="num">
+                              <strong
+                                className={
+                                  comp.combosPosiblesPorComponente <= 0
+                                    ? 'diff-negativa'
+                                    : ''
+                                }
+                              >
+                                {comp.combosPosiblesPorComponente} combo(s)
+                              </strong>
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn-danger-outline"
+                                onClick={() =>
+                                  quitarComponenteDelComboBorrador(comp.productoId)
+                                }
+                              >
+                                Quitar
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  {calculoBorradorCombo && (
+                    <div
+                      className="arqueo-box"
+                      style={{ marginTop: '0.75rem' }}
+                    >
+                      <div className="arqueo-line">
+                        <span>Suma de precios individuales normales:</span>
+                        <strong>
+                          {formatearMonedaARS(
+                            calculoBorradorCombo.precioSumaNormalCentavos
+                          )}
+                        </strong>
+                      </div>
+                      <div className="arqueo-line">
+                        <span>Precio especial de venta del combo:</span>
+                        <strong>
+                          {calculoBorradorCombo.precioEspecialIngresado > 0
+                            ? formatearMonedaARS(
+                                calculoBorradorCombo.precioEspecialIngresado
+                              )
+                            : 'Ingresá el precio especial arriba'}
+                        </strong>
+                      </div>
+                      {calculoBorradorCombo.precioEspecialIngresado > 0 && (
+                        <div className="arqueo-line">
+                          <span>Ahorro para el cliente en caja:</span>
+                          <strong className="diff-positiva">
+                            {formatearMonedaARS(
+                              calculoBorradorCombo.ahorroCentavos
+                            )}{' '}
+                            ({calculoBorradorCombo.porcentajeDescuento}% OFF)
+                          </strong>
+                        </div>
+                      )}
+                      <div className="arqueo-line destaque">
+                        <span>
+                          Stock disponible del combo (limitado por &ldquo;
+                          {calculoBorradorCombo.componenteLimitante.nombreProducto}
+                          &rdquo;):
+                        </span>
+                        <strong
+                          className={
+                            calculoBorradorCombo.stockCombosDisponibles <= 0
+                              ? 'diff-negativa'
+                              : 'diff-positiva'
+                          }
+                        >
+                          {calculoBorradorCombo.stockCombosDisponibles} combo(s)
+                          disponibles
+                        </strong>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={comboComponentesBorrador.length === 0}
+            >
+              Guardar Combo con Precio Especial
+            </button>
+          </form>
+        )}
+
+        <h3>Combos Activos y Stock Calculado por Menor Existencia</h3>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Combo / Promoción</th>
+              <th>Componentes y Cantidades Requeridas</th>
+              <th className="num">Suma Individual</th>
+              <th className="num">Precio Especial Venta</th>
+              <th className="num">Ahorro Cliente</th>
+              <th className="num">Stock Disponible del Combo</th>
+              {puedeEditarCatalogo && <th>Acciones</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {combosConStockEnVivo.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={puedeEditarCatalogo ? 7 : 6}
+                  className="text-muted"
+                >
+                  No hay combos armados todavía. Utilizá el panel superior para
+                  armar una promoción con sus componentes y precio especial.
+                </td>
+              </tr>
+            ) : (
+              combosConStockEnVivo.map((combo) => (
+                <tr key={combo.id}>
+                  <td>
+                    <strong>{combo.nombre}</strong>
+                    {combo.descripcion && (
+                      <div className="text-muted">{combo.descripcion}</div>
+                    )}
+                    {combo.codigo_barras && (
+                      <div>
+                        <code>{combo.codigo_barras}</code>
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    {combo.items.map((it) => {
+                      const posibles =
+                        it.cantidad > 0
+                          ? Math.floor(Math.max(0, it.stock_actual) / it.cantidad)
+                          : 0;
+                      const esMenorExistencia =
+                        posibles === combo.stock_combos_disponibles;
+                      return (
+                        <div
+                          key={it.producto_id}
+                          style={{ fontSize: '0.84rem', marginBottom: '0.2rem' }}
+                        >
+                          • <strong>{it.cantidad}x</strong> {it.producto_nombre}{' '}
+                          <span className="text-muted">
+                            (Stock local: {it.stock_actual} → alcanza para{' '}
+                            {posibles} combo{posibles === 1 ? '' : 's'})
+                          </span>
+                          {esMenorExistencia && (
+                            <span
+                              className="badge-rol"
+                              style={{ marginLeft: '0.35rem', fontSize: '0.72rem' }}
+                            >
+                              Menor existencia
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </td>
+                  <td className="num">
+                    {formatearMonedaARS(combo.precio_suma_normal)}
+                  </td>
+                  <td className="num">
+                    <strong>{formatearMonedaARS(combo.precio_venta)}</strong>
+                  </td>
+                  <td className="num">
+                    <span className="diff-positiva">
+                      {formatearMonedaARS(combo.ahorro_centavos)} (
+                      {combo.porcentaje_descuento}% OFF)
+                    </span>
+                  </td>
+                  <td className="num">
+                    <strong
+                      className={
+                        combo.stock_combos_disponibles <= 0
+                          ? 'diff-negativa'
+                          : 'diff-positiva'
+                      }
+                    >
+                      {combo.stock_combos_disponibles} combo(s)
+                    </strong>
+                  </td>
+                  {puedeEditarCatalogo && (
+                    <td>
+                      <button
+                        type="button"
+                        className="btn-danger-outline"
+                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
+                        onClick={() =>
+                          void manejarEliminarCombo(combo.id, combo.nombre)
+                        }
+                      >
+                        Desactivar
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <div className="pos-card">
         <div className="card-header">

@@ -20,8 +20,10 @@ import {
 import {
   exportarAuditoriaAXlsx,
   exportarInformeGestionFase1AXlsx,
+  exportarPedidoReposicionBajoStockAPdf,
   obtenerInformeGestionFase1,
 } from './informes_repo.ts';
+import type { CriterioAgrupacionPedido } from '../domain/pedidos_reposicion.ts';
 import { aplicarMigraciones, crearBaseDatos } from './migrator.ts';
 import {
   actualizarProductoYPrecio,
@@ -125,6 +127,7 @@ import {
   crearComboPromocion,
   crearListaPrecio,
   crearVarianteProducto,
+  eliminarComboPromocion,
   emitirComprobanteArcaVenta,
   guardarConfiguracionArca,
   listarCombosComercio,
@@ -992,6 +995,34 @@ export function ejecutarAccionPosLocal(
       };
     }
 
+    case 'exportar_pedido_reposicion_pdf': {
+      const criterio =
+        (payload.criterio as CriterioAgrupacionPedido | undefined) ??
+        'proveedor';
+      const filtroGrupoId = payload.filtroGrupoId
+        ? String(payload.filtroGrupoId)
+        : null;
+      const cantidadesPersonalizadas =
+        (payload.cantidadesPersonalizadasPorProducto as
+          | Record<string, number>
+          | undefined) ?? undefined;
+      const { pdfBytes, resumen } = exportarPedidoReposicionBajoStockAPdf(
+        db,
+        actor,
+        {
+          criterio,
+          filtroGrupoId,
+          cantidadesPersonalizadasPorProducto: cantidadesPersonalizadas,
+        }
+      );
+      sincronizarWalADisco(db);
+      return {
+        pdfBase64: Buffer.from(pdfBytes).toString('base64'),
+        bytesLength: pdfBytes.byteLength,
+        resumen,
+      };
+    }
+
     case 'guardar_configuracion_sistema': {
       const dirBase = path.dirname(rutaActivaDb);
       const cfgGuardada = guardarConfiguracionSistema(db, actor, {
@@ -1760,6 +1791,15 @@ export function ejecutarAccionPosLocal(
       });
       sincronizarWalADisco(db);
       return { id, combos: listarCombosComercio(db, actor.comercio_id) };
+    }
+
+    case 'eliminar_combo_promocion': {
+      eliminarComboPromocion(db, actor, {
+        comboId: String(payload.comboId ?? ''),
+        motivo: payload.motivo ? String(payload.motivo) : undefined,
+      });
+      sincronizarWalADisco(db);
+      return { ok: true, combos: listarCombosComercio(db, actor.comercio_id) };
     }
 
     case 'vender_combo_promocion': {

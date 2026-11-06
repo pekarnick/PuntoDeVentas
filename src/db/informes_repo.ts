@@ -11,13 +11,22 @@ import {
 } from '../domain/dinero.ts';
 import {
   calcularBalanceSimplePeriodo,
+  calcularMetricasClavePeriodo,
   calcularRentabilidadHistorica,
   calcularStockValorizado,
   type ItemVendidoHistoricoInput,
+  type MetricasClavePeriodo,
   type ProductoStockValorizadoInput,
   type ResumenRentabilidadPeriodo,
   type ResumenStockValorizado,
 } from '../domain/informes.ts';
+import {
+  agruparPedidoReposicionStockBajo,
+  generarPdfPedidoReposicion,
+  type CriterioAgrupacionPedido,
+  type ProductoParaPedidoInput,
+  type ResumenPedidosReposicion,
+} from '../domain/pedidos_reposicion.ts';
 import { exigirPermiso } from '../domain/permisos.ts';
 import type { MedioPago } from '../domain/totales.ts';
 import { generarLibroXlsx } from '../domain/xlsx.ts';
@@ -43,6 +52,7 @@ export interface ResumenVentasPorUsuario {
 }
 
 export interface InformeGestionFase1 {
+  readonly metricasClave: MetricasClavePeriodo;
   readonly ventasPorMedioPago: ReadonlyArray<{
     readonly medio: MedioPago;
     readonly total_centavos: Centavos;
@@ -215,7 +225,18 @@ export function obtenerInformeGestionFase1(
     egresosCajaCentavos: rowEgresos.total_egresos,
   });
 
+  const cantidadOperaciones = ventasPorUsuario.reduce(
+    (acc, u) => acc + Number(u.ventas_completadas ?? 0),
+    0
+  );
+  const metricasClave = calcularMetricasClavePeriodo({
+    ventasTotalesCentavos: rentabilidad.ventasTotalesCentavos,
+    costoMercaderiaVendidaCentavos: rentabilidad.costoMercaderiaVendidaCentavos,
+    cantidadOperaciones,
+  });
+
   return {
+    metricasClave,
     ventasPorMedioPago,
     ventasPorUsuario,
     rentabilidad,
@@ -405,4 +426,86 @@ export function exportarAuditoriaAXlsx(
   });
 
   return xlsxBytes;
+}
+
+/**
+ * Obtiene y exporta en PDF la lista automática de productos con stock bajo para pedido a proveedor,
+ * agrupada por `'proveedor'`, `'marca'` o `'categoria'`, y audita la exportación.
+ */
+export function exportarPedidoReposicionBajoStockAPdf(
+  db: DatabaseSync,
+  actor: ActorContexto,
+  params: {
+    readonly criterio: CriterioAgrupacionPedido;
+    readonly filtroGrupoId?: string | null;
+    readonly cantidadesPersonalizadasPorProducto?: Readonly<Record<string, number>>;
+  }
+): {
+  readonly pdfBytes: Uint8Array;
+  readonly resumen: ResumenPedidosReposicion;
+} {
+  exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
+
+  const comercioRow = db
+    .prepare('SELECT nombre FROM comercios WHERE id = ?')
+    .get(actor.comercio_id) as { nombre: string } | undefined;
+
+  const filas = db
+    .prepare(
+      `SELECT
+        p.id,
+        p.nombre,
+        p.codigo_interno,
+        p.unidad,
+        COALESCE(s.stock_actual, 0) AS stock_actual,
+        p.stock_minimo,
+        p.costo_compra,
+        COALESCE(v.precio_venta, 0) AS precio_venta,
+        p.proveedor_principal_id AS proveedor_id,
+        pr.nombre AS proveedor_nombre,
+        p.marca_id,
+        m.nombre AS marca_nombre,
+        p.categoria_id,
+        c.nombre AS categoria_nombre
+       FROM productos p
+       LEFT JOIN vista_stock_actual s
+         ON s.producto_id = p.id AND s.comercio_id = p.comercio_id
+       LEFT JOIN vista_productos_venta v
+         ON v.id = p.id AND v.comercio_id = p.comercio_id
+       LEFT JOIN proveedores pr
+         ON pr.id = p.proveedor_principal_id AND pr.deleted_at IS NULL
+       LEFT JOIN marcas m
+         ON m.id = p.marca_id AND m.deleted_at IS NULL
+       LEFT JOIN categorias c
+         ON c.id = p.categoria_id AND c.deleted_at IS NULL
+       WHERE p.comercio_id = ? AND p.deleted_at IS NULL AND p.activo = 1
+       ORDER BY p.nombre ASC`
+    )
+    .all(actor.comercio_id) as unknown as ProductoParaPedidoInput[];
+
+  const resumen = agruparPedidoReposicionStockBajo({
+    productos: filas,
+    criterio: params.criterio,
+    filtroGrupoId: params.filtroGrupoId ?? null,
+    cantidadesPersonalizadasPorProducto:
+      params.cantidadesPersonalizadasPorProducto,
+  });
+
+  const pdfBytes = generarPdfPedidoReposicion({
+    resumen,
+    comercioNombre: comercioRow?.nombre ?? 'Punto de Ventas',
+  });
+
+  auditarExportacionInforme(db, actor, {
+    nombreInforme: `pedido_reposicion_${params.criterio}`,
+    formato: 'pdf',
+    filtrosAplicados: {
+      criterio: params.criterio,
+      filtroGrupoId: params.filtroGrupoId ?? null,
+      totalProductosBajoStock: resumen.total_productos_bajo_stock,
+      totalGrupos: resumen.total_grupos,
+    },
+  });
+
+  return { pdfBytes, resumen };
 }

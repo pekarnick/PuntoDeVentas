@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
@@ -12,9 +12,21 @@ import {
   paginarListado,
   TAMANIO_PAGINA_POR_DEFECTO,
 } from '../../domain/paginacion.ts';
+import {
+  agruparPedidoReposicionStockBajo,
+  generarPdfPedidoReposicion,
+  ID_GRUPO_SIN_ASIGNAR,
+  type CriterioAgrupacionPedido,
+  type GrupoPedidoReposicion,
+  type ProductoParaPedidoInput,
+} from '../../domain/pedidos_reposicion.ts';
 import type { RolUsuario } from '../../domain/permisos.ts';
 import type { AlicuotaIva } from '../../domain/totales.ts';
-import type { ProductoAdminItemUI } from '../productos/PanelProductosStock.tsx';
+import type {
+  CategoriaItemUI,
+  MarcaItemUI,
+  ProductoAdminItemUI,
+} from '../productos/PanelProductosStock.tsx';
 
 export interface ProveedorConSaldoUI {
   readonly id: string;
@@ -63,6 +75,8 @@ export interface PanelComprasProveedoresProps {
   readonly proveedoresServidor?: readonly ProveedorConSaldoUI[];
   readonly comprasRecientesServidor?: readonly CompraResumenUI[];
   readonly catalogoProductos?: readonly ProductoAdminItemUI[];
+  readonly categoriasServidor?: readonly CategoriaItemUI[];
+  readonly marcasServidor?: readonly MarcaItemUI[];
   readonly onDatosModificados?: () => void | Promise<void>;
 }
 
@@ -71,10 +85,21 @@ export function PanelComprasProveedores({
   proveedoresServidor = [],
   comprasRecientesServidor = [],
   catalogoProductos = [],
+  categoriasServidor = [],
+  marcasServidor = [],
   onDatosModificados,
 }: PanelComprasProveedoresProps): React.ReactElement {
   const tienePermisoCompras =
     rolActivo === 'superadmin' || rolActivo === 'encargado';
+
+  // Estado Lista Automática de Pedidos por Stock Bajo (Proveedor / Marca / Categoría + PDF)
+  const [criterioAgrupacionPedido, setCriterioAgrupacionPedido] =
+    useState<CriterioAgrupacionPedido>('proveedor');
+  const [filtroGrupoPedidoId, setFiltroGrupoPedidoId] =
+    useState<string>('todos');
+  const [cantidadesPersonalizadasPedido, setCantidadesPersonalizadasPedido] =
+    useState<Record<string, number>>({});
+  const [exportandoPdfPedido, setExportandoPdfPedido] = useState(false);
 
   // Estado ABM Proveedor
   const [razonSocial, setRazonSocial] = useState('');
@@ -125,6 +150,81 @@ export function PanelComprasProveedores({
     movimientosCc,
     paginaMovsProveedor,
     TAMANIO_PAGINA_POR_DEFECTO
+  );
+
+  const productosNormalizadosParaPedido: readonly ProductoParaPedidoInput[] =
+    useMemo(() => {
+      return catalogoProductos.map((p) => {
+        const provNombre =
+          p.proveedor_nombre ??
+          proveedoresServidor.find((pr) => pr.id === p.proveedor_id)
+            ?.razon_social ??
+          null;
+        const marcaNombre =
+          p.marca_nombre ??
+          marcasServidor.find((m) => m.id === p.marca_id)?.nombre ??
+          null;
+        const catNombre =
+          p.categoria_nombre ??
+          categoriasServidor.find((c) => c.id === p.categoria_id)?.nombre ??
+          null;
+        return {
+          id: p.id,
+          nombre: p.nombre,
+          codigo_interno: p.codigo_interno,
+          codigos_barras: p.codigos_barras,
+          unidad: p.unidad,
+          stock_actual: p.stock_actual,
+          stock_minimo: p.stock_minimo,
+          costo_compra: aCentavos(p.costo_compra ?? 0),
+          precio_venta: aCentavos(p.precio_venta),
+          proveedor_id: p.proveedor_id ?? null,
+          proveedor_nombre: provNombre,
+          marca_id: p.marca_id ?? null,
+          marca_nombre: marcaNombre,
+          categoria_id: p.categoria_id ?? null,
+          categoria_nombre: catNombre,
+        };
+      });
+    }, [
+      catalogoProductos,
+      proveedoresServidor,
+      marcasServidor,
+      categoriasServidor,
+    ]);
+
+  // Resumen sin filtro de grupo para conocer todos los grupos disponibles del criterio activo
+  const resumenTodosLosGruposCriterio = useMemo(
+    () =>
+      agruparPedidoReposicionStockBajo({
+        productos: productosNormalizadosParaPedido,
+        criterio: criterioAgrupacionPedido,
+        filtroGrupoId: null,
+        cantidadesPersonalizadasPorProducto: cantidadesPersonalizadasPedido,
+      }),
+    [
+      productosNormalizadosParaPedido,
+      criterioAgrupacionPedido,
+      cantidadesPersonalizadasPedido,
+    ]
+  );
+
+  // Resumen filtrado según el grupo seleccionado por el usuario
+  const resumenPedidoReposicionActivo = useMemo(
+    () =>
+      agruparPedidoReposicionStockBajo({
+        productos: productosNormalizadosParaPedido,
+        criterio: criterioAgrupacionPedido,
+        filtroGrupoId:
+          filtroGrupoPedidoId === 'todos' ? null : filtroGrupoPedidoId,
+        cantidadesPersonalizadasPorProducto: cantidadesPersonalizadasPedido,
+      }),
+    [
+      productosNormalizadosParaPedido,
+      criterioAgrupacionPedido,
+      filtroGrupoPedidoId,
+      cantidadesPersonalizadasPedido,
+    ]
   );
 
   if (!tienePermisoCompras) {
@@ -332,6 +432,140 @@ export function PanelComprasProveedores({
     }
   }
 
+  function actualizarCantidadPersonalizadaPedido(
+    productoId: string,
+    valorTexto: string
+  ) {
+    const num = Number(valorTexto.replace(',', '.'));
+    if (!Number.isFinite(num) || num <= 0) {
+      setCantidadesPersonalizadasPedido((prev) => {
+        const copia = { ...prev };
+        delete copia[productoId];
+        return copia;
+      });
+      return;
+    }
+    setCantidadesPersonalizadasPedido((prev) => ({
+      ...prev,
+      [productoId]: num,
+    }));
+  }
+
+  function cargarGrupoPedidoEnFormularioCompra(grupo: GrupoPedidoReposicion) {
+    setErrorMsg(null);
+    const nuevosItems: ItemBorradorCompra[] = grupo.items.map((it) => ({
+      productoId: it.producto_id,
+      nombreProducto: it.nombre,
+      cantidad: it.cantidad_a_pedir,
+      costoUnitarioCentavos: it.costo_unitario_centavos,
+      alicuotaIva: alicuotaItem,
+      actualizarCostoProducto: true,
+    }));
+
+    setItemsCompra(nuevosItems);
+    if (
+      grupo.criterio === 'proveedor' &&
+      grupo.grupo_id !== ID_GRUPO_SIN_ASIGNAR
+    ) {
+      setProveedorCompraId(grupo.grupo_id);
+    }
+    setMensajeExito(
+      `Se cargaron ${nuevosItems.length} producto(s) del pedido (${grupo.grupo_nombre}) en el formulario de compra.`
+    );
+  }
+
+  async function manejarExportarPdfPedido(
+    criterio: CriterioAgrupacionPedido,
+    filtroGrupoIdEspecifico: string | null,
+    etiquetaNombreArchivo?: string
+  ) {
+    setExportandoPdfPedido(true);
+    setErrorMsg(null);
+    setMensajeExito(null);
+
+    try {
+      let bytesPdf: Uint8Array | null = null;
+      let nombreArchivoSugerido = `pedido_${criterio}_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+      try {
+        const respuesta = await invocarPosApi<{
+          pdfBase64: string;
+          nombreArchivoSugerido: string;
+          auditoriaId: string;
+        }>('exportar_pedido_reposicion_pdf', {
+          rolActivo,
+          criterio,
+          filtroGrupoId: filtroGrupoIdEspecifico,
+          cantidadesPersonalizadasPorProducto: cantidadesPersonalizadasPedido,
+        });
+
+        const binario = atob(respuesta.pdfBase64);
+        const arreglo = new Uint8Array(binario.length);
+        for (let i = 0; i < binario.length; i += 1) {
+          arreglo[i] = binario.charCodeAt(i);
+        }
+        bytesPdf = arreglo;
+        nombreArchivoSugerido = respuesta.nombreArchivoSugerido;
+      } catch {
+        // Fallback local offline puro usando las funciones de dominio
+        const resumenLocal = agruparPedidoReposicionStockBajo({
+          productos: productosNormalizadosParaPedido,
+          criterio,
+          filtroGrupoId: filtroGrupoIdEspecifico,
+          cantidadesPersonalizadasPorProducto: cantidadesPersonalizadasPedido,
+        });
+        bytesPdf = generarPdfPedidoReposicion({
+          resumen: resumenLocal,
+        });
+        const sufijo = etiquetaNombreArchivo
+          ? `_${etiquetaNombreArchivo
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/gi, '_')
+              .replace(/^_+|_+$/g, '')}`
+          : '';
+        nombreArchivoSugerido = `pedido_${criterio}${sufijo}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      }
+
+      if (
+        bytesPdf &&
+        typeof window !== 'undefined' &&
+        typeof URL.createObjectURL === 'function'
+      ) {
+        const bufferSeguro = new ArrayBuffer(bytesPdf.byteLength);
+        new Uint8Array(bufferSeguro).set(bytesPdf);
+        const blob = new Blob([bufferSeguro], {
+          type: 'application/pdf',
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nombreArchivoSugerido;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      setMensajeExito(
+        `PDF de pedido generado y descargado (${nombreArchivoSugerido}). Acción registrada en auditoría SHA-256.`
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo generar el PDF del pedido de reposición.'
+      );
+    } finally {
+      setExportandoPdfPedido(false);
+    }
+  }
+
+  const etiquetaCriterioPlural: Record<CriterioAgrupacionPedido, string> = {
+    proveedor: 'Por Proveedor',
+    marca: 'Por Marca',
+    categoria: 'Por Categoría',
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       {errorMsg && (
@@ -344,6 +578,342 @@ export function PanelComprasProveedores({
           {mensajeExito}
         </div>
       )}
+
+      {/* Lista Automática de Productos con Stock Bajo para Pedido a Proveedor (Proveedor / Marca / Categoría + PDF) */}
+      <section
+        className="card"
+        aria-label="Lista Automática de Pedidos por Stock Bajo"
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            flexWrap: 'wrap',
+            gap: '0.85rem',
+            marginBottom: '0.85rem',
+          }}
+        >
+          <div>
+            <h2 style={{ marginBottom: '0.25rem' }}>
+              📋 Lista Automática de Productos con Stock Bajo (Pedidos de
+              Reposición)
+            </h2>
+            <p className="text-muted" style={{ margin: 0 }}>
+              Detecta automáticamente todos los artículos con{' '}
+              <code>stock_actual &lt;= stock_minimo</code> y arma las órdenes de
+              pedido agrupadas <strong>por Proveedor</strong>,{' '}
+              <strong>por Marca</strong> o <strong>por Categoría</strong> con
+              exportación directa a <strong>PDF</strong>.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={
+                exportandoPdfPedido ||
+                resumenPedidoReposicionActivo.total_productos_bajo_stock === 0
+              }
+              onClick={() =>
+                void manejarExportarPdfPedido(
+                  criterioAgrupacionPedido,
+                  filtroGrupoPedidoId === 'todos' ? null : filtroGrupoPedidoId
+                )
+              }
+            >
+              {exportandoPdfPedido
+                ? 'Generando PDF...'
+                : `📄 Exportar PDF (${etiquetaCriterioPlural[criterioAgrupacionPedido]})`}
+            </button>
+          </div>
+        </div>
+
+        {/* Barra de controles de agrupación y filtrado */}
+        <div
+          className="subcard-box"
+          style={{
+            padding: '0.85rem',
+            borderRadius: '0.65rem',
+            marginBottom: '1rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            flexWrap: 'wrap',
+            gap: '0.85rem',
+          }}
+        >
+          <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '0.82rem',
+                  fontWeight: 600,
+                  marginBottom: '0.3rem',
+                }}
+              >
+                Armar listas agrupadas por:
+              </label>
+              <div style={{ display: 'flex', gap: '0.4rem' }}>
+                <button
+                  type="button"
+                  className={
+                    criterioAgrupacionPedido === 'proveedor'
+                      ? 'btn-primary'
+                      : 'btn-secondary'
+                  }
+                  onClick={() => {
+                    setCriterioAgrupacionPedido('proveedor');
+                    setFiltroGrupoPedidoId('todos');
+                  }}
+                >
+                  🚚 Por Proveedor
+                </button>
+                <button
+                  type="button"
+                  className={
+                    criterioAgrupacionPedido === 'marca'
+                      ? 'btn-primary'
+                      : 'btn-secondary'
+                  }
+                  onClick={() => {
+                    setCriterioAgrupacionPedido('marca');
+                    setFiltroGrupoPedidoId('todos');
+                  }}
+                >
+                  🏷️ Por Marca
+                </button>
+                <button
+                  type="button"
+                  className={
+                    criterioAgrupacionPedido === 'categoria'
+                      ? 'btn-primary'
+                      : 'btn-secondary'
+                  }
+                  onClick={() => {
+                    setCriterioAgrupacionPedido('categoria');
+                    setFiltroGrupoPedidoId('todos');
+                  }}
+                >
+                  📂 Por Categoría
+                </button>
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: 0, minWidth: '240px' }}>
+              <label htmlFor="select-filtro-grupo-pedido">
+                Filtrar{' '}
+                {criterioAgrupacionPedido === 'proveedor'
+                  ? 'Proveedor'
+                  : criterioAgrupacionPedido === 'marca'
+                    ? 'Marca'
+                    : 'Categoría'}
+              </label>
+              <select
+                id="select-filtro-grupo-pedido"
+                value={filtroGrupoPedidoId}
+                onChange={(e) => setFiltroGrupoPedidoId(e.target.value)}
+              >
+                <option value="todos">
+                  Todos ({resumenTodosLosGruposCriterio.total_grupos} grupo(s) ·{' '}
+                  {resumenTodosLosGruposCriterio.total_productos_bajo_stock}{' '}
+                  artículo(s))
+                </option>
+                {resumenTodosLosGruposCriterio.grupos.map((g) => (
+                  <option key={g.grupo_id} value={g.grupo_id}>
+                    {g.grupo_nombre} ({g.cantidad_productos} art. ·{' '}
+                    {formatearPesos(g.costo_total_estimado_centavos)})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              gap: '1rem',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              fontSize: '0.9rem',
+            }}
+          >
+            <span>
+              Artículos en alerta:{' '}
+              <strong>
+                {resumenPedidoReposicionActivo.total_productos_bajo_stock}
+              </strong>
+            </span>
+            <span>
+              Unidades a pedir:{' '}
+              <strong>
+                {resumenPedidoReposicionActivo.total_unidades_general}
+              </strong>
+            </span>
+            <span>
+              Costo estimado total:{' '}
+              <strong>
+                {formatearPesos(
+                  resumenPedidoReposicionActivo.costo_total_general_centavos
+                )}
+              </strong>
+            </span>
+          </div>
+        </div>
+
+        {resumenPedidoReposicionActivo.grupos.length === 0 ? (
+          <p className="text-muted" style={{ margin: 0 }}>
+            Todo el catálogo tiene stock por encima del mínimo configurado. No
+            hay productos pendientes de reposición en este momento.
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            {resumenPedidoReposicionActivo.grupos.map((grupo) => (
+              <div
+                key={`${grupo.criterio}-${grupo.grupo_id}`}
+                className="subcard-box"
+                style={{
+                  padding: '0.9rem',
+                  borderRadius: '0.65rem',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: '0.65rem',
+                    marginBottom: '0.65rem',
+                  }}
+                >
+                  <div>
+                    <strong style={{ fontSize: '1rem' }}>
+                      {grupo.criterio === 'proveedor'
+                        ? '🚚 Proveedor: '
+                        : grupo.criterio === 'marca'
+                          ? '🏷️ Marca: '
+                          : '📂 Categoría: '}
+                      {grupo.grupo_nombre}
+                    </strong>
+                    <span
+                      className="text-muted"
+                      style={{ marginLeft: '0.65rem', fontSize: '0.85rem' }}
+                    >
+                      ({grupo.cantidad_productos} producto(s) ·{' '}
+                      {grupo.total_unidades_a_pedir} unid. · Subtotal estimado:{' '}
+                      <strong>
+                        {formatearPesos(grupo.costo_total_estimado_centavos)}
+                      </strong>
+                      )
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => cargarGrupoPedidoEnFormularioCompra(grupo)}
+                    >
+                      🛒 Cargar en formulario de compra
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={exportandoPdfPedido}
+                      onClick={() =>
+                        void manejarExportarPdfPedido(
+                          grupo.criterio,
+                          grupo.grupo_id,
+                          grupo.grupo_nombre
+                        )
+                      }
+                    >
+                      📄 Exportar PDF de este{' '}
+                      {grupo.criterio === 'proveedor'
+                        ? 'Proveedor'
+                        : grupo.criterio === 'marca'
+                          ? 'Marca'
+                          : 'Categoría'}
+                    </button>
+                  </div>
+                </div>
+
+                <table className="pos-table">
+                  <thead>
+                    <tr>
+                      <th>Código</th>
+                      <th>Producto</th>
+                      <th>Proveedor / Marca / Categoría</th>
+                      <th>Stock Actual</th>
+                      <th>Stock Mínimo</th>
+                      <th>Cant. a Pedir</th>
+                      <th>Costo Unit.</th>
+                      <th>Subtotal Est.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {grupo.items.map((item) => (
+                      <tr key={item.producto_id}>
+                        <td>
+                          <code>{item.codigo_mostrar}</code>
+                        </td>
+                        <td>
+                          <strong>{item.nombre}</strong>
+                        </td>
+                        <td className="text-muted" style={{ fontSize: '0.84rem' }}>
+                          {item.proveedor_nombre} · {item.marca_nombre} ·{' '}
+                          {item.categoria_nombre}
+                        </td>
+                        <td>
+                          <span className="badge-stock-bajo">
+                            {item.stock_actual} {item.unidad}
+                          </span>
+                        </td>
+                        <td>
+                          {item.stock_minimo} {item.unidad}
+                        </td>
+                        <td style={{ maxWidth: '110px' }}>
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            aria-label={`Cantidad a pedir ${item.nombre}`}
+                            value={
+                              cantidadesPersonalizadasPedido[item.producto_id] ??
+                              item.cantidad_a_pedir
+                            }
+                            onChange={(e) =>
+                              actualizarCantidadPersonalizadaPedido(
+                                item.producto_id,
+                                e.target.value
+                              )
+                            }
+                            style={{
+                              width: '82px',
+                              padding: '0.25rem 0.4rem',
+                            }}
+                          />
+                        </td>
+                        <td>
+                          {formatearPesos(item.costo_unitario_centavos)}
+                        </td>
+                        <td>
+                          <strong>
+                            {formatearPesos(
+                              item.subtotal_costo_estimado_centavos
+                            )}
+                          </strong>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="pos-grid">
         {/* Columna izquierda: Registro de Compra + Ingreso de mercadería */}

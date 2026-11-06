@@ -429,7 +429,21 @@ export function PanelVentaPOS({
       }
     }
 
-    // 1. Buscar coincidencia exacta por código de barras o código interno
+    // 1. Buscar coincidencia exacta por código de barras de un Combo promocional
+    const comboPorCodigo = combosDisponibles.find(
+      (c) =>
+        (c.codigo_barras &&
+          c.codigo_barras.toLowerCase() === texto.toLowerCase()) ||
+        c.nombre.toLowerCase() === texto.toLowerCase()
+    );
+    if (comboPorCodigo) {
+      setEntradaLector('');
+      setDesplegableAbierto(false);
+      manejarAgregarComboAlCarrito(comboPorCodigo);
+      return;
+    }
+
+    // 2. Buscar coincidencia exacta por código de barras o código interno de un producto
     const porCodigo = catalogo.find(
       (p) =>
         p.codigos_barras.some(
@@ -1110,9 +1124,13 @@ export function PanelVentaPOS({
                   type="button"
                   className="btn-secondary quick-btn"
                   onClick={() => manejarAgregarComboAlCarrito(combo)}
+                  title={`Componentes: ${combo.items.map((it) => `${it.cantidad}x ${it.producto_nombre}`).join(' + ')} · Stock disponible: ${combo.stock_combos_disponibles}`}
                 >
                   <span>[Combo] {combo.nombre}</span>
                   <strong>{formatearMonedaARS(combo.precio_venta)}</strong>
+                  <span className="text-muted" style={{ fontSize: '0.72rem' }}>
+                    Stock: {combo.stock_combos_disponibles} combo(s)
+                  </span>
                 </button>
               ))}
             </div>

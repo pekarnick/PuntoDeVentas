@@ -25,6 +25,7 @@ export interface RentabilidadProductoCalculada {
   readonly costo_historico_total_centavos: Centavos;
   readonly ganancia_bruta_centavos: Centavos;
   readonly margen_porcentaje: number;
+  readonly margen_sobre_costo_porcentaje: number;
 }
 
 export interface ResumenRentabilidadPeriodo {
@@ -33,6 +34,7 @@ export interface ResumenRentabilidadPeriodo {
   readonly costoMercaderiaVendidaCentavos: Centavos;
   readonly gananciaBrutaTotalCentavos: Centavos;
   readonly margenPromedioPorcentaje: number;
+  readonly margenSobreCostoPorcentaje: number;
 }
 
 export interface ProductoStockValorizadoInput {
@@ -48,6 +50,7 @@ export interface ProductoStockValorizadoCalculado extends ProductoStockValorizad
   readonly bajo_stock_minimo: boolean;
   readonly valorizado_costo_centavos: Centavos;
   readonly valorizado_venta_centavos: Centavos;
+  readonly ganancia_proyectada_centavos: Centavos;
 }
 
 export interface ResumenStockValorizado {
@@ -55,6 +58,17 @@ export interface ResumenStockValorizado {
   readonly cantidadProductosBajoMinimo: number;
   readonly totalValorizadoCostoCentavos: Centavos;
   readonly totalValorizadoVentaCentavos: Centavos;
+  readonly gananciaProyectadaTotalCentavos: Centavos;
+}
+
+export interface MetricasClavePeriodo {
+  readonly totalVentasCentavos: Centavos;
+  readonly costoHistoricoTotalCentavos: Centavos;
+  readonly gananciaBrutaCentavos: Centavos;
+  readonly margenRentabilidadVentaPorcentaje: number;
+  readonly margenSobreCostoPorcentaje: number;
+  readonly cantidadOperaciones: number;
+  readonly ticketPromedioCentavos: Centavos;
 }
 
 /**
@@ -115,6 +129,10 @@ export function calcularRentabilidadHistorica(
         datos.ventasCentavos > 0
           ? Math.round((ganancia / datos.ventasCentavos) * 10000) / 100
           : 0;
+      const margenSobreCosto =
+        datos.costoCentavos > 0
+          ? Math.round((ganancia / datos.costoCentavos) * 10000) / 100
+          : 0;
       return {
         producto_id,
         descripcion: datos.descripcion,
@@ -123,6 +141,7 @@ export function calcularRentabilidadHistorica(
         costo_historico_total_centavos: datos.costoCentavos,
         ganancia_bruta_centavos: ganancia,
         margen_porcentaje: margen,
+        margen_sobre_costo_porcentaje: margenSobreCosto,
       };
     })
     .sort((a, b) => b.cantidad_vendida - a.cantidad_vendida);
@@ -132,6 +151,10 @@ export function calcularRentabilidadHistorica(
     ventasTotales > 0
       ? Math.round((gananciaTotal / ventasTotales) * 10000) / 100
       : 0;
+  const margenSobreCostoPromedio =
+    cmvTotal > 0
+      ? Math.round((gananciaTotal / cmvTotal) * 10000) / 100
+      : 0;
 
   return {
     porProducto,
@@ -139,6 +162,47 @@ export function calcularRentabilidadHistorica(
     costoMercaderiaVendidaCentavos: cmvTotal,
     gananciaBrutaTotalCentavos: gananciaTotal,
     margenPromedioPorcentaje: margenPromedio,
+    margenSobreCostoPorcentaje: margenSobreCostoPromedio,
+  };
+}
+
+/**
+ * Calcula las métricas clave del tablero superior de Informes (docs/manual/08_informes_y_fiscal.md §1):
+ * Total de Ventas, Ganancia Bruta Real, Margen de Rentabilidad, Cantidad de Operaciones y Ticket Promedio.
+ */
+export function calcularMetricasClavePeriodo(params: {
+  readonly ventasTotalesCentavos: Centavos;
+  readonly costoMercaderiaVendidaCentavos: Centavos;
+  readonly cantidadOperaciones: number;
+}): MetricasClavePeriodo {
+  asegurarCentavos(params.ventasTotalesCentavos, 'ventasTotalesCentavos');
+  asegurarCentavos(
+    params.costoMercaderiaVendidaCentavos,
+    'costoMercaderiaVendidaCentavos'
+  );
+  const ops = Math.max(0, Math.trunc(params.cantidadOperaciones));
+  const ganancia =
+    params.ventasTotalesCentavos - params.costoMercaderiaVendidaCentavos;
+  const margenVenta =
+    params.ventasTotalesCentavos > 0
+      ? Math.round((ganancia / params.ventasTotalesCentavos) * 10000) / 100
+      : 0;
+  const margenCosto =
+    params.costoMercaderiaVendidaCentavos > 0
+      ? Math.round((ganancia / params.costoMercaderiaVendidaCentavos) * 10000) /
+        100
+      : 0;
+  const ticketPromedio =
+    ops > 0 ? Math.round(params.ventasTotalesCentavos / ops) : 0;
+
+  return {
+    totalVentasCentavos: params.ventasTotalesCentavos,
+    costoHistoricoTotalCentavos: params.costoMercaderiaVendidaCentavos,
+    gananciaBrutaCentavos: ganancia,
+    margenRentabilidadVentaPorcentaje: margenVenta,
+    margenSobreCostoPorcentaje: margenCosto,
+    cantidadOperaciones: ops,
+    ticketPromedioCentavos: ticketPromedio,
   };
 }
 
@@ -172,6 +236,7 @@ export function calcularStockValorizado(
       bajo_stock_minimo: bajoMinimo,
       valorizado_costo_centavos: valCosto,
       valorizado_venta_centavos: valVenta,
+      ganancia_proyectada_centavos: valVenta - valCosto,
     };
   });
 
@@ -180,6 +245,7 @@ export function calcularStockValorizado(
     cantidadProductosBajoMinimo: bajoMinimoCount,
     totalValorizadoCostoCentavos: totalCosto,
     totalValorizadoVentaCentavos: totalVenta,
+    gananciaProyectadaTotalCentavos: totalVenta - totalCosto,
   };
 }
 

@@ -491,6 +491,7 @@ export function App(): React.ReactElement {
             categoriasServidor={datosServidor?.categorias ?? []}
             marcasServidor={datosServidor?.marcas ?? []}
             proveedoresServidor={datosServidor?.proveedores ?? []}
+            combosIniciales={datosServidor?.combos ?? []}
             onDatosActualizados={() => void recargarEstadoLocal()}
           />
         )}
@@ -500,6 +501,8 @@ export function App(): React.ReactElement {
             proveedoresServidor={datosServidor?.proveedores ?? []}
             comprasRecientesServidor={datosServidor?.comprasRecientes ?? []}
             catalogoProductos={datosServidor?.catalogoAdmin ?? []}
+            categoriasServidor={datosServidor?.categorias ?? []}
+            marcasServidor={datosServidor?.marcas ?? []}
             onDatosModificados={() => void recargarEstadoLocal()}
           />
         )}
