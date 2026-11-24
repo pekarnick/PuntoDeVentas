@@ -53,6 +53,10 @@ const TABLAS_INMUTABLES_SIN_UPDATE_FILA: ReadonlySet<TablaSincronizable> =
     'movimientos_stock',
     'ventas_items',
     'ventas_pagos',
+    'transferencias_sucursales',
+    'cuenta_corriente_movimientos',
+    'compras',
+    'compras_items',
   ]);
 
 /**
@@ -62,17 +66,21 @@ const TABLAS_INMUTABLES_SIN_UPDATE_FILA: ReadonlySet<TablaSincronizable> =
  */
 const TABLAS_OPCIONALES_ESQUEMA_REMOTO: ReadonlySet<TablaSincronizable> =
   new Set([
+    'sucursales',
+    'transferencias_sucursales',
     'sesiones_moviles',
     'variantes',
     'combos',
     'combos_items',
   ]);
 
-export const COMERCIO_ID_RESPALDO_CONOCIDO =
-  '01a15523-8a7c-72f7-b1f4-e5da18b7be0a';
+export const MAX_INTENTOS_SYNC_COLA = 5;
+
+const deviceIdsMemoria = new Map<string, string>();
 
 export interface IdentidadComercioPersistida {
   comercio_id: string;
+  device_id?: string;
   superadmin_id?: string;
   lista_precio_id?: string;
   supabase_url?: string | null;
@@ -108,6 +116,7 @@ export function guardarIdentidadComercioPersistida(
     const ruta = path.join(directorioBaseDatos, 'comercio_identidad.json');
     const fusionado: IdentidadComercioPersistida = {
       comercio_id: datos.comercio_id,
+      device_id: datos.device_id ?? previo?.device_id,
       superadmin_id: datos.superadmin_id ?? previo?.superadmin_id,
       lista_precio_id: datos.lista_precio_id ?? previo?.lista_precio_id,
       supabase_url:
@@ -124,6 +133,75 @@ export function guardarIdentidadComercioPersistida(
   } catch {
     // Ignorar en entornos de solo lectura o memoria
   }
+}
+
+/**
+ * Obtiene o genera un identificador único persistente para esta terminal física
+ * en `comercio_identidad.json` (o en memoria si la base es `:memory:`).
+ */
+export function obtenerODefinirDeviceIdTerminal(
+  directorioBaseDatos: string
+): string {
+  if (!directorioBaseDatos || directorioBaseDatos === ':memory:') {
+    const existenteMem = deviceIdsMemoria.get(':memory:');
+    if (existenteMem) return existenteMem;
+    const nuevo = `terminal-${generarUuidV7()}`;
+    deviceIdsMemoria.set(':memory:', nuevo);
+    return nuevo;
+  }
+
+  const existenteCache = deviceIdsMemoria.get(directorioBaseDatos);
+  if (existenteCache) return existenteCache;
+
+  const previo = leerIdentidadComercioPersistida(directorioBaseDatos);
+  if (previo?.device_id && previo.device_id.trim()) {
+    deviceIdsMemoria.set(directorioBaseDatos, previo.device_id.trim());
+    return previo.device_id.trim();
+  }
+
+  const nuevo = `terminal-${generarUuidV7()}`;
+  deviceIdsMemoria.set(directorioBaseDatos, nuevo);
+
+  try {
+    fs.mkdirSync(directorioBaseDatos, { recursive: true });
+    const ruta = path.join(directorioBaseDatos, 'comercio_identidad.json');
+    if (previo) {
+      const actualizado: IdentidadComercioPersistida = {
+        ...previo,
+        device_id: nuevo,
+        updated_at: new Date().toISOString(),
+      };
+      fs.writeFileSync(ruta, JSON.stringify(actualizado, null, 2), 'utf-8');
+    } else if (fs.existsSync(ruta)) {
+      const raw = JSON.parse(fs.readFileSync(ruta, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      if (typeof raw.device_id === 'string' && raw.device_id.trim()) {
+        deviceIdsMemoria.set(directorioBaseDatos, raw.device_id.trim());
+        return raw.device_id.trim();
+      }
+      raw.device_id = nuevo;
+      fs.writeFileSync(ruta, JSON.stringify(raw, null, 2), 'utf-8');
+    } else {
+      fs.writeFileSync(
+        ruta,
+        JSON.stringify(
+          {
+            device_id: nuevo,
+            updated_at: new Date().toISOString(),
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+    }
+  } catch {
+    // Si no se puede escribir en disco, se mantiene en memoria para esta sesión
+  }
+
+  return nuevo;
 }
 
 export interface AdaptadorNubeSupabase extends TransporteImagenesNube {
@@ -299,20 +377,93 @@ const CAMPOS_BOOLEANOS_POSTGRES: ReadonlySet<string> = new Set([
   'exento_iva',
   'boton_rapido',
   'es_predeterminada',
+  'es_principal',
 ]);
 
-function serializarRegistroParaPostgres(
+const PATRON_UUID_POSTGRES =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const CAMPOS_TEXTO_ID_POSTGRES: ReadonlySet<string> = new Set([
+  'device_id',
+  'dispositivo_id',
+  'entidad_id',
+  'referencia_id',
+]);
+
+const CAMPOS_UUID_NULLABLES_POSTGRES: ReadonlySet<string> = new Set([
+  'auth_user_id',
+  'creado_por',
+  'autorizado_por_id',
+  'anulada_por_id',
+  'autorizada_por_id',
+  'revocada_por_id',
+  'padre_id',
+  'categoria_id',
+  'marca_id',
+  'proveedor_principal_id',
+  'usuario_cierre_id',
+  'cliente_id',
+  'caja_sesion_id',
+  'lista_precio_id',
+  'autorizada_por',
+  'proveedor_id',
+  'sucursal_id',
+  'variante_id',
+  'combo_id',
+]);
+
+export function serializarRegistroParaPostgres(
   tabla: TablaSincronizable,
   reg: RegistroSincronizableBase
 ): Record<string, unknown> {
   const copia: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(reg)) {
+    if (k === 'clave_hash' || k === 'pin_hash') {
+      continue;
+    }
     if (tabla === 'precios' && k === 'margen_bp') {
       copia.margen_porcentaje =
         typeof v === 'number' ? Number((v / 100).toFixed(2)) : null;
       continue;
     }
     if (tabla === 'cuenta_corriente_movimientos' && k === 'observaciones') {
+      continue;
+    }
+    if (k === 'device_id' || k === 'dispositivo_id') {
+      const textoId =
+        typeof v === 'string' && v.trim()
+          ? v.trim()
+          : typeof reg.device_id === 'string' && reg.device_id.trim()
+            ? reg.device_id.trim()
+            : 'terminal-local-1';
+      copia[k] = textoId;
+      continue;
+    }
+    if (k === 'entidad_id' || k === 'referencia_id') {
+      if (v === null || v === undefined || v === '') {
+        copia[k] = null;
+      } else {
+        copia[k] = String(v).trim();
+      }
+      continue;
+    }
+    if (
+      (tabla === 'auditoria' && k === 'usuario_id') ||
+      CAMPOS_UUID_NULLABLES_POSTGRES.has(k) ||
+      (typeof k === 'string' &&
+        k.endsWith('_id') &&
+        !CAMPOS_TEXTO_ID_POSTGRES.has(k))
+    ) {
+      if (
+        v === null ||
+        v === undefined ||
+        typeof v !== 'string' ||
+        !PATRON_UUID_POSTGRES.test(v.trim())
+      ) {
+        copia[k] = null;
+      } else {
+        copia[k] = v.trim();
+      }
       continue;
     }
     if (CAMPOS_BOOLEANOS_POSTGRES.has(k) && (v === 0 || v === 1)) {
@@ -341,6 +492,12 @@ function normalizarRegistroDesdePostgres(
       mp !== null && mp !== undefined && !Number.isNaN(Number(mp))
         ? Math.round(Number(mp) * 100)
         : null;
+  }
+  if (
+    tabla === 'auditoria' &&
+    (copia.usuario_id === '' || copia.usuario_id === undefined)
+  ) {
+    copia.usuario_id = null;
   }
   return copia as RegistroSincronizableBase;
 }
@@ -371,6 +528,59 @@ export class NubeSinConfigurar implements AdaptadorNubeSupabase {
   }
 }
 
+export interface SesionSupabaseAuth {
+  readonly accessToken: string;
+  readonly refreshToken: string | null;
+  readonly expiresAt: number | null;
+  readonly userId: string;
+  readonly email: string;
+}
+
+export async function autenticarSupabaseEmailClave(params: {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  email: string;
+  password: string;
+}): Promise<SesionSupabaseAuth> {
+  const baseUrl = params.supabaseUrl.trim().replace(/\/+$/, '');
+  const anonKey = params.supabaseAnonKey.trim();
+  const resp = await fetch(`${baseUrl}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: {
+      apikey: anonKey,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      email: params.email.trim(),
+      password: params.password,
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  const txt = await resp.text();
+  if (!resp.ok) {
+    throw new Error(
+      `Error al autenticar con Supabase Auth (HTTP ${resp.status}): ${txt}`
+    );
+  }
+  const data = JSON.parse(txt) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_at?: number;
+    user?: { id?: string; email?: string };
+  };
+  if (!data.access_token || !data.user?.id) {
+    throw new Error('Supabase Auth no devolvió un token de acceso válido.');
+  }
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token ?? null,
+    expiresAt: data.expires_at ?? null,
+    userId: data.user.id,
+    email: data.user.email ?? params.email.trim(),
+  };
+}
+
 /**
  * Adaptador HTTP real contra Supabase PostgREST y Supabase Storage (bucket privado `productos`).
  * Regla 8: Exige clave pública `anon` y rechaza cualquier clave `service_role` o `sb_secret_`.
@@ -379,8 +589,8 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
   private readonly baseUrl: string;
   private readonly anonKey: string;
   private readonly accessToken: string;
+  private readonly tieneJwtAutenticado: boolean;
   private comercioId: string;
-  private readonly rolUsuario: string;
   private readonly columnasNoExistentesPorTabla = new Map<
     TablaSincronizable,
     Set<string>
@@ -402,9 +612,11 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
     }
     this.baseUrl = params.supabaseUrl.replace(/\/+$/, '');
     this.anonKey = params.supabaseAnonKey.trim();
-    this.accessToken = (params.accessToken ?? params.supabaseAnonKey).trim();
+    const tokenTrim = (params.accessToken ?? '').trim();
+    this.tieneJwtAutenticado =
+      Boolean(tokenTrim) && tokenTrim !== this.anonKey;
+    this.accessToken = this.tieneJwtAutenticado ? tokenTrim : this.anonKey;
     this.comercioId = params.comercioId ?? '';
-    this.rolUsuario = params.rolUsuario ?? 'superadmin';
   }
 
   private cabecerasAuth(
@@ -415,8 +627,7 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
     return {
       apikey: this.anonKey,
       Authorization: `Bearer ${this.accessToken}`,
-      ...(cid ? { 'x-comercio-id': cid } : {}),
-      ...(this.rolUsuario ? { 'x-rol-usuario': this.rolUsuario } : {}),
+      ...(cid && !this.tieneJwtAutenticado ? { 'x-comercio-id': cid } : {}),
       ...extra,
     };
   }
@@ -516,6 +727,16 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
         return;
       }
 
+      // Si PostgREST devuelve PGRST205 transitorio durante un reload de caché de esquema en una tabla base,
+      // esperar brevemente y reintentar antes de reportar error.
+      if (
+        (resp.status === 404 || texto.includes('PGRST205')) &&
+        intento < 2
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        continue;
+      }
+
       // Si falta una columna nueva en el esquema remoto de Supabase (PGRST204), omitirla y reintentar
       if (resp.status === 400 && texto.includes('PGRST204')) {
         const matchCol = texto.match(
@@ -551,7 +772,7 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
     const limitePagina = 1000;
     let offset = 0;
 
-    while (true) {
+    for (let pagina = 0; pagina < 50; pagina++) {
       const url = `${this.baseUrl}/rest/v1/${tabla}?${filtroComercio}${filtroFecha}&order=updated_at.asc&limit=${limitePagina}&offset=${offset}`;
 
       const resp = await fetch(url, {
@@ -595,11 +816,9 @@ export class AdaptadorSupabaseHttp implements AdaptadorNubeSupabase {
   ): Promise<RegistroSincronizableBase | null> {
     const candidatos = Array.from(
       new Set(
-        [
-          ...candidatosComercioId,
-          COMERCIO_ID_RESPALDO_CONOCIDO,
-          this.comercioId,
-        ].filter((id): id is string => Boolean(id && id.trim()))
+        [...candidatosComercioId, this.comercioId].filter((id): id is string =>
+          Boolean(id && id.trim())
+        )
       )
     );
 
@@ -864,6 +1083,35 @@ export function recolectarPendientesLocalesEnCola(
   const ahora = new Date().toISOString();
   let nuevosEncolados = 0;
 
+  // Compactar duplicados pendientes o con error del mismo registro para no inflar sync_cola
+  db.prepare(
+    `DELETE FROM sync_cola
+     WHERE estado IN ('pendiente', 'error')
+       AND rowid NOT IN (
+         SELECT MAX(rowid)
+         FROM sync_cola
+         WHERE estado IN ('pendiente', 'error')
+         GROUP BY tabla, registro_id
+       )`
+  ).run();
+
+  // Auto-reparación inmediata de errores transitorios o de serialización previa (ej. 22P02, 23502, 23503, PGRST205):
+  // pasan a 'pendiente' para que el indicador deje de mostrar error congelado y se suban en el ciclo actual.
+  db.prepare(
+    `UPDATE sync_cola
+     SET estado = 'pendiente', ultimo_error = NULL
+     WHERE estado = 'error'
+       AND (
+         ultimo_error LIKE '%22P02%'
+         OR ultimo_error LIKE '%23502%'
+         OR ultimo_error LIKE '%23503%'
+         OR ultimo_error LIKE '%PGRST205%'
+         OR ultimo_error LIKE '%PGRST204%'
+         OR ultimo_error LIKE '%dispositivo_id%'
+         OR ultimo_error LIKE '%usuario_id%'
+       )`
+  ).run();
+
   for (const tabla of ORDEN_TABLAS_SYNC) {
     const colComercio = tabla === 'comercios' ? 'id' : 'comercio_id';
 
@@ -905,7 +1153,7 @@ export function recolectarPendientesLocalesEnCola(
              SELECT 1 FROM sync_cola sc
              WHERE sc.tabla = ?
                AND sc.registro_id = t.id
-               AND sc.estado = 'pendiente'
+               AND sc.estado IN ('pendiente', 'error')
            )`
       )
       .all(comercioId, tabla) as unknown as {
@@ -972,7 +1220,17 @@ export async function ejecutarPushDatos(
   actor: ActorContexto,
   reintentoPadresAplicado = false
 ): Promise<ResultadoPushSync> {
-  recolectarPendientesLocalesEnCola(db, actor.comercio_id);
+  const estadoComercio = db
+    .prepare(
+      `SELECT ultima_subida_at FROM sync_estado WHERE tabla = 'comercios'`
+    )
+    .get() as { ultima_subida_at: string | null } | undefined;
+
+  if (!estadoComercio?.ultima_subida_at) {
+    reencolarComercioCompletoParaSync(db, actor.comercio_id);
+  } else {
+    recolectarPendientesLocalesEnCola(db, actor.comercio_id);
+  }
 
   const disponible = await adaptador.estaDisponible();
   if (!disponible) {
@@ -988,21 +1246,25 @@ export async function ejecutarPushDatos(
   const errores: string[] = [];
 
   for (const tabla of ORDEN_TABLAS_SYNC) {
+    const colComercio = tabla === 'comercios' ? 'id' : 'comercio_id';
     const itemsCola = db
       .prepare(
         `SELECT DISTINCT registro_id
          FROM sync_cola
-         WHERE tabla = ? AND estado IN ('pendiente', 'error')`
+         WHERE tabla = ?
+           AND (estado = 'pendiente' OR (estado = 'error' AND COALESCE(intentos, 0) < ?))`
       )
-      .all(tabla) as unknown as { registro_id: string }[];
+      .all(tabla, MAX_INTENTOS_SYNC_COLA) as unknown as { registro_id: string }[];
 
     if (itemsCola.length === 0) continue;
 
     const registrosAEnviar: RegistroSincronizableBase[] = [];
     for (const item of itemsCola) {
       const fila = db
-        .prepare(`SELECT * FROM ${tabla} WHERE id = ?`)
-        .get(item.registro_id) as RegistroSincronizableBase | undefined;
+        .prepare(`SELECT * FROM ${tabla} WHERE id = ? AND ${colComercio} = ?`)
+        .get(item.registro_id, actor.comercio_id) as
+        | RegistroSincronizableBase
+        | undefined;
       if (fila) {
         registrosAEnviar.push({
           ...fila,
@@ -1013,21 +1275,23 @@ export async function ejecutarPushDatos(
 
     if (registrosAEnviar.length === 0) {
       db.prepare(
-        `UPDATE sync_cola SET estado = 'sincronizado', ultimo_error = NULL WHERE tabla = ? AND estado IN ('pendiente', 'error')`
-      ).run(tabla);
+        `UPDATE sync_cola
+         SET estado = 'sincronizado', ultimo_error = NULL
+         WHERE tabla = ?
+           AND (estado = 'pendiente' OR (estado = 'error' AND COALESCE(intentos, 0) < ?))`
+      ).run(tabla, MAX_INTENTOS_SYNC_COLA);
       continue;
     }
 
-    try {
-      await adaptador.subirRegistrosTabla(tabla, registrosAEnviar);
+    const marcarExitoFilas = (filasExito: RegistroSincronizableBase[]) => {
+      if (filasExito.length === 0) return;
       const ahora = new Date().toISOString();
-
       ejecutarEnTransaccion(db, () => {
-        for (const reg of registrosAEnviar) {
+        for (const reg of filasExito) {
           if (!TABLAS_INMUTABLES_SIN_UPDATE_FILA.has(tabla)) {
             db.prepare(
-              `UPDATE ${tabla} SET sync_status = 'sincronizado' WHERE id = ?`
-            ).run(reg.id);
+              `UPDATE ${tabla} SET sync_status = 'sincronizado' WHERE id = ? AND ${colComercio} = ?`
+            ).run(reg.id, actor.comercio_id);
           }
           db.prepare(
             `UPDATE sync_cola
@@ -1042,9 +1306,25 @@ export async function ejecutarPushDatos(
            ON CONFLICT(tabla) DO UPDATE SET ultima_subida_at = excluded.ultima_subida_at`
         ).run(tabla, ahora);
       });
+      registrosSubidos += filasExito.length;
+      if (!tablasActualizadas.includes(tabla)) {
+        tablasActualizadas.push(tabla);
+      }
+    };
 
-      registrosSubidos += registrosAEnviar.length;
-      tablasActualizadas.push(tabla);
+    const marcarErrorFila = (registroId: string, msg: string) => {
+      db.prepare(
+        `UPDATE sync_cola
+         SET estado = 'error',
+             intentos = intentos + 1,
+             ultimo_error = ?
+         WHERE tabla = ? AND registro_id = ? AND estado IN ('pendiente', 'error')`
+      ).run(msg, tabla, registroId);
+    };
+
+    try {
+      await adaptador.subirRegistrosTabla(tabla, registrosAEnviar);
+      marcarExitoFilas(registrosAEnviar);
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : `Error al subir tabla ${tabla}`;
@@ -1057,14 +1337,29 @@ export async function ejecutarPushDatos(
         return ejecutarPushDatos(db, adaptador, actor, true);
       }
 
-      errores.push(msg);
-      db.prepare(
-        `UPDATE sync_cola
-         SET estado = 'error',
-             intentos = intentos + 1,
-             ultimo_error = ?
-         WHERE tabla = ? AND estado IN ('pendiente', 'error')`
-      ).run(msg, tabla);
+      if (registrosAEnviar.length > 1) {
+        // Aislamiento fila a fila para no bloquear registros sanos por un registro envenenado
+        const filasExito: RegistroSincronizableBase[] = [];
+        for (const reg of registrosAEnviar) {
+          try {
+            await adaptador.subirRegistrosTabla(tabla, [reg]);
+            filasExito.push(reg);
+          } catch (errFila) {
+            const msgFila =
+              errFila instanceof Error
+                ? errFila.message
+                : `Error al subir registro ${reg.id} de ${tabla}`;
+            errores.push(msgFila);
+            marcarErrorFila(reg.id, msgFila);
+          }
+        }
+        marcarExitoFilas(filasExito);
+      } else {
+        errores.push(msg);
+        if (registrosAEnviar[0]) {
+          marcarErrorFila(registrosAEnviar[0].id, msg);
+        }
+      }
     }
   }
 
@@ -1118,7 +1413,10 @@ function insertarFilaRemotaEnSQLite(
           `UPDATE movimientos_stock SET usuario_id = ? WHERE usuario_id = ?`
         ).run(registro.id, dupUsuario.id);
         db.prepare(
-          `UPDATE caja_sesiones SET usuario_apertura_id = ? WHERE usuario_apertura_id = ?`
+          `UPDATE caja_sesiones SET usuario_id = ? WHERE usuario_id = ?`
+        ).run(registro.id, dupUsuario.id);
+        db.prepare(
+          `UPDATE caja_sesiones SET usuario_cierre_id = ? WHERE usuario_cierre_id = ?`
         ).run(registro.id, dupUsuario.id);
         db.prepare(`UPDATE ventas SET usuario_id = ? WHERE usuario_id = ?`).run(
           registro.id,
@@ -1244,7 +1542,7 @@ function actualizarFilaRemotaEnSQLite(
   };
 
   let colsActualizar = columnasTabla.filter(
-    (c) => c !== 'id' && c in registroGuardar
+    (c) => c !== 'id' && c !== 'comercio_id' && c in registroGuardar
   );
 
   // En `ventas`, el trigger trg_ventas_proteger_importes protege subtotal, descuento, total, usuario_id y fecha
@@ -1282,10 +1580,24 @@ function actualizarFilaRemotaEnSQLite(
     return v ?? null;
   });
 
-  db.prepare(`UPDATE ${tabla} SET ${asignaciones} WHERE id = ?`).run(
-    ...(valores as (string | number | null)[]),
-    registro.id
-  );
+  const colComercio = tabla === 'comercios' ? 'id' : 'comercio_id';
+  const valorComercio =
+    tabla === 'comercios' ? registro.id : registro.comercio_id;
+
+  if (typeof valorComercio === 'string' && valorComercio.length > 0) {
+    db.prepare(
+      `UPDATE ${tabla} SET ${asignaciones} WHERE id = ? AND ${colComercio} = ?`
+    ).run(
+      ...(valores as (string | number | null)[]),
+      registro.id,
+      valorComercio
+    );
+  } else {
+    db.prepare(`UPDATE ${tabla} SET ${asignaciones} WHERE id = ?`).run(
+      ...(valores as (string | number | null)[]),
+      registro.id
+    );
+  }
 }
 
 /**
@@ -1366,7 +1678,10 @@ export async function ejecutarPullDatos(
   adaptador: AdaptadorNubeSupabase,
   actor: ActorContexto,
   directorioBaseDatos: string,
-  opciones: { forzarBajadaCompleta?: boolean } = {}
+  opciones: {
+    forzarBajadaCompleta?: boolean;
+    permitirAdopcionRemota?: boolean;
+  } = {}
 ): Promise<ResultadoPullSync> {
   const disponible = await adaptador.estaDisponible();
   if (!disponible) {
@@ -1380,7 +1695,8 @@ export async function ejecutarPullDatos(
 
   let comercioIdActivo = actor.comercio_id;
 
-  // Si la base local no tiene productos ni ventas, verificar si en Supabase existe un comercio previo para adoptarlo
+  // Si la base local no tiene productos ni ventas, solo adoptar un comercio remoto
+  // cuando el llamador lo autoriza explícitamente (p. ej. asistente de vinculación inicial).
   const cantProductosLocales =
     (
       db
@@ -1397,6 +1713,7 @@ export async function ejecutarPullDatos(
     )?.c ?? 0;
 
   if (
+    opciones.permitirAdopcionRemota === true &&
     cantProductosLocales === 0 &&
     cantVentasLocales === 0 &&
     adaptador.descubrirComercioRemoto
@@ -1408,10 +1725,7 @@ export async function ejecutarPullDatos(
     );
     if (prodsConIdActual.length === 0) {
       const persistida = leerIdentidadComercioPersistida(directorioBaseDatos);
-      const candidatos = [
-        persistida?.comercio_id ?? '',
-        COMERCIO_ID_RESPALDO_CONOCIDO,
-      ].filter(Boolean);
+      const candidatos = [persistida?.comercio_id ?? ''].filter(Boolean);
       const remotoDescubierto =
         await adaptador.descubrirComercioRemoto(candidatos);
       if (remotoDescubierto && remotoDescubierto.id !== comercioIdActivo) {
@@ -1440,6 +1754,7 @@ export async function ejecutarPullDatos(
 
   for (const tabla of ORDEN_TABLAS_SYNC) {
     try {
+      const colComercio = tabla === 'comercios' ? 'id' : 'comercio_id';
       const estadoRow = db
         .prepare(`SELECT ultima_bajada_at FROM sync_estado WHERE tabla = ?`)
         .get(tabla) as { ultima_bajada_at: string | null } | undefined;
@@ -1469,93 +1784,124 @@ export async function ejecutarPullDatos(
 
       ejecutarEnTransaccion(db, () => {
         for (const remoto of remotos) {
+          const comercioRemoto =
+            tabla === 'comercios' ? remoto.id : remoto.comercio_id;
+          if (comercioRemoto !== comercioIdActivo) {
+            errores.push(
+              `Registro remoto ${remoto.id} de ${tabla} descartado: pertenece a otro comercio (${String(comercioRemoto)}).`
+            );
+            continue;
+          }
+
           if (remoto.updated_at > maxUpdatedAt) {
             maxUpdatedAt = remoto.updated_at;
           }
 
-          const local = db
-            .prepare(`SELECT * FROM ${tabla} WHERE id = ?`)
-            .get(remoto.id) as RegistroSincronizableBase | undefined;
+          db.exec('SAVEPOINT sp_pull_fila;');
+          try {
+            const local = db
+              .prepare(
+                `SELECT * FROM ${tabla} WHERE id = ? AND ${colComercio} = ?`
+              )
+              .get(remoto.id, comercioIdActivo) as
+              | RegistroSincronizableBase
+              | undefined;
 
-          if (!local) {
-            insertarFilaRemotaEnSQLite(db, tabla, columnas, remoto);
-            registrosBajados++;
-          } else {
-            const tieneCambioPendienteLocal =
-              local.sync_status === 'pendiente' ||
-              Boolean(
-                db
-                  .prepare(
-                    `SELECT 1 FROM sync_cola WHERE tabla = ? AND registro_id = ? AND estado = 'pendiente'`
-                  )
-                  .get(tabla, local.id)
-              );
+            if (!local) {
+              insertarFilaRemotaEnSQLite(db, tabla, columnas, remoto);
+              registrosBajados++;
+            } else {
+              const tieneCambioPendienteLocal =
+                local.sync_status === 'pendiente' ||
+                Boolean(
+                  db
+                    .prepare(
+                      `SELECT 1 FROM sync_cola WHERE tabla = ? AND registro_id = ? AND estado = 'pendiente'`
+                    )
+                    .get(tabla, local.id)
+                );
 
-            const resolucion = resolverConflictoRegistro(
-              tabla,
-              local,
-              remoto,
-              tieneCambioPendienteLocal
-            );
-
-            if (resolucion.ganador !== 'sin_cambio') {
-              actualizarFilaRemotaEnSQLite(
-                db,
+              const resolucion = resolverConflictoRegistro(
                 tabla,
-                columnas,
-                resolucion.registroResultante
+                local,
+                remoto,
+                tieneCambioPendienteLocal
               );
 
-              if (resolucion.ganador === 'remoto') {
-                db.prepare(
-                  `UPDATE sync_cola SET estado = 'sincronizado' WHERE tabla = ? AND registro_id = ? AND estado = 'pendiente'`
-                ).run(tabla, local.id);
-              } else if (
-                resolucion.huboConflicto &&
-                (resolucion.ganador === 'local' ||
-                  resolucion.ganador === 'fusionado_restrictivo')
-              ) {
-                // El ganador local o fusionado tras un conflicto debe subirse en el próximo push para alinear la nube
-                db.prepare(
-                  `UPDATE ${tabla} SET sync_status = 'pendiente' WHERE id = ?`
-                ).run(local.id);
+              if (resolucion.ganador !== 'sin_cambio') {
+                actualizarFilaRemotaEnSQLite(
+                  db,
+                  tabla,
+                  columnas,
+                  resolucion.registroResultante
+                );
+
+                if (resolucion.ganador === 'remoto') {
+                  db.prepare(
+                    `UPDATE sync_cola SET estado = 'sincronizado' WHERE tabla = ? AND registro_id = ? AND estado = 'pendiente'`
+                  ).run(tabla, local.id);
+                } else if (
+                  resolucion.huboConflicto &&
+                  (resolucion.ganador === 'local' ||
+                    resolucion.ganador === 'fusionado_restrictivo')
+                ) {
+                  // El ganador local o fusionado tras un conflicto debe subirse en el próximo push para alinear la nube
+                  db.prepare(
+                    `UPDATE ${tabla} SET sync_status = 'pendiente' WHERE id = ? AND ${colComercio} = ?`
+                  ).run(local.id, comercioIdActivo);
+                }
+              }
+
+              if (resolucion.huboConflicto) {
+                conflictosResueltos++;
+                insertarRegistroAuditoria(db, {
+                  actor: actorEfectivo,
+                  accion: 'sync_conflicto_resuelto',
+                  entidad: tabla,
+                  entidad_id: local.id,
+                  valores_antes: {
+                    local_updated_at: local.updated_at,
+                    local_device_id: local.device_id,
+                    remoto_updated_at: remoto.updated_at,
+                    remoto_device_id: remoto.device_id,
+                  },
+                  valores_despues: {
+                    ganador: resolucion.ganador,
+                    regla: resolucion.reglaAplicada,
+                  },
+                  motivo: resolucion.detalleAuditoria,
+                });
               }
             }
 
-            if (resolucion.huboConflicto) {
-              conflictosResueltos++;
-              insertarRegistroAuditoria(db, {
-                actor: actorEfectivo,
-                accion: 'sync_conflicto_resuelto',
-                entidad: tabla,
-                entidad_id: local.id,
-                valores_antes: {
-                  local_updated_at: local.updated_at,
-                  local_device_id: local.device_id,
-                  remoto_updated_at: remoto.updated_at,
-                  remoto_device_id: remoto.device_id,
-                },
-                valores_despues: {
-                  ganador: resolucion.ganador,
-                  regla: resolucion.reglaAplicada,
-                },
-                motivo: resolucion.detalleAuditoria,
+            // Si es un producto, evaluar si su imagen remota debe descargarse en la cola de imágenes (PLAN.md §5.1)
+            if (tabla === 'productos') {
+              const encolada = evaluarYEncolarBajadaImagenProducto(db, {
+                comercioId: comercioIdActivo,
+                productoId: remoto.id,
+                imagenPathRemoto: (remoto.imagen_path as string | null) ?? null,
+                imagenHashRemoto: (remoto.imagen_hash as string | null) ?? null,
+                directorioBaseDatos,
               });
+              if (encolada) {
+                imagenesEncoladasBajada++;
+              }
             }
-          }
 
-          // Si es un producto, evaluar si su imagen remota debe descargarse en la cola de imágenes (PLAN.md §5.1)
-          if (tabla === 'productos') {
-            const encolada = evaluarYEncolarBajadaImagenProducto(db, {
-              comercioId: comercioIdActivo,
-              productoId: remoto.id,
-              imagenPathRemoto: (remoto.imagen_path as string | null) ?? null,
-              imagenHashRemoto: (remoto.imagen_hash as string | null) ?? null,
-              directorioBaseDatos,
-            });
-            if (encolada) {
-              imagenesEncoladasBajada++;
+            db.exec('RELEASE SAVEPOINT sp_pull_fila;');
+          } catch (errFila) {
+            try {
+              db.exec(
+                'ROLLBACK TO SAVEPOINT sp_pull_fila; RELEASE SAVEPOINT sp_pull_fila;'
+              );
+            } catch {
+              // Ignorar si el savepoint ya no existe
             }
+            const msgFila =
+              errFila instanceof Error
+                ? errFila.message
+                : `Error al aplicar fila ${remoto.id} en ${tabla}`;
+            errores.push(msgFila);
           }
         }
 
@@ -1979,4 +2325,119 @@ export function guardarConfiguracionSistema(
   }
 
   return resultado;
+}
+
+export interface ResultadoCopiaFirebase {
+  readonly registrosCopiados: number;
+  readonly tablasCopiadas: TablaSincronizable[];
+  readonly detallePorTabla: Record<string, number>;
+  readonly errores: string[];
+}
+
+/**
+ * Copia de forma completa e idempotente toda la base local del comercio hacia Firebase Firestore
+ * sin generar duplicados (cada registro se guarda bajo su clave determinística UUIDv7:
+ * `comercios/{comercioId}/{tabla}/{id}`).
+ */
+export async function copiarBaseCompletaAFirebaseSinDuplicados(
+  db: DatabaseSync,
+  actor: ActorContexto,
+  adaptadorFirebaseOverride?: AdaptadorNubeSupabase
+): Promise<ResultadoCopiaFirebase> {
+  if (actor.rol !== 'superadmin' && actor.rol !== 'encargado') {
+    throw new Error(
+      'Solo superadmin o encargado pueden ejecutar la copia completa hacia Firebase.'
+    );
+  }
+
+  let adaptadorFirebase = adaptadorFirebaseOverride;
+  if (!adaptadorFirebase) {
+    const cfg = obtenerConfiguracionSistema(db, actor.comercio_id);
+    if (!cfg.firebase_project_id || !cfg.firebase_api_key) {
+      throw new Error(
+        'Para copiar a Firebase primero ingresá y guardá el Project ID y la Web API Key de Firebase en Configuración.'
+      );
+    }
+    adaptadorFirebase = new AdaptadorFirebaseFirestoreHttp(
+      cfg.firebase_project_id,
+      cfg.firebase_api_key
+    );
+  }
+
+  const disponible = await adaptadorFirebase.estaDisponible();
+  if (!disponible) {
+    throw new Error(
+      'No se pudo conectar con Firebase Firestore. Verificá tu conexión a internet y el Project ID / Web API Key.'
+    );
+  }
+
+  let registrosCopiados = 0;
+  const tablasCopiadas: TablaSincronizable[] = [];
+  const detallePorTabla: Record<string, number> = {};
+  const errores: string[] = [];
+
+  for (const tabla of ORDEN_TABLAS_SYNC) {
+    try {
+      const colComercio = tabla === 'comercios' ? 'id' : 'comercio_id';
+      const filasCrudas = db
+        .prepare(`SELECT * FROM ${tabla} WHERE ${colComercio} = ?`)
+        .all(actor.comercio_id) as unknown as RegistroSincronizableBase[];
+
+      if (filasCrudas.length === 0) {
+        continue;
+      }
+
+      // Deduplicar por id (UUID) y sanitizar campos sensibles (Regla 16: nunca enviar clave_hash)
+      const mapaUnicos = new Map<string, RegistroSincronizableBase>();
+      for (const fila of filasCrudas) {
+        if (!fila || typeof fila.id !== 'string' || !fila.id.trim()) continue;
+        const copia: Record<string, unknown> = {
+          ...fila,
+          sync_status: 'sincronizado',
+        };
+        delete copia.clave_hash;
+        delete copia.pin_hash;
+        mapaUnicos.set(fila.id, copia as RegistroSincronizableBase);
+      }
+
+      const registrosUnicos = Array.from(mapaUnicos.values());
+      if (registrosUnicos.length === 0) continue;
+
+      await adaptadorFirebase.subirRegistrosTabla(tabla, registrosUnicos);
+
+      registrosCopiados += registrosUnicos.length;
+      tablasCopiadas.push(tabla);
+      detallePorTabla[tabla] = registrosUnicos.length;
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : `Error al copiar tabla ${tabla} a Firebase`;
+      errores.push(msg);
+    }
+  }
+
+  ejecutarEnTransaccion(db, () => {
+    insertarRegistroAuditoria(db, {
+      actor,
+      accion: 'sync_copia_completa_firebase',
+      entidad: 'configuracion_sistema',
+      entidad_id: actor.comercio_id,
+      valores_antes: null,
+      valores_despues: {
+        registros_copiados: registrosCopiados,
+        tablas_copiadas: tablasCopiadas,
+        errores_count: errores.length,
+      },
+      motivo:
+        'Copia completa idempotente (sin duplicados) hacia Firebase Firestore',
+    });
+  });
+
+  return {
+    registrosCopiados,
+    tablasCopiadas,
+    detallePorTabla,
+    errores,
+  };
 }

@@ -45,3 +45,6 @@ credenciales_google.json
 
 decisiones.md
 arreglar.txt
+
+# Auditoría de seguridad (artefactos locales, nunca commitear)
+auditoria/

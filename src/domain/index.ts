@@ -12,6 +12,7 @@ export * from './ticket.ts';
 export * from './xlsx.ts';
 export * from './pdf.ts';
 export * from './pedidos_reposicion.ts';
+export * from './sucursales.ts';
 export * from './informes.ts';
 export * from './sync.ts';
 export * from './paginacion.ts';

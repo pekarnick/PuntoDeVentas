@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
 import { invocarPosApi } from '../../db/cliente_pos_api.ts';
 import {
@@ -71,11 +71,29 @@ export function PanelClientesCuentaCorriente({
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const [busquedaClientesPadron, setBusquedaClientesPadron] = useState('');
   const [paginaClientes, setPaginaClientes] = useState(1);
   const [paginaMovsCliente, setPaginaMovsCliente] = useState(1);
 
+  const clientesFiltradosPadron = useMemo(() => {
+    const q = busquedaClientesPadron.trim().toLowerCase();
+    if (!q) return clientesServidor;
+    return clientesServidor.filter((c) => {
+      const texto = [
+        c.nombre,
+        c.documento ?? '',
+        c.telefono ?? '',
+        c.domicilio ?? '',
+        ETIQUETAS_CONDICION_IVA[c.condicion_iva] ?? '',
+      ]
+        .join(' ')
+        .toLowerCase();
+      return texto.includes(q);
+    });
+  }, [clientesServidor, busquedaClientesPadron]);
+
   const paginacionClientes = paginarListado(
-    clientesServidor,
+    clientesFiltradosPadron,
     paginaClientes,
     TAMANIO_PAGINA_POR_DEFECTO
   );
@@ -320,7 +338,30 @@ export function PanelClientesCuentaCorriente({
 
       {/* Listado de Clientes y Estado de Cuenta Corriente */}
       <section className="card">
-        <h2>Padron de Clientes y Cuentas Corrientes</h2>
+        <div
+          className="card-header-row"
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '0.75rem',
+            flexWrap: 'wrap',
+            marginBottom: '0.75rem',
+          }}
+        >
+          <h2 style={{ margin: 0 }}>Padron de Clientes y Cuentas Corrientes</h2>
+          <input
+            type="search"
+            className="input-busqueda"
+            value={busquedaClientesPadron}
+            onChange={(e) => {
+              setBusquedaClientesPadron(e.target.value);
+              setPaginaClientes(1);
+            }}
+            placeholder="🔎 Buscar cliente por nombre, CUIT/DNI, teléfono o domicilio..."
+            style={{ minWidth: '280px', flex: '1 1 280px', maxWidth: '420px' }}
+          />
+        </div>
         <table className="pos-table">
           <thead>
             <tr>
@@ -333,10 +374,12 @@ export function PanelClientesCuentaCorriente({
             </tr>
           </thead>
           <tbody>
-            {clientesServidor.length === 0 ? (
+            {clientesFiltradosPadron.length === 0 ? (
               <tr>
                 <td colSpan={6} className="text-muted">
-                  No hay clientes registrados. Creá el primero en el formulario.
+                  {clientesServidor.length === 0
+                    ? 'No hay clientes registrados. Creá el primero en el formulario.'
+                    : `No se encontraron clientes que coincidan con "${busquedaClientesPadron}".`}
                 </td>
               </tr>
             ) : (

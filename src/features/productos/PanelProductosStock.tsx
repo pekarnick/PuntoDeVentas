@@ -39,6 +39,32 @@ export interface ProveedorBasicoUI {
   readonly razon_social: string;
 }
 
+export interface SucursalResumenUI {
+  readonly id: string;
+  readonly nombre: string;
+  readonly codigo: string | null;
+  readonly direccion: string | null;
+  readonly telefono: string | null;
+  readonly es_principal: boolean;
+  readonly activo: boolean;
+  readonly cantidad_productos_con_stock?: number;
+  readonly total_unidades_stock?: number;
+  readonly cantidad_ventas?: number;
+}
+
+export interface TransferenciaSucursalUI {
+  readonly id: string;
+  readonly fecha: string;
+  readonly sucursal_origen_id: string;
+  readonly sucursal_origen_nombre: string;
+  readonly sucursal_destino_id: string;
+  readonly sucursal_destino_nombre: string;
+  readonly usuario_nombre: string;
+  readonly motivo: string;
+  readonly cantidad_items: number;
+  readonly total_unidades: number;
+}
+
 export interface ProductoAdminItemUI {
   readonly id: string;
   readonly nombre: string;
@@ -56,6 +82,8 @@ export interface ProductoAdminItemUI {
   readonly precio_venta: Centavos;
   readonly stock_minimo: number;
   readonly stock_actual: number;
+  readonly stock_por_sucursal?: Readonly<Record<string, number>>;
+  readonly stock_sucursal_activa?: number;
   readonly boton_rapido: boolean;
   readonly imagen_path: string | null;
   readonly imagen_hash: string | null;
@@ -65,6 +93,9 @@ export interface PanelProductosStockProps {
   readonly rolActivo: RolUsuario;
   readonly productosIniciales?: readonly ProductoAdminItemUI[];
   readonly combosIniciales?: readonly ComboPromocionUI[];
+  readonly sucursalesServidor?: readonly SucursalResumenUI[];
+  readonly sucursalActiva?: SucursalResumenUI | null;
+  readonly transferenciasSucursalesServidor?: readonly TransferenciaSucursalUI[];
   readonly categoriasServidor?: readonly CategoriaItemUI[];
   readonly marcasServidor?: readonly MarcaItemUI[];
   readonly proveedoresServidor?: readonly ProveedorBasicoUI[];
@@ -108,6 +139,9 @@ export function PanelProductosStock({
   rolActivo,
   productosIniciales = PRODUCTOS_FALLBACK_TESTS,
   combosIniciales = [],
+  sucursalesServidor = [],
+  sucursalActiva = null,
+  transferenciasSucursalesServidor = [],
   categoriasServidor = [],
   marcasServidor = [],
   proveedoresServidor = [],
@@ -119,14 +153,57 @@ export function PanelProductosStock({
   const [combos, setCombos] = useState<ComboPromocionUI[]>(() => [
     ...combosIniciales,
   ]);
+  const [sucursales, setSucursales] = useState<SucursalResumenUI[]>(() =>
+    sucursalesServidor.length > 0
+      ? [...sucursalesServidor]
+      : [
+          {
+            id: 'suc-principal-local',
+            nombre: 'Casa Central',
+            codigo: 'SUC-01',
+            direccion: null,
+            telefono: null,
+            es_principal: true,
+            activo: true,
+          },
+        ]
+  );
+  const [transferenciasSucursales, setTransferenciasSucursales] = useState<
+    TransferenciaSucursalUI[]
+  >(() => [...transferenciasSucursalesServidor]);
   const [busqueda, setBusqueda] = useState('');
   const [paginaProductos, setPaginaProductos] = useState(1);
+
+  // Estado de Sucursales y Migración de Productos entre Sucursales
+  const [sucNombreNueva, setSucNombreNueva] = useState('');
+  const [sucCodigoNuevo, setSucCodigoNuevo] = useState('');
+  const [sucDireccionNueva, setSucDireccionNueva] = useState('');
+  const [sucTelefonoNuevo, setSucTelefonoNuevo] = useState('');
+  const [transfOrigenId, setTransfOrigenId] = useState<string>(
+    sucursalesServidor[0]?.id ?? 'suc-principal-local'
+  );
+  const [transfDestinoId, setTransfDestinoId] = useState<string>(
+    sucursalesServidor[1]?.id ?? ''
+  );
+  const [transfMotivo, setTransfMotivo] = useState(
+    'Reposición interna entre sucursales'
+  );
+  const [busquedaProdTransferencia, setBusquedaProdTransferencia] =
+    useState('');
+  const [transfProdId, setTransfProdId] = useState<string>(
+    productosIniciales[0]?.id ?? ''
+  );
+  const [transfCantInput, setTransfCantInput] = useState('1');
+  const [transfItemsBorrador, setTransfItemsBorrador] = useState<
+    Array<{ productoId: string; nombreProducto: string; cantidad: number }>
+  >([]);
 
   // Estado de Armado de Combo con sus componentes, cantidades requeridas y precio especial
   const [comboNombre, setComboNombre] = useState('');
   const [comboCodigoBarras, setComboCodigoBarras] = useState('');
   const [comboDescripcion, setComboDescripcion] = useState('');
   const [comboPrecioEspecialInput, setComboPrecioEspecialInput] = useState('');
+  const [busquedaProdCombo, setBusquedaProdCombo] = useState('');
   const [comboComponenteProdId, setComboComponenteProdId] = useState<string>(
     productosIniciales[0]?.id ?? ''
   );
@@ -134,6 +211,36 @@ export function PanelProductosStock({
   const [comboComponentesBorrador, setComboComponentesBorrador] = useState<
     Array<{ productoId: string; cantidad: number }>
   >([]);
+
+  const productosFiltradosTransferencia = useMemo(() => {
+    const q = busquedaProdTransferencia.trim().toLowerCase();
+    if (!q) return productos;
+    return productos.filter((p) => {
+      const texto = [
+        p.nombre,
+        p.codigo_interno ?? '',
+        ...(p.codigos_barras ?? []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return texto.includes(q);
+    });
+  }, [productos, busquedaProdTransferencia]);
+
+  const productosFiltradosCombo = useMemo(() => {
+    const q = busquedaProdCombo.trim().toLowerCase();
+    if (!q) return productos;
+    return productos.filter((p) => {
+      const texto = [
+        p.nombre,
+        p.codigo_interno ?? '',
+        ...(p.codigos_barras ?? []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return texto.includes(q);
+    });
+  }, [productos, busquedaProdCombo]);
 
   useEffect(() => {
     setProductos([...productosIniciales]);
@@ -148,6 +255,26 @@ export function PanelProductosStock({
   useEffect(() => {
     setCombos([...combosIniciales]);
   }, [combosIniciales]);
+
+  useEffect(() => {
+    if (sucursalesServidor.length > 0) {
+      setSucursales([...sucursalesServidor]);
+      if (!sucursalesServidor.some((s) => s.id === transfOrigenId)) {
+        setTransfOrigenId(sucursalesServidor[0]!.id);
+      }
+      if (
+        !transfDestinoId ||
+        !sucursalesServidor.some((s) => s.id === transfDestinoId)
+      ) {
+        const otra = sucursalesServidor.find((s) => s.id !== transfOrigenId);
+        if (otra) setTransfDestinoId(otra.id);
+      }
+    }
+  }, [sucursalesServidor]);
+
+  useEffect(() => {
+    setTransferenciasSucursales([...transferenciasSucursalesServidor]);
+  }, [transferenciasSucursalesServidor]);
 
   // Alta de producto
   const [nombreNuevo, setNombreNuevo] = useState('');
@@ -179,9 +306,26 @@ export function PanelProductosStock({
   const [nuevaMarcaNombre, setNuevaMarcaNombre] = useState('');
 
   // Movimiento de stock manual
+  const [busquedaProductoAjuste, setBusquedaProductoAjuste] =
+    useState<string>('');
   const [productoAjusteId, setProductoAjusteId] = useState<string>(
     productosIniciales[0]?.id ?? ''
   );
+
+  const productosFiltradosAjuste = useMemo(() => {
+    const q = busquedaProductoAjuste.trim().toLowerCase();
+    if (!q) return productos;
+    return productos.filter((p) => {
+      const texto = [
+        p.nombre,
+        p.codigo_interno ?? '',
+        ...(p.codigos_barras ?? []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return texto.includes(q);
+    });
+  }, [productos, busquedaProductoAjuste]);
   const [tipoMovimiento, setTipoMovimiento] =
     useState<TipoMovimientoStock>('compra');
   const [cantidadMovimientoInput, setCantidadMovimientoInput] = useState('');
@@ -679,6 +823,39 @@ export function PanelProductosStock({
     });
   }, [combos, productos]);
 
+  const [paginaSucursales, setPaginaSucursales] = useState(1);
+  const [paginaTransfItemsBorrador, setPaginaTransfItemsBorrador] = useState(1);
+  const [paginaTransferenciasSucursales, setPaginaTransferenciasSucursales] =
+    useState(1);
+  const [paginaComponentesBorrador, setPaginaComponentesBorrador] = useState(1);
+  const [paginaCombos, setPaginaCombos] = useState(1);
+
+  const paginacionSucursales = paginarListado(
+    sucursales,
+    paginaSucursales,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionTransfItemsBorrador = paginarListado(
+    transfItemsBorrador,
+    paginaTransfItemsBorrador,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionTransferenciasSucursales = paginarListado(
+    transferenciasSucursales,
+    paginaTransferenciasSucursales,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionComponentesBorrador = paginarListado(
+    componentesBorradorDetallados,
+    paginaComponentesBorrador,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionCombos = paginarListado(
+    combosConStockEnVivo,
+    paginaCombos,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+
   function agregarComponenteAlComboBorrador() {
     setMensajeError(null);
     const idEfectivo = comboComponenteProdId || productos[0]?.id || '';
@@ -781,6 +958,257 @@ export function PanelProductosStock({
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'No se pudo desactivar el combo.'
+      );
+    }
+  }
+
+  async function manejarCrearSucursal(e: React.FormEvent) {
+    e.preventDefault();
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      const nombreLimpio = sucNombreNueva.trim();
+      if (!nombreLimpio) {
+        throw new Error('Ingresá el nombre de la nueva sucursal.');
+      }
+
+      const idNuevo = `suc-${Date.now()}`;
+      try {
+        await invocarPosApi('crear_sucursal', {
+          rolActivo,
+          nombre: nombreLimpio,
+          codigo: sucCodigoNuevo.trim() || null,
+          direccion: sucDireccionNueva.trim() || null,
+          telefono: sucTelefonoNuevo.trim() || null,
+        });
+      } catch (err) {
+        if (err instanceof Error && !err.message.includes('fetch')) {
+          throw err;
+        }
+      }
+
+      const nuevaSuc: SucursalResumenUI = {
+        id: idNuevo,
+        nombre: nombreLimpio,
+        codigo: sucCodigoNuevo.trim() || `SUC-0${sucursales.length + 1}`,
+        direccion: sucDireccionNueva.trim() || null,
+        telefono: sucTelefonoNuevo.trim() || null,
+        es_principal: false,
+        activo: true,
+        cantidad_productos_con_stock: 0,
+        total_unidades_stock: 0,
+        cantidad_ventas: 0,
+      };
+      setSucursales((prev) => [...prev, nuevaSuc]);
+      if (!transfDestinoId) {
+        setTransfDestinoId(nuevaSuc.id);
+      }
+      setSucNombreNueva('');
+      setSucCodigoNuevo('');
+      setSucDireccionNueva('');
+      setSucTelefonoNuevo('');
+      setMensajeOk(`Sucursal "${nombreLimpio}" creada y sincronizable.`);
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo crear la sucursal.'
+      );
+    }
+  }
+
+  async function manejarActivarSucursalEnTerminal(suc: SucursalResumenUI) {
+    setMensajeError(null);
+    setMensajeOk(null);
+    try {
+      try {
+        await invocarPosApi('seleccionar_sucursal_activa', {
+          rolActivo,
+          sucursalId: suc.id,
+        });
+      } catch (err) {
+        if (err instanceof Error && !err.message.includes('fetch')) {
+          throw err;
+        }
+      }
+      setMensajeOk(
+        `Sucursal activa de esta terminal cambiada a "${suc.nombre}".`
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo cambiar la sucursal activa.'
+      );
+    }
+  }
+
+  function obtenerStockProductoEnSucursalUI(
+    prod: ProductoAdminItemUI,
+    sucId: string
+  ): number {
+    if (prod.stock_por_sucursal && sucId in prod.stock_por_sucursal) {
+      return prod.stock_por_sucursal[sucId] ?? 0;
+    }
+    const suc = sucursales.find((s) => s.id === sucId);
+    if (suc?.es_principal || sucursales.length <= 1) {
+      return prod.stock_actual;
+    }
+    return 0;
+  }
+
+  function agregarItemTransferenciaSucursal() {
+    setMensajeError(null);
+    const idEfectivo = transfProdId || productos[0]?.id || '';
+    const prod = productos.find((p) => p.id === idEfectivo);
+    if (!prod) {
+      setMensajeError('Seleccioná un producto para migrar entre sucursales.');
+      return;
+    }
+    const cant = Number(transfCantInput.replace(',', '.'));
+    if (!Number.isFinite(cant) || cant <= 0) {
+      setMensajeError('La cantidad a transferir debe ser mayor a cero.');
+      return;
+    }
+    const dispOrigen = obtenerStockProductoEnSucursalUI(prod, transfOrigenId);
+    if (cant > dispOrigen) {
+      setMensajeError(
+        `Stock insuficiente en la sucursal de origen: "${prod.nombre}" tiene ${dispOrigen} ${prod.unidad} disponibles.`
+      );
+      return;
+    }
+
+    setTransfItemsBorrador((prev) => {
+      const idx = prev.findIndex((i) => i.productoId === prod.id);
+      if (idx >= 0) {
+        return prev.map((it, i) =>
+          i === idx
+            ? {
+                ...it,
+                cantidad: Math.min(
+                  dispOrigen,
+                  Math.round((it.cantidad + cant) * 1000) / 1000
+                ),
+              }
+            : it
+        );
+      }
+      return [
+        ...prev,
+        {
+          productoId: prod.id,
+          nombreProducto: prod.nombre,
+          cantidad: cant,
+        },
+      ];
+    });
+    setTransfCantInput('1');
+  }
+
+  function cargarTodosProductosDeSucursalOrigen() {
+    setMensajeError(null);
+    const conStock = productos
+      .map((p) => ({
+        productoId: p.id,
+        nombreProducto: p.nombre,
+        cantidad: obtenerStockProductoEnSucursalUI(p, transfOrigenId),
+      }))
+      .filter((it) => it.cantidad > 0);
+
+    if (conStock.length === 0) {
+      setMensajeError(
+        'La sucursal de origen seleccionada no tiene productos con stock positivo para migrar.'
+      );
+      return;
+    }
+    setTransfItemsBorrador(conStock);
+    setMensajeOk(
+      `Se cargaron ${conStock.length} producto(s) con su stock disponible de la sucursal de origen.`
+    );
+  }
+
+  async function manejarConfirmarTransferenciaSucursales(e: React.FormEvent) {
+    e.preventDefault();
+    setMensajeError(null);
+    setMensajeOk(null);
+
+    try {
+      if (!transfOrigenId || !transfDestinoId) {
+        throw new Error(
+          'Seleccioná la sucursal de origen y la sucursal de destino.'
+        );
+      }
+      if (transfOrigenId === transfDestinoId) {
+        throw new Error(
+          'La sucursal de origen y la sucursal de destino deben ser diferentes.'
+        );
+      }
+      if (!transfMotivo.trim()) {
+        throw new Error(
+          'El motivo de la migración/transferencia entre sucursales es obligatorio.'
+        );
+      }
+      if (transfItemsBorrador.length === 0) {
+        throw new Error(
+          'Agregá al menos un producto a la lista de migración entre sucursales.'
+        );
+      }
+
+      try {
+        await invocarPosApi('transferir_stock_sucursales', {
+          rolActivo,
+          sucursalOrigenId: transfOrigenId,
+          sucursalDestinoId: transfDestinoId,
+          motivo: transfMotivo.trim(),
+          items: transfItemsBorrador.map((it) => ({
+            productoId: it.productoId,
+            cantidad: it.cantidad,
+          })),
+        });
+      } catch (err) {
+        if (err instanceof Error && !err.message.includes('fetch')) {
+          throw err;
+        }
+      }
+
+      const sucOrigNombre =
+        sucursales.find((s) => s.id === transfOrigenId)?.nombre ?? 'Origen';
+      const sucDestNombre =
+        sucursales.find((s) => s.id === transfDestinoId)?.nombre ?? 'Destino';
+      const totalUnid = transfItemsBorrador.reduce(
+        (acc, it) => acc + it.cantidad,
+        0
+      );
+
+      setTransferenciasSucursales((prev) => [
+        {
+          id: `transf-${Date.now()}`,
+          fecha: new Date().toISOString(),
+          sucursal_origen_id: transfOrigenId,
+          sucursal_origen_nombre: sucOrigNombre,
+          sucursal_destino_id: transfDestinoId,
+          sucursal_destino_nombre: sucDestNombre,
+          usuario_nombre: rolActivo,
+          motivo: transfMotivo.trim(),
+          cantidad_items: transfItemsBorrador.length,
+          total_unidades: totalUnid,
+        },
+        ...prev,
+      ]);
+
+      setTransfItemsBorrador([]);
+      setMensajeOk(
+        `Migración completada: ${transfItemsBorrador.length} artículo(s) (${totalUnid} unidades) transferidos de "${sucOrigNombre}" hacia "${sucDestNombre}" mediante movimientos de stock auditados.`
+      );
+      onDatosActualizados?.();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo completar la transferencia entre sucursales.'
       );
     }
   }
@@ -1009,15 +1437,57 @@ export function PanelProductosStock({
                 className="form-stack"
               >
                 <div className="form-row">
+                  <label style={{ flex: 1 }}>
+                    Buscar producto (por nombre, código interno o código de barras):
+                    <input
+                      type="search"
+                      aria-label="Buscar producto para movimiento de stock"
+                      value={busquedaProductoAjuste}
+                      onChange={(e) => {
+                        const valor = e.target.value;
+                        setBusquedaProductoAjuste(valor);
+                        const q = valor.trim().toLowerCase();
+                        if (!q) return;
+                        const coincidencia = productos.find((p) =>
+                          [
+                            p.nombre,
+                            p.codigo_interno ?? '',
+                            ...(p.codigos_barras ?? []),
+                          ]
+                            .join(' ')
+                            .toLowerCase()
+                            .includes(q)
+                        );
+                        if (coincidencia) {
+                          setProductoAjusteId(coincidencia.id);
+                        }
+                      }}
+                      placeholder="🔍 Escribí nombre, código interno o EAN para filtrar el producto..."
+                    />
+                  </label>
+                </div>
+                <div className="form-row">
                   <label>
-                    Producto:
+                    Producto ({productosFiltradosAjuste.length} coincidencia(s)):
                     <select
-                      value={productoAjusteId}
+                      value={
+                        productoAjusteId ||
+                        productosFiltradosAjuste[0]?.id ||
+                        productos[0]?.id ||
+                        ''
+                      }
                       onChange={(e) => setProductoAjusteId(e.target.value)}
                     >
-                      {productos.map((p) => (
+                      {productosFiltradosAjuste.length === 0 && (
+                        <option value="">
+                          Sin productos que coincidan con la búsqueda
+                        </option>
+                      )}
+                      {productosFiltradosAjuste.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.nombre}
+                          {p.codigo_interno ? ` (${p.codigo_interno})` : ''} —
+                          Stock: {p.stock_actual} {p.unidad}
                         </option>
                       ))}
                     </select>
@@ -1232,6 +1702,444 @@ export function PanelProductosStock({
         </>
       )}
 
+      {/* Panel de Administración de Sucursales, Ubicación de Stock y Migración entre Locales */}
+      <div className="pos-card">
+        <div className="card-header">
+          <div>
+            <h2>
+              🏢 Sucursales, Ubicación de Productos y Migración de Stock entre Locales
+            </h2>
+            <p className="text-muted">
+              Administrá las sucursales del comercio, seleccioná en qué sucursal opera esta terminal,
+              consultá dónde se encuentran las unidades de cada producto y migrá mercadería entre
+              sucursales con trazabilidad contable append-only.
+            </p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600 }}>
+              📍 Sucursal activa en esta terminal:
+              <select
+                value={sucursalActiva?.id ?? sucursales[0]?.id ?? ''}
+                onChange={(e) => {
+                  const elegida = sucursales.find((s) => s.id === e.target.value);
+                  if (elegida) {
+                    void manejarActivarSucursalEnTerminal(elegida);
+                  }
+                }}
+                style={{ fontWeight: 700 }}
+              >
+                {sucursales.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre} ({s.codigo}) {s.es_principal ? '★ Principal' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+            gap: '1rem',
+            marginBottom: '1rem',
+          }}
+        >
+          {/* Tarjeta 1: Lista y alta de sucursales */}
+          <div className="subcard-box" style={{ padding: '0.9rem', borderRadius: '0.65rem' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '0.5rem' }}>
+              Locales / Sucursales del Comercio ({sucursales.length})
+            </h3>
+            <table className="pos-table" style={{ marginBottom: '0.75rem' }}>
+              <thead>
+                <tr>
+                  <th>Código</th>
+                  <th>Nombre</th>
+                  <th>Dirección / Teléfono</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginacionSucursales.itemsPagina.map((s) => {
+                  const esActiva = (sucursalActiva?.id ?? sucursales[0]?.id) === s.id;
+                  return (
+                    <tr key={s.id}>
+                      <td>
+                        <code>{s.codigo}</code>
+                      </td>
+                      <td>
+                        <strong>{s.nombre}</strong>
+                        {s.es_principal && (
+                          <span
+                            className="role-pill"
+                            style={{ marginLeft: '0.35rem', fontSize: '0.72rem' }}
+                          >
+                            Principal
+                          </span>
+                        )}
+                      </td>
+                      <td className="text-muted">
+                        {s.direccion || 'Sin dirección'}
+                        {s.telefono ? ` · Tel: ${s.telefono}` : ''}
+                      </td>
+                      <td>
+                        {esActiva ? (
+                          <span className="stock-ok">🟢 Activa en caja</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
+                            onClick={() => void manejarActivarSucursalEnTerminal(s)}
+                          >
+                            Operar aquí
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <PaginadorTabla
+              paginaActual={paginacionSucursales.paginaActual}
+              totalPaginas={paginacionSucursales.totalPaginas}
+              totalItems={paginacionSucursales.totalItems}
+              desdeRegistro={paginacionSucursales.desdeRegistro}
+              hastaRegistro={paginacionSucursales.hastaRegistro}
+              tamanioPagina={paginacionSucursales.tamanioPagina}
+              onCambiarPagina={setPaginaSucursales}
+              etiquetaItems="sucursales"
+            />
+
+            {puedeEditarCatalogo && (
+              <form onSubmit={(e) => void manejarCrearSucursal(e)} className="form-stack">
+                <strong style={{ fontSize: '0.88rem' }}>➕ Agregar nueva sucursal o depósito</strong>
+                <div className="form-row">
+                  <label>
+                    Nombre de sucursal:
+                    <input
+                      type="text"
+                      value={sucNombreNueva}
+                      onChange={(e) => setSucNombreNueva(e.target.value)}
+                      placeholder="Ej. Sucursal Norte / Depósito Central"
+                    />
+                  </label>
+                  <label>
+                    Código corto:
+                    <input
+                      type="text"
+                      value={sucCodigoNuevo}
+                      onChange={(e) => setSucCodigoNuevo(e.target.value)}
+                      placeholder="Ej. SUC-02"
+                    />
+                  </label>
+                </div>
+                <div className="form-row">
+                  <label>
+                    Dirección (opcional):
+                    <input
+                      type="text"
+                      value={sucDireccionNueva}
+                      onChange={(e) => setSucDireccionNueva(e.target.value)}
+                      placeholder="Av. Corrientes 2450"
+                    />
+                  </label>
+                  <label>
+                    Teléfono (opcional):
+                    <input
+                      type="text"
+                      value={sucTelefonoNuevo}
+                      onChange={(e) => setSucTelefonoNuevo(e.target.value)}
+                      placeholder="11-4555-0199"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    className="btn-secondary"
+                    style={{ alignSelf: 'flex-end' }}
+                  >
+                    Guardar Sucursal
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+
+          {/* Tarjeta 2: Migración / Transferencia de productos entre sucursales */}
+          <div className="subcard-box" style={{ padding: '0.9rem', borderRadius: '0.65rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '0.5rem' }}>
+                🚚 Migrar / Transferir Productos entre Sucursales
+              </h3>
+              {puedeEditarCatalogo && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ fontSize: '0.78rem', padding: '0.25rem 0.6rem' }}
+                  onClick={cargarTodosProductosDeSucursalOrigen}
+                >
+                  Cargar todo el stock de origen
+                </button>
+              )}
+            </div>
+            <p className="text-muted" style={{ fontSize: '0.84rem', marginBottom: '0.65rem' }}>
+              Descuenta stock en la sucursal de origen y lo acredita en la sucursal de destino en una
+              única operación atómica auditada.
+            </p>
+
+            {puedeEditarCatalogo ? (
+              <form
+                onSubmit={(e) => void manejarConfirmarTransferenciaSucursales(e)}
+                className="form-stack"
+              >
+                <div className="form-row">
+                  <label>
+                    Sucursal Origen (sale mercadería):
+                    <select
+                      value={transfOrigenId || sucursalActiva?.id || sucursales[0]?.id || ''}
+                      onChange={(e) => setTransfOrigenId(e.target.value)}
+                    >
+                      {sucursales.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre} ({s.codigo})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Sucursal Destino (entra mercadería):
+                    <select
+                      value={
+                        transfDestinoId ||
+                        sucursales.find(
+                          (s) => s.id !== (transfOrigenId || sucursalActiva?.id),
+                        )?.id ||
+                        ''
+                      }
+                      onChange={(e) => setTransfDestinoId(e.target.value)}
+                    >
+                      <option value="">-- Seleccionar sucursal destino --</option>
+                      {sucursales.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre} ({s.codigo})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                  <label style={{ flex: 2 }}>
+                    Producto a migrar:
+                    <input
+                      type="search"
+                      value={busquedaProdTransferencia}
+                      onChange={(e) => {
+                        const valor = e.target.value;
+                        setBusquedaProdTransferencia(valor);
+                        const q = valor.trim().toLowerCase();
+                        if (q) {
+                          const coincidencia = productos.find((p) =>
+                            [
+                              p.nombre,
+                              p.codigo_interno ?? '',
+                              ...(p.codigos_barras ?? []),
+                            ]
+                              .join(' ')
+                              .toLowerCase()
+                              .includes(q)
+                          );
+                          if (coincidencia) {
+                            setTransfProdId(coincidencia.id);
+                          }
+                        }
+                      }}
+                      placeholder="🔎 Buscar producto a migrar por nombre, código o barras..."
+                      style={{ marginBottom: '0.35rem' }}
+                    />
+                    <select
+                      value={
+                        transfProdId ||
+                        productosFiltradosTransferencia[0]?.id ||
+                        productos[0]?.id ||
+                        ''
+                      }
+                      onChange={(e) => setTransfProdId(e.target.value)}
+                    >
+                      {productosFiltradosTransferencia.length === 0 ? (
+                        <option value="">
+                          Sin coincidencias para &ldquo;{busquedaProdTransferencia}&rdquo;
+                        </option>
+                      ) : (
+                        productosFiltradosTransferencia.map((p) => {
+                          const origId =
+                            transfOrigenId ||
+                            sucursalActiva?.id ||
+                            sucursales[0]?.id ||
+                            '';
+                          const stockEnOrigen = obtenerStockProductoEnSucursalUI(
+                            p,
+                            origId
+                          );
+                          return (
+                            <option key={p.id} value={p.id}>
+                              {p.nombre} ({p.codigo_interno}) — En origen:{' '}
+                              {stockEnOrigen} {p.unidad}
+                            </option>
+                          );
+                        })
+                      )}
+                    </select>
+                  </label>
+                  <label style={{ flex: 1 }}>
+                    Cantidad:
+                    <input
+                      type="number"
+                      min="0.001"
+                      step="any"
+                      value={transfCantInput}
+                      onChange={(e) => setTransfCantInput(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={agregarItemTransferenciaSucursal}
+                  >
+                    + Agregar al envío
+                  </button>
+                </div>
+
+                {transfItemsBorrador.length > 0 && (
+                  <>
+                    <table className="pos-table" style={{ marginTop: '0.5rem' }}>
+                      <thead>
+                        <tr>
+                          <th>Producto</th>
+                          <th>Cantidad a migrar</th>
+                          <th>Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paginacionTransfItemsBorrador.itemsPagina.map((item) => {
+                          const prod = productos.find((p) => p.id === item.productoId);
+                          return (
+                            <tr key={item.productoId}>
+                              <td>
+                                {prod
+                                  ? `${prod.nombre} (${prod.codigo_interno})`
+                                  : item.nombreProducto}
+                              </td>
+                              <td>
+                                <strong>
+                                  {item.cantidad} {prod?.unidad ?? 'u.'}
+                                </strong>
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="btn-link"
+                                  onClick={() =>
+                                    setTransfItemsBorrador((prev) =>
+                                      prev.filter((i) => i.productoId !== item.productoId)
+                                    )
+                                  }
+                                >
+                                  Quitar
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <PaginadorTabla
+                      paginaActual={paginacionTransfItemsBorrador.paginaActual}
+                      totalPaginas={paginacionTransfItemsBorrador.totalPaginas}
+                      totalItems={paginacionTransfItemsBorrador.totalItems}
+                      desdeRegistro={paginacionTransfItemsBorrador.desdeRegistro}
+                      hastaRegistro={paginacionTransfItemsBorrador.hastaRegistro}
+                      tamanioPagina={paginacionTransfItemsBorrador.tamanioPagina}
+                      onCambiarPagina={setPaginaTransfItemsBorrador}
+                      etiquetaItems="productos a migrar"
+                    />
+                  </>
+                )}
+
+                <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                  <label style={{ flex: 2 }}>
+                    Motivo / Remito interno:
+                    <input
+                      type="text"
+                      value={transfMotivo}
+                      onChange={(e) => setTransfMotivo(e.target.value)}
+                      placeholder="Ej. Reposición semanal a Sucursal Norte"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    className="btn-primary"
+                    disabled={transfItemsBorrador.length === 0}
+                  >
+                    Confirmar Migración de Stock ({transfItemsBorrador.length})
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="text-muted">
+                Solo Superadmin o Encargado pueden migrar stock entre sucursales.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Historial reciente de transferencias entre sucursales */}
+        {transferenciasSucursales.length > 0 && (
+          <div style={{ marginTop: '0.75rem' }}>
+            <h4 style={{ margin: '0 0 0.45rem 0' }}>
+              Últimas migraciones de mercadería entre sucursales
+            </h4>
+            <table className="pos-table">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Origen → Destino</th>
+                  <th>Resumen de Productos Migrados</th>
+                  <th>Motivo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginacionTransferenciasSucursales.itemsPagina.map((t) => (
+                  <tr key={t.id}>
+                    <td>{new Date(t.fecha).toLocaleString('es-AR')}</td>
+                    <td>
+                      <strong>{t.sucursal_origen_nombre}</strong> →{' '}
+                      <strong>{t.sucursal_destino_nombre}</strong>
+                    </td>
+                    <td>
+                      {t.cantidad_items} producto(s) · {t.total_unidades} u. totales
+                    </td>
+                    <td className="text-muted">{t.motivo}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <PaginadorTabla
+              paginaActual={paginacionTransferenciasSucursales.paginaActual}
+              totalPaginas={paginacionTransferenciasSucursales.totalPaginas}
+              totalItems={paginacionTransferenciasSucursales.totalItems}
+              desdeRegistro={paginacionTransferenciasSucursales.desdeRegistro}
+              hastaRegistro={paginacionTransferenciasSucursales.hastaRegistro}
+              tamanioPagina={paginacionTransferenciasSucursales.tamanioPagina}
+              onCambiarPagina={setPaginaTransferenciasSucursales}
+              etiquetaItems="migraciones de sucursal"
+            />
+          </div>
+        )}
+      </div>
+
       {/* Panel de Armado de Combos y Promociones (docs/manual/04_productos_y_stock.md §3) */}
       <div className="pos-card">
         <div className="card-header">
@@ -1306,17 +2214,54 @@ export function PanelProductosStock({
               <div className="form-row" style={{ alignItems: 'flex-end' }}>
                 <label style={{ flex: 2 }}>
                   Producto componente:
+                  <input
+                    type="search"
+                    value={busquedaProdCombo}
+                    onChange={(e) => {
+                      const valor = e.target.value;
+                      setBusquedaProdCombo(valor);
+                      const q = valor.trim().toLowerCase();
+                      if (q) {
+                        const coincidencia = productos.find((p) =>
+                          [
+                            p.nombre,
+                            p.codigo_interno ?? '',
+                            ...(p.codigos_barras ?? []),
+                          ]
+                            .join(' ')
+                            .toLowerCase()
+                            .includes(q)
+                        );
+                        if (coincidencia) {
+                          setComboComponenteProdId(coincidencia.id);
+                        }
+                      }
+                    }}
+                    placeholder="🔎 Buscar producto para el combo por nombre, código o barras..."
+                    style={{ marginBottom: '0.35rem' }}
+                  />
                   <select
-                    value={comboComponenteProdId || productos[0]?.id || ''}
+                    value={
+                      comboComponenteProdId ||
+                      productosFiltradosCombo[0]?.id ||
+                      productos[0]?.id ||
+                      ''
+                    }
                     onChange={(e) => setComboComponenteProdId(e.target.value)}
                   >
-                    {productos.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.nombre} ({p.codigo_interno}) — Precio normal:{' '}
-                        {formatearMonedaARS(p.precio_venta)} — Existencia actual:{' '}
-                        {p.stock_actual} {p.unidad}
+                    {productosFiltradosCombo.length === 0 ? (
+                      <option value="">
+                        Sin coincidencias para &ldquo;{busquedaProdCombo}&rdquo;
                       </option>
-                    ))}
+                    ) : (
+                      productosFiltradosCombo.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.nombre} ({p.codigo_interno}) — Precio normal:{' '}
+                          {formatearMonedaARS(p.precio_venta)} — Existencia actual:{' '}
+                          {p.stock_actual} {p.unidad}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </label>
                 <label style={{ flex: 1 }}>
@@ -1354,7 +2299,7 @@ export function PanelProductosStock({
                       </tr>
                     </thead>
                     <tbody>
-                      {componentesBorradorDetallados.map((comp) => {
+                      {paginacionComponentesBorrador.itemsPagina.map((comp) => {
                         const esLimitante =
                           calculoBorradorCombo?.componenteLimitante.productoId ===
                           comp.productoId;
@@ -1412,6 +2357,16 @@ export function PanelProductosStock({
                       })}
                     </tbody>
                   </table>
+                  <PaginadorTabla
+                    paginaActual={paginacionComponentesBorrador.paginaActual}
+                    totalPaginas={paginacionComponentesBorrador.totalPaginas}
+                    totalItems={paginacionComponentesBorrador.totalItems}
+                    desdeRegistro={paginacionComponentesBorrador.desdeRegistro}
+                    hastaRegistro={paginacionComponentesBorrador.hastaRegistro}
+                    tamanioPagina={paginacionComponentesBorrador.tamanioPagina}
+                    onCambiarPagina={setPaginaComponentesBorrador}
+                    etiquetaItems="componentes del combo"
+                  />
 
                   {calculoBorradorCombo && (
                     <div
@@ -1505,7 +2460,7 @@ export function PanelProductosStock({
                 </td>
               </tr>
             ) : (
-              combosConStockEnVivo.map((combo) => (
+              paginacionCombos.itemsPagina.map((combo) => (
                 <tr key={combo.id}>
                   <td>
                     <strong>{combo.nombre}</strong>
@@ -1590,6 +2545,16 @@ export function PanelProductosStock({
             )}
           </tbody>
         </table>
+        <PaginadorTabla
+          paginaActual={paginacionCombos.paginaActual}
+          totalPaginas={paginacionCombos.totalPaginas}
+          totalItems={paginacionCombos.totalItems}
+          desdeRegistro={paginacionCombos.desdeRegistro}
+          hastaRegistro={paginacionCombos.hastaRegistro}
+          tamanioPagina={paginacionCombos.tamanioPagina}
+          onCambiarPagina={setPaginaCombos}
+          etiquetaItems="combos activos"
+        />
       </div>
 
       <div className="pos-card">
@@ -1799,6 +2764,21 @@ export function PanelProductosStock({
                       >
                         Bajo mínimo ({p.stock_minimo})
                       </span>
+                    )}
+                    {sucursales.length > 0 && (
+                      <div
+                        className="text-muted"
+                        style={{ fontSize: '0.75rem', marginTop: '0.2rem' }}
+                        title="Distribución de stock por sucursal"
+                      >
+                        📍{' '}
+                        {sucursales
+                          .map(
+                            (s) =>
+                              `${s.nombre}: ${obtenerStockProductoEnSucursalUI(p, s.id)}`
+                          )
+                          .join(' · ')}
+                      </div>
                     )}
                   </td>
                   {puedeEditarCatalogo && (

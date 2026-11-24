@@ -191,11 +191,16 @@ export function sha256Hex(mensaje: string): string {
 export function serializarContenidoAuditoria(
   datos: DatosContenidoAuditoria
 ): string {
+  const usuarioIdNormalizado =
+    datos.usuario_id && datos.usuario_id.trim().length > 0
+      ? datos.usuario_id.trim()
+      : null;
+
   return JSON.stringify({
     id: datos.id,
     comercio_id: datos.comercio_id,
     fecha_hora: datos.fecha_hora,
-    usuario_id: datos.usuario_id ?? null,
+    usuario_id: usuarioIdNormalizado,
     usuario_nombre: datos.usuario_nombre,
     rol: datos.rol,
     device_id: datos.device_id,

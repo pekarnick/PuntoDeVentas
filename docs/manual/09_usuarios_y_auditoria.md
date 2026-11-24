@@ -13,18 +13,24 @@ Este módulo está destinado exclusivamente a dueños y administradores del come
 > Formulario de alta de usuario con nombre, nombre de usuario, rol asignado, tilde "Puede vender desde celular" y lista de usuarios del comercio.
 
 ### Cómo crear un nuevo usuario:
-1. Dirigite a la pestaña **Usuarios** (requiere rol *Superadmin*).
+1. Dirigite a la pestaña **Usuarios y Roles** (requiere rol *Superadmin*).
 2. Ingresá el **Nombre Completo** del empleado y su **Nombre de Usuario** (en minúsculas, sin espacios).
 3. Asigná el **Rol**:
    - **Cajero:** Solo cobra y opera la caja de su turno. No ve costos ni informes.
    - **Encargado:** Gestiona catálogo, compras, clientes y ve informes.
    - **Superadmin:** Acceso total a usuarios, auditoría y configuración de sincronización.
-4. Si el empleado atenderá en el salón con su teléfono móvil, tildá la casilla **Puede vender desde celular**.
-5. Presioná **Crear Usuario**. El sistema generará una contraseña temporal de primer acceso.
+4. En **Contraseña inicial (opcional, mín. 8 caracteres)**:
+   - Si escribís una contraseña ahí mismo, el usuario queda creado con el estado **`"Al día"`** listo para entrar con esa clave.
+   - Si lo dejás vacío, el sistema genera automáticamente una contraseña temporal de primer acceso (`"Pendiente al ingresar"`).
+5. Si el empleado atenderá en el salón con su teléfono móvil, podés habilitarle la casilla **Venta Móvil (`/web-pos`)**.
+6. Presioná **Crear usuario**.
 
-### Desactivación y Reseteo de Clave:
-- **Los usuarios no se borran:** Para preservar el historial histórico de ventas y compras, un empleado que deja de trabajar se desactiva mediante el interruptor **Activo / Inactivo**. Un usuario inactivo no puede iniciar sesión.
-- **Reseteo de contraseña:** Si un cajero olvida su clave, el Superadmin puede presionar **Resetear Clave** para asignarle una nueva clave de acceso inmediato.
+### Cambiar Clave Directamente (`🔑 Cambiar clave`), Reseteo y Desactivación:
+- **Botón `🔑 Cambiar clave` (Recomendado para asignar una contraseña definitiva):** En cada fila del listado de usuarios (o haciendo clic directamente sobre el cartel `"Pendiente al ingresar"`), presioná **`🔑 Cambiar clave`**. Se desplegará ahí mismo un campo para escribir la **nueva contraseña (mín. 8 caracteres)** y el botón **`Guardar clave`**. Al guardarla, se actualiza el hash Argon2id en la base de datos y el estado de la clave pasa inmediatamente de `"Pendiente al ingresar"` a **`"Al día"`**.
+- **Botón `Generar temporal`:** Genera una clave aleatoria provisoria y marca al usuario como `"Pendiente al ingresar"` para que el sistema le pida elegir una clave nueva la próxima vez que inicie sesión.
+- **Revocación automática de sesiones móviles:** Cada vez que cambiás la clave, reseteás la clave, modificás el rol o desactivás a un empleado, el sistema **revoca automáticamente todas sus sesiones activas en `/web-pos`** para evitar accesos residuales.
+- **Los usuarios no se borran y el último Superadmin está protegido:** Para preservar el historial histórico de ventas y compras, un empleado que deja de trabajar se desactiva mediante el botón **Desactivar / Reactivar**. Un usuario inactivo no puede iniciar sesión, y el sistema impide desactivar o degradar al último `superadmin` activo del comercio.
+- **Bloqueo ante intentos fallidos:** Tras varios intentos erróneos de contraseña, la cuenta aplica un bloqueo temporal automático.
 
 > [!IMPORTANT]
 > **Seguridad de contraseñas:** El sistema procesa las contraseñas utilizando el algoritmo militar **Argon2id**. Las claves jamás se almacenan en texto plano en ninguna base de datos ni archivo del sistema.

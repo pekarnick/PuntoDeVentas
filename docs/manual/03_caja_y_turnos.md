@@ -4,21 +4,26 @@ El módulo de Caja permite controlar el flujo de dinero en efectivo de cada turn
 
 ---
 
-## 1. Apertura de Turno de Caja
+## 1. Ubicación en el Menú, Bloqueo de Seguridad y Apertura de Turno
 
-Al comenzar el turno o la jornada comercial, el cajero debe declarar el monto inicial disponible en el cajón para dar cambio.
+Para que la operación sea rápida e intuitiva, el botón **Caja y Arqueo** se encuentra ubicado en la **segunda posición de la barra superior** (inmediatamente al lado de **Venta (Mostrador)**) y muestra un indicador luminoso en tiempo real:
+- **`🟢 Caja y Arqueo`**: El turno está abierto y se pueden cobrar ventas y registrar movimientos.
+- **`🔴 Caja y Arqueo (Cerrada)`**: La caja se encuentra cerrada.
+
+> [!IMPORTANT]
+> **Protección de Caja Cerrada:** Mientras la caja esté cerrada, el sistema **bloquea automáticamente** el cobro de ventas, el registro de ingresos/egresos manuales y el arqueo de cierre. Si el operador entra a **Venta (Mostrador)** con la caja cerrada, verá en la parte superior un cuadro destacado que le permite ingresar el **Monto inicial en efectivo ($)** y hacer clic en **🟢 Abrir Caja Ahora y Habilitar Ventas** sin siquiera cambiar de pantalla.
 
 <div align="center">
   <img src="imagenes/03_apertura_caja.png" alt="Descripción" style="border: 3px solid #ccc; padding: 5px; background-color: white; max-width: 100%;">
 </div>
 
-> Pantalla de caja en estado "Cerrada", con el campo "Monto inicial en efectivo ($)" y el botón "Abrir Caja".
+> Pantalla de caja en estado "Cerrada", con el bloqueo de operaciones manuales y el formulario directo "Monto inicial en efectivo ($)" y botón "Abrir Caja".
 
 ### Pasos para abrir la caja:
-1. Ingresá a la pestaña **Caja**.
+1. Ingresá a la pestaña **Caja y Arqueo** (o hacelo directamente desde el cartel superior en **Venta (Mostrador)**).
 2. Indicá el valor en pesos del cambio inicial (ej. `$ 15.000,00`).
 3. Presioná el botón **Abrir Caja**.
-4. La sesión queda abierta y habilitada para operar en el Punto de Venta.
+4. La sesión queda abierta y habilitada para cobrar ventas y registrar movimientos.
 
 ---
 
@@ -79,3 +84,6 @@ Al terminar el turno o cerrar el negocio:
    - **Saldo negativo (rojo):** Faltante de dinero.
 4. Presioná el botón **Cerrar Caja y Guardar Arqueo**.
 5. La sesión se cierra de forma definitiva, quedando asentada en el historial y en la auditoría del sistema para supervisión del encargado.
+
+> [!NOTE]
+> **Titularidad de caja por seguridad:** Un **Cajero** únicamente puede registrar ingresos/egresos manuales y cerrar **su propia sesión de caja**. No puede modificar ni cerrar la caja abierta por otro compañero; esa acción solo la puede realizar el titular del turno, un **Encargado** o el **Superadmin**.

@@ -15,10 +15,18 @@ import {
 import type { RolUsuario } from '../../domain/permisos.ts';
 import type { MedioPago } from '../../domain/totales.ts';
 
+export interface SucursalFiltroInformeUI {
+  readonly id: string;
+  readonly codigo: string | null;
+  readonly nombre: string;
+  readonly es_principal?: boolean;
+}
+
 export interface PanelInformesProps {
   readonly rolActivo?: RolUsuario;
   readonly informeInicial?: InformeGestionFase1 | null;
   readonly libroIvaInicial?: LibroIvaPeriodoResult | null;
+  readonly sucursalesDisponibles?: readonly SucursalFiltroInformeUI[];
 }
 
 const ETIQUETAS_MEDIO_PAGO: Record<MedioPago, string> = {
@@ -53,14 +61,16 @@ function obtenerUltimoDiaMes(anio: number, mes1a12: number): string {
 }
 
 export function PanelInformes({
-  rolActivo = 'superadmin',
+  rolActivo = 'cajero',
   informeInicial = null,
   libroIvaInicial = null,
+  sucursalesDisponibles = [],
 }: PanelInformesProps): React.ReactElement {
   const [anioFiscal, setAnioFiscal] = useState('2026');
   const [mesFiscal, setMesFiscal] = useState('todos');
   const [fechaDesde, setFechaDesde] = useState('2026-01-01');
   const [fechaHasta, setFechaHasta] = useState('2026-12-31');
+  const [sucursalFiltro, setSucursalFiltro] = useState<string>('todas');
   const [informe, setInforme] = useState<InformeGestionFase1 | null>(
     informeInicial
   );
@@ -103,6 +113,7 @@ export function PanelInformes({
           rolActivo,
           fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
           fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
+          sucursalId: sucursalFiltro === 'todas' ? undefined : sucursalFiltro,
         }),
         invocarPosApi<LibroIvaPeriodoResult>('obtener_libro_iva', {
           rolActivo,
@@ -119,7 +130,7 @@ export function PanelInformes({
 
   useEffect(() => {
     void cargarInformes();
-  }, [rolActivo, fechaDesde, fechaHasta]);
+  }, [rolActivo, fechaDesde, fechaHasta, sucursalFiltro]);
 
   function descargarBlobXlsx(base64: string, nombreArchivo: string) {
     if (
@@ -153,6 +164,7 @@ export function PanelInformes({
         rolActivo,
         fechaDesdeIso: `${fechaDesde}T00:00:00.000Z`,
         fechaHastaIso: `${fechaHasta}T23:59:59.999Z`,
+        sucursalId: sucursalFiltro === 'todas' ? undefined : sucursalFiltro,
       });
 
       setInforme(res.informe);
@@ -342,6 +354,20 @@ export function PanelInformes({
     return Array.from(mapa.values());
   }, [ivaVentas.filas]);
 
+  const [paginaVentasPorUsuario, setPaginaVentasPorUsuario] = useState(1);
+  const [paginaIvaVentas, setPaginaIvaVentas] = useState(1);
+
+  const paginacionVentasPorUsuario = paginarListado(
+    informe?.ventasPorUsuario ?? [],
+    paginaVentasPorUsuario,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionIvaVentas = paginarListado(
+    ivaVentas.filas,
+    paginaIvaVentas,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+
   return (
     <section className="pos-venta-wrapper">
       {/* 1. Informes de Gestión en Tiempo Real — Tablero superior de métricas (manual §1) */}
@@ -358,6 +384,20 @@ export function PanelInformes({
             </p>
           </div>
           <div className="form-row">
+            <label>
+              🏢 Sucursal:
+              <select
+                value={sucursalFiltro}
+                onChange={(e) => setSucursalFiltro(e.target.value)}
+              >
+                <option value="todas">Todas las sucursales (Consolidado)</option>
+                {sucursalesDisponibles.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre} ({s.codigo})
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               Desde:
               <input
@@ -631,7 +671,7 @@ export function PanelInformes({
                   </tr>
                 </thead>
                 <tbody>
-                  {(informe?.ventasPorUsuario ?? []).map((u) => (
+                  {paginacionVentasPorUsuario.itemsPagina.map((u) => (
                     <tr key={u.usuario_id}>
                       <td>{u.usuario_nombre}</td>
                       <td className="num">{u.ventas_completadas}</td>
@@ -648,6 +688,16 @@ export function PanelInformes({
                   ))}
                 </tbody>
               </table>
+              <PaginadorTabla
+                paginaActual={paginacionVentasPorUsuario.paginaActual}
+                totalPaginas={paginacionVentasPorUsuario.totalPaginas}
+                totalItems={paginacionVentasPorUsuario.totalItems}
+                desdeRegistro={paginacionVentasPorUsuario.desdeRegistro}
+                hastaRegistro={paginacionVentasPorUsuario.hastaRegistro}
+                tamanioPagina={paginacionVentasPorUsuario.tamanioPagina}
+                onCambiarPagina={setPaginaVentasPorUsuario}
+                etiquetaItems="operadores"
+              />
             </div>
           )}
         </div>
@@ -943,7 +993,7 @@ export function PanelInformes({
                 </tr>
               </thead>
               <tbody>
-                {ivaVentas.filas.slice(0, 10).map((f) => (
+                {paginacionIvaVentas.itemsPagina.map((f) => (
                   <tr key={f.id}>
                     <td>{formatearFechaAR(f.fecha)}</td>
                     <td>{f.tipoComprobante}</td>
@@ -974,6 +1024,16 @@ export function PanelInformes({
                 ))}
               </tbody>
             </table>
+            <PaginadorTabla
+              paginaActual={paginacionIvaVentas.paginaActual}
+              totalPaginas={paginacionIvaVentas.totalPaginas}
+              totalItems={paginacionIvaVentas.totalItems}
+              desdeRegistro={paginacionIvaVentas.desdeRegistro}
+              hastaRegistro={paginacionIvaVentas.hastaRegistro}
+              tamanioPagina={paginacionIvaVentas.tamanioPagina}
+              onCambiarPagina={setPaginaIvaVentas}
+              etiquetaItems="comprobantes fiscales"
+            />
           </div>
         )}
       </div>

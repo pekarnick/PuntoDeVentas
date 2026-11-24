@@ -1,17 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  aCentavos,
   calcularVentaMovilDesdeCatalogo,
   evaluarPagosCombinados,
   formatearFechaHoraAR,
   formatearMonedaARS,
+  pesosACentavos,
   validarPagosVenta,
   type Centavos,
   type MedioPago,
   type PagoVentaInput,
   type ProductoCatalogoMovil,
 } from '@pos/domain';
-import { invocarPosApi } from '../../src/db/cliente_pos_api.ts';
+import {
+  guardarConfigNubeMovilCliente,
+  invocarPosApi,
+  obtenerConfigNubeMovilCliente,
+} from '../../src/db/cliente_pos_api.ts';
 import { generarUuidV7 } from '../../src/domain/uuid.ts';
 import type {
   EstadoCajaMovil,
@@ -20,6 +24,7 @@ import type {
 
 interface SesionMovilCliente {
   readonly sesion_id: string;
+  readonly access_token?: string;
   readonly expira_at: string;
   readonly comercio_id: string;
   readonly comercio_nombre: string;
@@ -39,6 +44,27 @@ interface ClienteMovilUI {
   readonly condicion_iva: string;
   readonly limite_credito: Centavos;
   readonly saldo_pendiente: Centavos;
+}
+
+interface ComboMovilItemUI {
+  readonly producto_id: string;
+  readonly producto_nombre: string;
+  readonly cantidad: number;
+  readonly precio_unitario_normal: Centavos;
+  readonly stock_actual: number;
+}
+
+interface ComboMovilUI {
+  readonly id: string;
+  readonly nombre: string;
+  readonly descripcion: string | null;
+  readonly codigo_barras: string | null;
+  readonly precio_venta: Centavos;
+  readonly precio_suma_normal: Centavos;
+  readonly ahorro_centavos: Centavos;
+  readonly porcentaje_descuento: number;
+  readonly stock_combos_disponibles: number;
+  readonly items: ReadonlyArray<ComboMovilItemUI>;
 }
 
 interface VentaPropiaDiaUI {
@@ -62,6 +88,7 @@ interface VentaPropiaDiaUI {
 
 const CLAVE_SESION_STORAGE = 'pos_web_movil_sesion_v1';
 const CLAVE_CATALOGO_CACHE = 'pos_web_movil_catalogo_cache_v1';
+const CLAVE_COMBOS_CACHE = 'pos_web_movil_combos_cache_v1';
 const CLAVE_DEVICE_ID = 'pos_web_movil_device_id_v1';
 
 function obtenerDispositivoIdMovil(): string {
@@ -71,6 +98,24 @@ function obtenerDispositivoIdMovil(): string {
   const nuevo = `celular-${generarUuidV7().slice(-8)}`;
   window.localStorage.setItem(CLAVE_DEVICE_ID, nuevo);
   return nuevo;
+}
+
+function parsearInputPesosACentavos(valor: string): Centavos {
+  const limpio = valor.trim();
+  if (!limpio) return 0;
+  try {
+    const c = pesosACentavos(limpio);
+    return c > 0 ? c : 0;
+  } catch {
+    const num = Number(limpio.replace(',', '.'));
+    return Number.isFinite(num) && num > 0 ? Math.round(num * 100) : 0;
+  }
+}
+
+function centavosAInputPesosMovil(centavos: Centavos): string {
+  const limpio = Math.max(0, Math.round(centavos));
+  if (limpio === 0) return '0';
+  return (limpio / 100).toFixed(2);
 }
 
 const ETIQUETAS_MEDIO_PAGO: Record<MedioPago, string> = {
@@ -89,7 +134,16 @@ export function WebPosApp(): React.ReactElement {
     if (typeof window === 'undefined') return null;
     try {
       const raw = window.sessionStorage.getItem(CLAVE_SESION_STORAGE);
-      return raw ? (JSON.parse(raw) as SesionMovilCliente) : null;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as SesionMovilCliente;
+      const expiraMs = parsed?.expira_at
+        ? new Date(parsed.expira_at).getTime()
+        : NaN;
+      if (!Number.isFinite(expiraMs) || expiraMs <= Date.now()) {
+        window.sessionStorage.removeItem(CLAVE_SESION_STORAGE);
+        return null;
+      }
+      return parsed;
     } catch {
       return null;
     }
@@ -98,18 +152,30 @@ export function WebPosApp(): React.ReactElement {
   const [pestania, setPestania] = useState<'vender' | 'caja' | 'ventas'>('vender');
 
   // Login form
-  const [loginUsuario, setLoginUsuario] = useState('maria');
-  const [loginClave, setLoginClave] = useState('Admin1234');
+  const [loginUsuario, setLoginUsuario] = useState('');
+  const [loginClave, setLoginClave] = useState('');
   const [loginDispositivoNombre, setLoginDispositivoNombre] = useState(
     'Celular Mostrador 1'
   );
+  const [configNubeMovil, setConfigNubeMovil] = useState(() =>
+    obtenerConfigNubeMovilCliente()
+  );
 
-  // Catálogo y clientes (Regla 20: nunca incluye costo_compra)
+  // Catálogo, combos y clientes (Regla 20: nunca incluye costo_compra)
   const [catalogo, setCatalogo] = useState<ProductoCatalogoMovil[]>(() => {
     if (typeof window === 'undefined') return [];
     try {
       const raw = window.localStorage.getItem(CLAVE_CATALOGO_CACHE);
       return raw ? (JSON.parse(raw) as ProductoCatalogoMovil[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [combos, setCombos] = useState<ComboMovilUI[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(CLAVE_COMBOS_CACHE);
+      return raw ? (JSON.parse(raw) as ComboMovilUI[]) : [];
     } catch {
       return [];
     }
@@ -128,6 +194,9 @@ export function WebPosApp(): React.ReactElement {
   const [carrito, setCarrito] = useState<
     Array<{ producto_id: string; cantidad: number }>
   >([]);
+  const [combosEnCarritoMovil, setCombosEnCarritoMovil] = useState<
+    Array<{ combo: ComboMovilUI; cantidad: number }>
+  >([]);
   const [descuentoPesosInput, setDescuentoPesosInput] = useState('0');
   const [clienteIdSeleccionado, setClienteIdSeleccionado] = useState('');
   const [medioPrincipal, setMedioPrincipal] = useState<MedioPago>('efectivo');
@@ -145,6 +214,8 @@ export function WebPosApp(): React.ReactElement {
   // Comprobante emitido
   const [ultimoComprobante, setUltimoComprobante] =
     useState<ResultadoCrearVentaMovil | null>(null);
+  const comprobanteRef = useRef<HTMLElement | null>(null);
+  const carritoRef = useRef<HTMLElement | null>(null);
 
   // Caja móvil y mis ventas
   const [estadoCaja, setEstadoCaja] = useState<EstadoCajaMovil | null>(null);
@@ -161,9 +232,18 @@ export function WebPosApp(): React.ReactElement {
   const cerrarSesionLocal = useCallback((motivo?: string) => {
     if (typeof window !== 'undefined') {
       window.sessionStorage.removeItem(CLAVE_SESION_STORAGE);
+      window.localStorage.removeItem(CLAVE_CATALOGO_CACHE);
+      window.localStorage.removeItem(CLAVE_COMBOS_CACHE);
     }
     setSesion(null);
+    setCatalogo([]);
+    setCombos([]);
+    setClientes([]);
+    setEstadoCaja(null);
+    setVentasDia([]);
+    setUltimoComprobante(null);
     setCarrito([]);
+    setCombosEnCarritoMovil([]);
     if (motivo) {
       setMensajeError(motivo);
     }
@@ -197,6 +277,7 @@ export function WebPosApp(): React.ReactElement {
           invocarPosApi<{
             comercioId: string;
             productos: ProductoCatalogoMovil[];
+            combos?: ComboMovilUI[];
             clientes: ClienteMovilUI[];
           }>('obtener_catalogo_movil', {
             comercioId: sesionActiva.comercio_id,
@@ -218,6 +299,10 @@ export function WebPosApp(): React.ReactElement {
         ]);
 
         setCatalogo(catRes.productos);
+        const combosRecibidos = Array.isArray(catRes.combos)
+          ? catRes.combos
+          : [];
+        setCombos(combosRecibidos);
         setClientes(catRes.clientes);
         setEstadoCaja(cajaRes);
         setVentasDia(ventasRes.ventas);
@@ -225,6 +310,10 @@ export function WebPosApp(): React.ReactElement {
           window.localStorage.setItem(
             CLAVE_CATALOGO_CACHE,
             JSON.stringify(catRes.productos)
+          );
+          window.localStorage.setItem(
+            CLAVE_COMBOS_CACHE,
+            JSON.stringify(combosRecibidos)
           );
         }
       } catch (err) {
@@ -281,10 +370,149 @@ export function WebPosApp(): React.ReactElement {
     []
   );
 
+  const calcularAhorroEfectivoComboMovil = useCallback(
+    (combo: ComboMovilUI): Centavos => {
+      const sumaEnCatalogo = combo.items.reduce((acc, comp) => {
+        const prod = catalogoPorId.get(comp.producto_id);
+        const precioUnit = prod
+          ? prod.precio_venta
+          : comp.precio_unitario_normal;
+        return acc + Math.round(precioUnit * comp.cantidad);
+      }, 0);
+      return Math.max(0, sumaEnCatalogo - combo.precio_venta);
+    },
+    [catalogoPorId]
+  );
+
+  const agregarComboAlCarritoMovil = useCallback(
+    (combo: ComboMovilUI) => {
+      setMensajeError(null);
+      if (combo.items.length === 0) {
+        setMensajeError(`El combo "${combo.nombre}" no tiene componentes.`);
+        return;
+      }
+      const faltantes = combo.items.filter(
+        (it) => !catalogoPorId.has(it.producto_id)
+      );
+      if (faltantes.length > 0) {
+        setMensajeError(
+          `No se encontraron en el catálogo móvil todos los productos del combo "${combo.nombre}".`
+        );
+        return;
+      }
+
+      const ahorroEfectivo = calcularAhorroEfectivoComboMovil(combo);
+
+      setCarrito((prev) => {
+        let proximo = [...prev];
+        for (const comp of combo.items) {
+          const idx = proximo.findIndex(
+            (i) => i.producto_id === comp.producto_id
+          );
+          if (idx >= 0) {
+            const actual = proximo[idx]!;
+            proximo[idx] = {
+              ...actual,
+              cantidad: Number((actual.cantidad + comp.cantidad).toFixed(3)),
+            };
+          } else {
+            proximo.push({
+              producto_id: comp.producto_id,
+              cantidad: comp.cantidad,
+            });
+          }
+        }
+        return proximo;
+      });
+
+      if (ahorroEfectivo > 0) {
+        setDescuentoPesosInput((prev) => {
+          const centavosActuales = parsearInputPesosACentavos(prev);
+          const nuevoDescuento = centavosActuales + ahorroEfectivo;
+          return centavosAInputPesosMovil(nuevoDescuento);
+        });
+      }
+
+      setCombosEnCarritoMovil((prev) => {
+        const existe = prev.find((c) => c.combo.id === combo.id);
+        if (existe) {
+          return prev.map((c) =>
+            c.combo.id === combo.id ? { ...c, cantidad: c.cantidad + 1 } : c
+          );
+        }
+        return [...prev, { combo, cantidad: 1 }];
+      });
+
+      setMensajeOk(
+        `🎁 Combo "${combo.nombre}" agregado por ${formatearMonedaARS(combo.precio_venta)} (Bonificación aplicada: ${formatearMonedaARS(ahorroEfectivo)}).`
+      );
+    },
+    [catalogoPorId, calcularAhorroEfectivoComboMovil]
+  );
+
+  const quitarComboDelCarritoMovil = useCallback(
+    (comboId: string) => {
+      const entrada = combosEnCarritoMovil.find((c) => c.combo.id === comboId);
+      if (!entrada) return;
+      const { combo } = entrada;
+      const ahorroEfectivo = calcularAhorroEfectivoComboMovil(combo);
+
+      setCarrito((prev) => {
+        let proximo = [...prev];
+        for (const comp of combo.items) {
+          const idx = proximo.findIndex(
+            (i) => i.producto_id === comp.producto_id
+          );
+          if (idx >= 0) {
+            const actual = proximo[idx]!;
+            const nuevaCant = Number(
+              (actual.cantidad - comp.cantidad).toFixed(3)
+            );
+            if (nuevaCant <= 0) {
+              proximo.splice(idx, 1);
+            } else {
+              proximo[idx] = { ...actual, cantidad: nuevaCant };
+            }
+          }
+        }
+        return proximo;
+      });
+
+      if (ahorroEfectivo > 0) {
+        setDescuentoPesosInput((prev) => {
+          const centavosActuales = parsearInputPesosACentavos(prev);
+          const nuevoDescuento = Math.max(0, centavosActuales - ahorroEfectivo);
+          return centavosAInputPesosMovil(nuevoDescuento);
+        });
+      }
+
+      setCombosEnCarritoMovil((prev) =>
+        prev
+          .map((c) =>
+            c.combo.id === comboId ? { ...c, cantidad: c.cantidad - 1 } : c
+          )
+          .filter((c) => c.cantidad > 0)
+      );
+
+      setMensajeOk(`Combo "${combo.nombre}" quitado del carrito.`);
+    },
+    [combosEnCarritoMovil, calcularAhorroEfectivoComboMovil]
+  );
+
   const buscarYAgregarPorCodigo = useCallback(
     (codigo: string) => {
       const limpio = codigo.trim();
       if (!limpio) return;
+      const comboEncontrado = combos.find(
+        (c) =>
+          c.codigo_barras &&
+          c.codigo_barras.toLowerCase() === limpio.toLowerCase()
+      );
+      if (comboEncontrado) {
+        agregarComboAlCarritoMovil(comboEncontrado);
+        setCodigoManual('');
+        return;
+      }
       const encontrado = catalogo.find(
         (p) =>
           p.codigos_barras.includes(limpio) ||
@@ -292,14 +520,14 @@ export function WebPosApp(): React.ReactElement {
             p.codigo_interno.toLowerCase() === limpio.toLowerCase())
       );
       if (!encontrado) {
-        setMensajeError(`No se encontró ningún producto con el código "${limpio}".`);
+        setMensajeError(`No se encontró ningún producto ni combo con el código "${limpio}".`);
         return;
       }
       agregarAlCarrito(encontrado);
       setMensajeOk(`Agregado: ${encontrado.nombre}`);
       setCodigoManual('');
     },
-    [catalogo, agregarAlCarrito]
+    [combos, catalogo, agregarComboAlCarritoMovil, agregarAlCarrito]
   );
 
   async function alternarCamaraEscaner() {
@@ -384,10 +612,10 @@ export function WebPosApp(): React.ReactElement {
     }
   }
 
-  const descuentoCentavos = useMemo(() => {
-    const num = Number(descuentoPesosInput.replace(',', '.'));
-    return Number.isFinite(num) && num > 0 ? aCentavos(num) : 0;
-  }, [descuentoPesosInput]);
+  const descuentoCentavos = useMemo(
+    () => parsearInputPesosACentavos(descuentoPesosInput),
+    [descuentoPesosInput]
+  );
 
   const resumenCarrito = useMemo(() => {
     if (carrito.length === 0) return null;
@@ -417,6 +645,20 @@ export function WebPosApp(): React.ReactElement {
       .slice(0, 30);
   }, [catalogo, busqueda]);
 
+  const combosFiltrados = useMemo(() => {
+    const q = busqueda.trim().toLowerCase();
+    if (!q) {
+      return combos;
+    }
+    return combos.filter(
+      (c) =>
+        c.nombre.toLowerCase().includes(q) ||
+        (c.descripcion && c.descripcion.toLowerCase().includes(q)) ||
+        (c.codigo_barras && c.codigo_barras.toLowerCase().includes(q)) ||
+        c.items.some((it) => it.producto_nombre.toLowerCase().includes(q))
+    );
+  }, [combos, busqueda]);
+
   async function manejarLoginMovil(e: React.FormEvent) {
     e.preventDefault();
     setMensajeError(null);
@@ -426,6 +668,7 @@ export function WebPosApp(): React.ReactElement {
       const dispositivoId = obtenerDispositivoIdMovil();
       const res = await invocarPosApi<{
         sesion_id: string;
+        access_token?: string;
         expira_at: string;
         comercio_id: string;
         comercio_nombre: string;
@@ -448,6 +691,7 @@ export function WebPosApp(): React.ReactElement {
         ...res,
         dispositivo_id: dispositivoId,
       };
+      setLoginClave('');
       if (typeof window !== 'undefined') {
         window.sessionStorage.setItem(
           CLAVE_SESION_STORAGE,
@@ -466,8 +710,7 @@ export function WebPosApp(): React.ReactElement {
   const pagosCombinadosMovilCalculados = useMemo(
     () =>
       pagosCombinadosMovil.map((f) => {
-        const num = Number(f.montoPesosInput.replace(',', '.'));
-        const monto = Number.isFinite(num) && num > 0 ? aCentavos(num) : 0;
+        const monto = parsearInputPesosACentavos(f.montoPesosInput);
         return {
           ...f,
           monto,
@@ -531,15 +774,71 @@ export function WebPosApp(): React.ReactElement {
   }
 
   function cambiarCantidadItem(productoId: string, delta: number) {
-    setCarrito((prev) =>
-      prev
-        .map((it) =>
-          it.producto_id === productoId
-            ? { ...it, cantidad: Math.max(0, Number((it.cantidad + delta).toFixed(3))) }
-            : it
-        )
-        .filter((it) => it.cantidad > 0)
-    );
+    const siguiente = carrito
+      .map((it) =>
+        it.producto_id === productoId
+          ? { ...it, cantidad: Math.max(0, Number((it.cantidad + delta).toFixed(3))) }
+          : it
+      )
+      .filter((it) => it.cantidad > 0);
+
+    setCarrito(siguiente);
+
+    if (siguiente.length === 0) {
+      setCombosEnCarritoMovil([]);
+      setDescuentoPesosInput('0');
+      return;
+    }
+
+    if (delta < 0 && combosEnCarritoMovil.length > 0) {
+      const disponiblePorProd = new Map<string, number>();
+      for (const it of siguiente) {
+        disponiblePorProd.set(
+          it.producto_id,
+          (disponiblePorProd.get(it.producto_id) ?? 0) + it.cantidad
+        );
+      }
+
+      const combosVigentes: Array<{ combo: ComboMovilUI; cantidad: number }> = [];
+      let ahorroQuitadoCentavos = 0;
+
+      for (const entrada of combosEnCarritoMovil) {
+        let cantVigente = 0;
+        for (let k = 0; k < entrada.cantidad; k++) {
+          const alcanza = entrada.combo.items.every(
+            (comp) =>
+              (disponiblePorProd.get(comp.producto_id) ?? 0) + 1e-6 >=
+              comp.cantidad
+          );
+          if (alcanza) {
+            for (const comp of entrada.combo.items) {
+              disponiblePorProd.set(
+                comp.producto_id,
+                (disponiblePorProd.get(comp.producto_id) ?? 0) - comp.cantidad
+              );
+            }
+            cantVigente++;
+          } else {
+            ahorroQuitadoCentavos += calcularAhorroEfectivoComboMovil(
+              entrada.combo
+            );
+          }
+        }
+        if (cantVigente > 0) {
+          combosVigentes.push({ combo: entrada.combo, cantidad: cantVigente });
+        }
+      }
+
+      setCombosEnCarritoMovil(combosVigentes);
+      if (ahorroQuitadoCentavos > 0) {
+        setDescuentoPesosInput((prev) => {
+          const actual = parsearInputPesosACentavos(prev);
+          return centavosAInputPesosMovil(
+            Math.max(0, actual - ahorroQuitadoCentavos)
+          );
+        });
+      }
+    }
   }
 
   async function manejarConfirmarVentaMovil() {
@@ -585,7 +884,7 @@ export function WebPosApp(): React.ReactElement {
           sesionMovilId: sesion.sesion_id,
           items: carrito,
           pagos,
-          descuentoGlobal: descuentoCentavos,
+          descuentoGlobal: resumenCarrito.descuento_global,
           clienteId: clienteIdSeleccionado || null,
           cajaSesionId: estadoCaja?.sesion?.id ?? null,
         }
@@ -593,11 +892,30 @@ export function WebPosApp(): React.ReactElement {
 
       setUltimoComprobante(resultado);
       setCarrito([]);
+      setCombosEnCarritoMovil([]);
       setDescuentoPesosInput('0');
       setClienteIdSeleccionado('');
       setUsarPagoMixto(false);
       // Generar un nuevo UUID para la próxima venta
       setVentaUuidPendiente(generarUuidV7());
+      if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+        try {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch {
+          window.scrollTo(0, 0);
+        }
+      }
+      setTimeout(() => {
+        if (
+          comprobanteRef.current &&
+          typeof comprobanteRef.current.scrollIntoView === 'function'
+        ) {
+          comprobanteRef.current.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start',
+          });
+        }
+      }, 40);
       await cargarDatosMovil(sesion);
     } catch (err) {
       // Si hubo fallo de red, conservamos el mismo ventaUuidPendiente para garantizar idempotencia al reintentar
@@ -613,9 +931,7 @@ export function WebPosApp(): React.ReactElement {
     setMensajeError(null);
     setCargando(true);
     try {
-      const montoCentavos = aCentavos(
-        Number(montoAperturaPesos.replace(',', '.')) || 0
-      );
+      const montoCentavos = parsearInputPesosACentavos(montoAperturaPesos);
       const nuevoEstado = await invocarPosApi<EstadoCajaMovil>(
         'abrir_caja_movil',
         {
@@ -642,8 +958,8 @@ export function WebPosApp(): React.ReactElement {
     setMensajeError(null);
     setCargando(true);
     try {
-      const contadoCentavos = aCentavos(
-        Number(efectivoContadoCierrePesos.replace(',', '.')) || 0
+      const contadoCentavos = parsearInputPesosACentavos(
+        efectivoContadoCierrePesos
       );
       const res = await invocarPosApi<{
         diferencia: Centavos;
@@ -759,6 +1075,80 @@ export function WebPosApp(): React.ReactElement {
                 {cargando ? 'Ingresando...' : 'Ingresar a Venta Móvil'}
               </button>
             </form>
+
+            {typeof window !== 'undefined' && window.__POS_CONFIG__?.supabaseUrl ? (
+              <p className="movil-help" style={{ marginTop: '1rem' }}>
+                Conectado al comercio oficial: <strong>{configNubeMovil.comercioNombre}</strong>
+              </p>
+            ) : (
+            <details style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#475569' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                ⚙️ Conexión en la Nube (Supabase)
+              </summary>
+              <div style={{ marginTop: '0.6rem', display: 'grid', gap: '0.5rem' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.2rem' }}>
+                    Supabase URL
+                  </label>
+                  <input
+                    className="movil-input"
+                    type="url"
+                    value={configNubeMovil.supabaseUrl}
+                    onChange={(e) =>
+                      setConfigNubeMovil((prev) => ({
+                        ...prev,
+                        supabaseUrl: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.2rem' }}>
+                    Anon / Publishable Key (RLS)
+                  </label>
+                  <input
+                    className="movil-input"
+                    type="text"
+                    value={configNubeMovil.supabaseAnonKey}
+                    onChange={(e) =>
+                      setConfigNubeMovil((prev) => ({
+                        ...prev,
+                        supabaseAnonKey: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.2rem' }}>
+                    UUID del Comercio
+                  </label>
+                  <input
+                    className="movil-input"
+                    type="text"
+                    value={configNubeMovil.comercioId}
+                    onChange={(e) =>
+                      setConfigNubeMovil((prev) => ({
+                        ...prev,
+                        comercioId: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="movil-btn movil-btn-secondary"
+                  onClick={() => {
+                    const guardada = guardarConfigNubeMovilCliente(configNubeMovil);
+                    setConfigNubeMovil(guardada);
+                    setMensajeError(null);
+                    setMensajeOk('Parámetros de conexión con Supabase guardados en este celular.');
+                  }}
+                >
+                  Guardar Parámetros de Nube
+                </button>
+              </div>
+            </details>
+            )}
           </section>
         </main>
       </div>
@@ -797,54 +1187,149 @@ export function WebPosApp(): React.ReactElement {
         ) : null}
 
         {ultimoComprobante ? (
-          <section className="movil-card" aria-label="Comprobante de venta móvil">
-            <h2>
-              ✓ Venta registrada ({formatearMonedaARS(ultimoComprobante.total)})
-            </h2>
-            <pre
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Ticket de venta confirmada"
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 1000,
+              background: 'rgba(15, 23, 42, 0.75)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '1rem',
+              overflowY: 'auto',
+            }}
+          >
+            <section
+              ref={comprobanteRef}
+              className="movil-card"
+              aria-label="Comprobante de venta móvil"
               style={{
-                background: '#f8fafc',
-                padding: '0.75rem',
-                borderRadius: '0.5rem',
-                border: '1px solid #cbd5e1',
-                fontSize: '0.82rem',
-                whiteSpace: 'pre-wrap',
-                margin: '0.5rem 0 0.85rem',
+                width: '100%',
+                maxWidth: '460px',
+                maxHeight: '90vh',
+                overflowY: 'auto',
+                margin: 0,
+                boxShadow: '0 20px 35px rgba(0, 0, 0, 0.35)',
+                border: '2px solid #16a34a',
               }}
             >
-              {ultimoComprobante.comprobante_texto}
-            </pre>
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-              <a
-                href={ultimoComprobante.whatsapp_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="movil-btn movil-btn-success"
-                style={{ flex: 1, textDecoration: 'none' }}
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                }}
               >
-                Compartir por WhatsApp
-              </a>
-              <button
-                type="button"
-                className="movil-btn movil-btn-secondary"
-                onClick={() => window.print()}
+                <h2 style={{ color: '#15803d', margin: 0 }}>
+                  ✓ Venta registrada ({formatearMonedaARS(ultimoComprobante.total)})
+                </h2>
+              </div>
+              <pre
+                style={{
+                  background: '#f8fafc',
+                  padding: '0.75rem',
+                  borderRadius: '0.5rem',
+                  border: '1px solid #cbd5e1',
+                  fontSize: '0.82rem',
+                  whiteSpace: 'pre-wrap',
+                  margin: '0.65rem 0 0.85rem',
+                }}
               >
-                Imprimir
-              </button>
-              <button
-                type="button"
-                className="movil-btn movil-btn-primary"
-                style={{ width: '100%' }}
-                onClick={() => setUltimoComprobante(null)}
-              >
-                Nueva venta
-              </button>
-            </div>
-          </section>
+                {ultimoComprobante.comprobante_texto}
+              </pre>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <a
+                  href={ultimoComprobante.whatsapp_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="movil-btn movil-btn-success"
+                  style={{ flex: 1, textDecoration: 'none', textAlign: 'center' }}
+                >
+                  Compartir por WhatsApp
+                </a>
+                <button
+                  type="button"
+                  className="movil-btn movil-btn-secondary"
+                  onClick={() => window.print()}
+                >
+                  Imprimir
+                </button>
+                <button
+                  type="button"
+                  className="movil-btn movil-btn-primary"
+                  style={{ width: '100%' }}
+                  onClick={() => {
+                    setUltimoComprobante(null);
+                    if (
+                      typeof window !== 'undefined' &&
+                      typeof window.scrollTo === 'function'
+                    ) {
+                      try {
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      } catch {
+                        window.scrollTo(0, 0);
+                      }
+                    }
+                  }}
+                >
+                  Nueva venta
+                </button>
+              </div>
+            </section>
+          </div>
         ) : null}
 
         {pestania === 'vender' && (
           <>
+            {carrito.length > 0 && resumenCarrito && (
+              <div
+                style={{
+                  position: 'sticky',
+                  top: '0.35rem',
+                  zIndex: 50,
+                  background: '#1e40af',
+                  color: '#ffffff',
+                  padding: '0.6rem 0.85rem',
+                  borderRadius: '0.65rem',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '0.75rem',
+                  boxShadow: '0 6px 16px rgba(30, 64, 175, 0.28)',
+                }}
+              >
+                <div>
+                  <strong style={{ fontSize: '0.92rem' }}>
+                    🛒 {carrito.length} {carrito.length === 1 ? 'ítem' : 'ítems'} ·{' '}
+                    {formatearMonedaARS(resumenCarrito.total)}
+                  </strong>
+                </div>
+                <button
+                  type="button"
+                  className="movil-btn movil-btn-success"
+                  style={{ minHeight: '34px', padding: '0.3rem 0.75rem', fontSize: '0.82rem' }}
+                  onClick={() => {
+                    if (
+                      carritoRef.current &&
+                      typeof carritoRef.current.scrollIntoView === 'function'
+                    ) {
+                      carritoRef.current.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start',
+                      });
+                    }
+                  }}
+                >
+                  Ir a Cobrar ↓
+                </button>
+              </div>
+            )}
+
             <section className="movil-card">
               <div
                 style={{
@@ -917,13 +1402,73 @@ export function WebPosApp(): React.ReactElement {
 
             <section className="movil-card">
               <h2>
-                Catálogo de Venta ({productosFiltrados.length} productos — sin costos)
+                Catálogo de Venta ({productosFiltrados.length} productos
+                {combosFiltrados.length > 0
+                  ? ` + ${combosFiltrados.length} ${combosFiltrados.length === 1 ? 'combo' : 'combos'}`
+                  : ''}{' '}
+                — sin costos)
               </h2>
-              {productosFiltrados.length === 0 ? (
+              {combosFiltrados.length > 0 && (
+                <div style={{ marginBottom: '0.85rem' }}>
+                  <div
+                    style={{
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      color: '#6b21a8',
+                      marginBottom: '0.45rem',
+                    }}
+                  >
+                    🎁 Combos y Promociones
+                  </div>
+                  <div className="movil-grid-productos">
+                    {combosFiltrados.map((c) => (
+                      <button
+                        key={`combo-${c.id}`}
+                        type="button"
+                        className="movil-prod-item"
+                        style={{
+                          background: '#faf5ff',
+                          borderColor: '#c084fc',
+                        }}
+                        onClick={() => agregarComboAlCarritoMovil(c)}
+                      >
+                        <span
+                          className="movil-prod-nombre"
+                          style={{ color: '#581c87' }}
+                        >
+                          🎁 [Combo] {c.nombre}
+                        </span>
+                        <span
+                          className="movil-prod-precio"
+                          style={{ color: '#7e22ce' }}
+                        >
+                          {formatearMonedaARS(c.precio_venta)}
+                        </span>
+                        <span
+                          className="movil-prod-meta"
+                          style={{ color: '#6b21a8' }}
+                        >
+                          {c.items
+                            .map((it) => `${it.cantidad}x ${it.producto_nombre}`)
+                            .join(' + ')}
+                        </span>
+                        <span className="movil-prod-meta">
+                          Disp: {c.stock_combos_disponibles} combos
+                          {c.ahorro_centavos > 0
+                            ? ` · Ahorra ${formatearMonedaARS(c.ahorro_centavos)}`
+                            : ''}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {productosFiltrados.length === 0 && combosFiltrados.length === 0 ? (
                 <p style={{ color: '#64748b', fontSize: '0.88rem' }}>
-                  No hay productos que coincidan con la búsqueda.
+                  No hay productos ni combos que coincidan con la búsqueda.
                 </p>
-              ) : (
+              ) : productosFiltrados.length > 0 ? (
                 <div className="movil-grid-productos">
                   {productosFiltrados.map((p) => (
                     <button
@@ -942,20 +1487,98 @@ export function WebPosApp(): React.ReactElement {
                     </button>
                   ))}
                 </div>
-              )}
+              ) : null}
             </section>
 
-            <section className="movil-card" aria-label="Carrito móvil">
+            <section
+              ref={carritoRef}
+              className="movil-card"
+              aria-label="Carrito móvil"
+            >
               <h2>
                 Carrito Actual ({carrito.length}{' '}
                 {carrito.length === 1 ? 'ítem' : 'ítems'})
               </h2>
               {carrito.length === 0 || !resumenCarrito ? (
                 <p style={{ color: '#64748b', fontSize: '0.88rem', margin: 0 }}>
-                  Tocá un producto o escaneá un código de barras para empezar.
+                  Tocá un producto o combo, o escaneá un código de barras para empezar.
                 </p>
               ) : (
                 <>
+                  {combosEnCarritoMovil.length > 0 && (
+                    <div
+                      style={{
+                        background: '#faf5ff',
+                        border: '1px solid #d8b4fe',
+                        borderRadius: '0.5rem',
+                        padding: '0.5rem 0.65rem',
+                        marginBottom: '0.55rem',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: '0.78rem',
+                          fontWeight: 700,
+                          color: '#6b21a8',
+                          marginBottom: '0.35rem',
+                        }}
+                      >
+                        🎁 Combos aplicados en esta venta:
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+                        {combosEnCarritoMovil.map((entry) => {
+                          const ahorroUnitario = calcularAhorroEfectivoComboMovil(
+                            entry.combo
+                          );
+                          return (
+                            <div
+                              key={entry.combo.id}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.4rem',
+                                background: '#ffffff',
+                                border: '1px solid #c084fc',
+                                borderRadius: '0.4rem',
+                                padding: '0.25rem 0.5rem',
+                                fontSize: '0.78rem',
+                              }}
+                            >
+                              <span>
+                                <strong>
+                                  {entry.cantidad}x {entry.combo.nombre}
+                                </strong>{' '}
+                                — Precio Combo:{' '}
+                                <strong style={{ color: '#6b21a8' }}>
+                                  {formatearMonedaARS(
+                                    entry.combo.precio_venta * entry.cantidad
+                                  )}
+                                </strong>
+                                {ahorroUnitario > 0
+                                  ? ` (Bonif.: -${formatearMonedaARS(ahorroUnitario * entry.cantidad)})`
+                                  : ''}
+                              </span>
+                              <button
+                                type="button"
+                                className="movil-btn movil-btn-secondary"
+                                style={{
+                                  minHeight: '26px',
+                                  padding: '0.1rem 0.4rem',
+                                  fontSize: '0.72rem',
+                                }}
+                                onClick={() =>
+                                  quitarComboDelCarritoMovil(entry.combo.id)
+                                }
+                              >
+                                ✕ Quitar combo
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {resumenCarrito.items.map((it) => (
                     <div
                       key={it.producto_id}
@@ -1228,21 +1851,59 @@ export function WebPosApp(): React.ReactElement {
                       padding: '0.75rem',
                       background: '#eff6ff',
                       borderRadius: '0.6rem',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
                     }}
                   >
-                    <span style={{ fontWeight: 700 }}>TOTAL A COBRAR</span>
-                    <span
+                    {resumenCarrito.descuento_global > 0 && (
+                      <>
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            fontSize: '0.84rem',
+                            color: '#475569',
+                            marginBottom: '0.25rem',
+                          }}
+                        >
+                          <span>Subtotal artículos (precio individual):</span>
+                          <span>{formatearMonedaARS(resumenCarrito.subtotal)}</span>
+                        </div>
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            fontSize: '0.84rem',
+                            color: '#15803d',
+                            fontWeight: 600,
+                            marginBottom: '0.45rem',
+                            paddingBottom: '0.45rem',
+                            borderBottom: '1px solid #bfdbfe',
+                          }}
+                        >
+                          <span>Bonificación combo / descuento:</span>
+                          <span>
+                            -{formatearMonedaARS(resumenCarrito.descuento_global)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                    <div
                       style={{
-                        fontSize: '1.35rem',
-                        fontWeight: 800,
-                        color: '#1e40af',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
                       }}
                     >
-                      {formatearMonedaARS(resumenCarrito.total)}
-                    </span>
+                      <span style={{ fontWeight: 700 }}>TOTAL A COBRAR</span>
+                      <span
+                        style={{
+                          fontSize: '1.35rem',
+                          fontWeight: 800,
+                          color: '#1e40af',
+                        }}
+                      >
+                        {formatearMonedaARS(resumenCarrito.total)}
+                      </span>
+                    </div>
                   </div>
 
                   <button

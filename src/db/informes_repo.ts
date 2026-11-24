@@ -23,6 +23,7 @@ import {
 import {
   agruparPedidoReposicionStockBajo,
   generarPdfPedidoReposicion,
+  generarXlsxPedidoReposicion,
   type CriterioAgrupacionPedido,
   type ProductoParaPedidoInput,
   type ResumenPedidosReposicion,
@@ -35,11 +36,13 @@ import {
   consultarRegistrosAuditoria,
   type FiltrosAuditoria,
 } from './usuarios_auth_repo.ts';
+import { obtenerMapaStockPorSucursalDb } from './sucursales_repo.ts';
 import type { ActorContexto } from './repositorios.ts';
 
 export interface FiltrosPeriodoInforme {
   readonly fechaDesdeIso?: string;
   readonly fechaHastaIso?: string;
+  readonly sucursalId?: string | null;
 }
 
 export interface ResumenVentasPorUsuario {
@@ -82,6 +85,30 @@ export function obtenerInformeGestionFase1(
   const condFechaVenta: string[] = ['v.comercio_id = ?', 'v.deleted_at IS NULL'];
   const paramsFechaVenta: Array<string> = [actor.comercio_id];
 
+  const sucursalFiltroId =
+    filtros.sucursalId && filtros.sucursalId !== 'todas'
+      ? filtros.sucursalId
+      : null;
+
+  let esSucursalPrincipalFiltro = false;
+  if (sucursalFiltroId) {
+    const sucRow = db
+      .prepare(
+        `SELECT es_principal FROM sucursales WHERE id = ? AND comercio_id = ? LIMIT 1`
+      )
+      .get(sucursalFiltroId, actor.comercio_id) as
+      | { es_principal: number }
+      | undefined;
+    esSucursalPrincipalFiltro = (sucRow?.es_principal ?? 0) === 1;
+
+    if (esSucursalPrincipalFiltro) {
+      condFechaVenta.push('(v.sucursal_id = ? OR v.sucursal_id IS NULL)');
+    } else {
+      condFechaVenta.push('v.sucursal_id = ?');
+    }
+    paramsFechaVenta.push(sucursalFiltroId);
+  }
+
   if (filtros.fechaDesdeIso) {
     condFechaVenta.push('v.fecha >= ?');
     paramsFechaVenta.push(filtros.fechaDesdeIso);
@@ -112,22 +139,23 @@ export function obtenerInformeGestionFase1(
   }>;
 
   // 2. Ventas, anulaciones y descuentos por usuario (PLAN.md §7)
+  // Incluye todos los usuarios/vendedores del comercio (con LEFT JOIN) ordenados por monto vendido.
   const ventasPorUsuario = db
     .prepare(
       `SELECT
         u.id AS usuario_id,
         u.nombre AS usuario_nombre,
-        SUM(CASE WHEN v.estado = 'completada' THEN 1 ELSE 0 END) AS ventas_completadas,
-        SUM(CASE WHEN v.estado = 'anulada' THEN 1 ELSE 0 END) AS ventas_anuladas,
-        COALESCE(SUM(CASE WHEN v.estado = 'completada' THEN v.descuento ELSE 0 END), 0) AS total_descuentos_centavos,
-        COALESCE(SUM(CASE WHEN v.estado = 'completada' THEN v.total ELSE 0 END), 0) AS total_vendido_centavos
-       FROM ventas v
-       INNER JOIN usuarios u ON u.id = v.usuario_id
-       WHERE ${whereVentas}
+        COALESCE(SUM(CASE WHEN v.id IS NOT NULL AND v.estado = 'completada' THEN 1 ELSE 0 END), 0) AS ventas_completadas,
+        COALESCE(SUM(CASE WHEN v.id IS NOT NULL AND v.estado = 'anulada' THEN 1 ELSE 0 END), 0) AS ventas_anuladas,
+        COALESCE(SUM(CASE WHEN v.id IS NOT NULL AND v.estado = 'completada' THEN v.descuento ELSE 0 END), 0) AS total_descuentos_centavos,
+        COALESCE(SUM(CASE WHEN v.id IS NOT NULL AND v.estado = 'completada' THEN v.total ELSE 0 END), 0) AS total_vendido_centavos
+       FROM usuarios u
+       LEFT JOIN ventas v ON v.usuario_id = u.id AND (${whereVentas})
+       WHERE u.comercio_id = ? AND u.deleted_at IS NULL
        GROUP BY u.id, u.nombre
-       ORDER BY total_vendido_centavos DESC`
+       ORDER BY total_vendido_centavos DESC, ventas_completadas DESC, u.nombre ASC`
     )
-    .all(...paramsFechaVenta) as unknown as ResumenVentasPorUsuario[];
+    .all(...paramsFechaVenta, actor.comercio_id) as unknown as ResumenVentasPorUsuario[];
 
   // 3. Ítems vendidos con su costo_unitario histórico copiado al momento de la venta (PLAN.md §4 y §7)
   const filasItemsVendidos = db
@@ -174,7 +202,7 @@ export function obtenerInformeGestionFase1(
   const rentabilidad = calcularRentabilidadHistorica(itemsHistoricos);
 
   // 4. Stock actual, stock bajo mínimo y stock valorizado a costo y a precio de venta (PLAN.md §7)
-  const filasStock = db
+  const filasStockBase = db
     .prepare(
       `SELECT
         p.id AS producto_id,
@@ -192,6 +220,20 @@ export function obtenerInformeGestionFase1(
        ORDER BY p.nombre ASC`
     )
     .all(actor.comercio_id) as unknown as ProductoStockValorizadoInput[];
+
+  let filasStock: ProductoStockValorizadoInput[] = filasStockBase;
+  if (sucursalFiltroId) {
+    const { mapaPorProducto } = obtenerMapaStockPorSucursalDb(
+      db,
+      actor.comercio_id,
+      actor.device_id
+    );
+    filasStock = filasStockBase.map((f) => ({
+      ...f,
+      stock_actual:
+        mapaPorProducto.get(f.producto_id)?.por_sucursal[sucursalFiltroId] ?? 0,
+    }));
+  }
 
   const stockValorizado = calcularStockValorizado(filasStock);
 
@@ -508,4 +550,86 @@ export function exportarPedidoReposicionBajoStockAPdf(
   });
 
   return { pdfBytes, resumen };
+}
+
+/**
+ * Genera y audita el archivo Excel (.xlsx) de Pedido de Reposición para productos con stock bajo,
+ * agrupado por Proveedor, por Marca o por Categoría.
+ */
+export function exportarPedidoReposicionBajoStockAXlsx(
+  db: DatabaseSync,
+  actor: ActorContexto,
+  params: {
+    readonly criterio: CriterioAgrupacionPedido;
+    readonly filtroGrupoId?: string | null;
+    readonly cantidadesPersonalizadasPorProducto?: Readonly<Record<string, number>>;
+  }
+): {
+  readonly xlsxBytes: Uint8Array;
+  readonly resumen: ResumenPedidosReposicion;
+} {
+  exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
+
+  const comercioRow = db
+    .prepare('SELECT nombre FROM comercios WHERE id = ?')
+    .get(actor.comercio_id) as { nombre: string } | undefined;
+
+  const filas = db
+    .prepare(
+      `SELECT
+        p.id,
+        p.nombre,
+        p.codigo_interno,
+        p.unidad,
+        COALESCE(s.stock_actual, 0) AS stock_actual,
+        p.stock_minimo,
+        p.costo_compra,
+        COALESCE(v.precio_venta, 0) AS precio_venta,
+        p.proveedor_principal_id AS proveedor_id,
+        pr.nombre AS proveedor_nombre,
+        p.marca_id,
+        m.nombre AS marca_nombre,
+        p.categoria_id,
+        c.nombre AS categoria_nombre
+       FROM productos p
+       LEFT JOIN vista_stock_actual s
+         ON s.producto_id = p.id AND s.comercio_id = p.comercio_id
+       LEFT JOIN vista_productos_venta v
+         ON v.id = p.id AND v.comercio_id = p.comercio_id
+       LEFT JOIN proveedores pr
+         ON pr.id = p.proveedor_principal_id AND pr.deleted_at IS NULL
+       LEFT JOIN marcas m
+         ON m.id = p.marca_id AND m.deleted_at IS NULL
+       LEFT JOIN categorias c
+         ON c.id = p.categoria_id AND c.deleted_at IS NULL
+       WHERE p.comercio_id = ? AND p.deleted_at IS NULL AND p.activo = 1
+       ORDER BY p.nombre ASC`
+    )
+    .all(actor.comercio_id) as unknown as ProductoParaPedidoInput[];
+
+  const resumen = agruparPedidoReposicionStockBajo({
+    productos: filas,
+    criterio: params.criterio,
+    filtroGrupoId: params.filtroGrupoId ?? null,
+    cantidadesPersonalizadasPorProducto:
+      params.cantidadesPersonalizadasPorProducto,
+  });
+
+  const xlsxBytes = generarXlsxPedidoReposicion({
+    resumen,
+    comercioNombre: comercioRow?.nombre ?? 'Punto de Ventas',
+  });
+
+  auditarExportacionInforme(db, actor, {
+    nombreInforme: `pedido_reposicion_${params.criterio}`,
+    formato: 'xlsx',
+    filtrosAplicados: {
+      criterio: params.criterio,
+      filtroGrupoId: params.filtroGrupoId ?? null,
+      totalProductosBajoStock: resumen.total_productos_bajo_stock,
+      totalGrupos: resumen.total_grupos,
+    },
+  });
+
+  return { xlsxBytes, resumen };
 }

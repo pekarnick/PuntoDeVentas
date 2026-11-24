@@ -3,6 +3,7 @@
  * Sube un archivo .zip empaquetado directamente con bloqueo total de buscadores (robots.txt, headers, meta tags).
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -29,6 +30,7 @@ export interface ResultadoDespliegueNetlify {
   readonly siteUrl: string;
   readonly urlVentaMovil: string;
   readonly deployId: string;
+  readonly zipSha256?: string;
   readonly error?: string;
 }
 
@@ -122,29 +124,126 @@ export default async function handler(req) {
       });
     }
 
+    // 1. Inicio de sesión móvil real contra Supabase Auth (sin mock)
+    if (accion === 'login_movil' || accion === 'iniciar_sesion_movil') {
+      const email = String(payload.usuario || '').trim();
+      const password = String(payload.clave || '');
+      if (!email || !password) {
+        return new Response(JSON.stringify({ ok: false, error: 'Ingresá email y contraseña.' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const respAuth = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=password', {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!respAuth.ok) {
+        return new Response(JSON.stringify({ ok: false, error: 'Credenciales inválidas en Supabase Auth.' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const authData = await respAuth.json();
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          access_token: authData.access_token,
+          user_id: authData.user?.id || null,
+          expira_at: new Date(Date.now() + 2 * 3600 * 1000).toISOString(),
+        }
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const authHeader = req.headers.get('authorization') || '';
+    if (!authHeader.startsWith('Bearer ') || authHeader.slice(7).trim() === SUPABASE_ANON_KEY) {
+      return new Response(JSON.stringify({ ok: false, error: 'SESION_NO_AUTENTICADA: Se requiere token JWT de Supabase Auth.' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const headersSupabase = {
       'apikey': SUPABASE_ANON_KEY,
-      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+      'Authorization': authHeader,
       'Content-Type': 'application/json',
     };
 
-    // 1. Obtener catálogo para venta móvil (Regla 20: sin costo_compra)
+    // 2. Obtener catálogo para venta móvil (Regla 20: sin costo_compra)
     if (accion === 'obtener_catalogo_movil') {
       const respProd = await fetch(SUPABASE_URL + '/rest/v1/productos_venta?select=*', {
         headers: headersSupabase,
       });
-      const prods = respProd.ok ? await respProd.json() : [];
+      if (!respProd.ok) {
+        return new Response(JSON.stringify({ ok: false, error: 'No autorizado para consultar el catálogo.' }), {
+          status: respProd.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const prods = await respProd.json();
 
       const respCli = await fetch(SUPABASE_URL + '/rest/v1/clientes?select=id,nombre,cuit_dni,condicion_iva,limite_credito', {
         headers: headersSupabase,
       });
       const clientes = respCli.ok ? await respCli.json() : [];
 
+      const respCombos = await fetch(SUPABASE_URL + '/rest/v1/combos?activo=eq.true&deleted_at=is.null&select=id,nombre,descripcion,codigo_barras,precio_venta', {
+        headers: headersSupabase,
+      });
+      const combosRaw = respCombos.ok ? await respCombos.json() : [];
+
+      const respCombosItems = await fetch(SUPABASE_URL + '/rest/v1/combos_items?deleted_at=is.null&select=combo_id,producto_id,cantidad', {
+        headers: headersSupabase,
+      });
+      const combosItemsRaw = respCombosItems.ok ? await respCombosItems.json() : [];
+
+      const prodMap = new Map(prods.map(p => [p.id, p]));
+      const combos = (Array.isArray(combosRaw) ? combosRaw : []).map(c => {
+        const items = (Array.isArray(combosItemsRaw) ? combosItemsRaw : [])
+          .filter(ci => ci.combo_id === c.id)
+          .map(ci => {
+            const prod = prodMap.get(ci.producto_id);
+            return {
+              producto_id: ci.producto_id,
+              producto_nombre: prod ? prod.nombre : 'Producto',
+              cantidad: Number(ci.cantidad) || 1,
+              precio_unitario_normal: prod ? Number(prod.precio_venta) || 0 : 0,
+              stock_actual: prod ? Number(prod.stock_actual) || 0 : 0,
+            };
+          });
+        const precioSumaNormal = items.reduce((acc, it) => acc + Math.round(it.precio_unitario_normal * it.cantidad), 0);
+        const precioCombo = Number(c.precio_venta) || 0;
+        const ahorro = Math.max(0, precioSumaNormal - precioCombo);
+        const pct = precioSumaNormal > 0 ? Math.round((ahorro / precioSumaNormal) * 10000) / 100 : 0;
+        const stockCombos = items.length > 0
+          ? Math.max(0, Math.min(...items.map(it => it.cantidad > 0 ? Math.floor(it.stock_actual / it.cantidad) : 0)))
+          : 0;
+        return {
+          id: c.id,
+          nombre: c.nombre,
+          descripcion: c.descripcion || null,
+          codigo_barras: c.codigo_barras || null,
+          precio_venta: precioCombo,
+          precio_suma_normal: precioSumaNormal,
+          ahorro_centavos: ahorro,
+          porcentaje_descuento: pct,
+          stock_combos_disponibles: stockCombos,
+          items,
+        };
+      });
+
       return new Response(JSON.stringify({
         ok: true,
         data: {
-          comercioId: payload.comercioId || '',
           productos: prods,
+          combos,
           clientes: clientes.map(c => ({
             id: c.id,
             nombre: c.nombre,
@@ -160,7 +259,7 @@ export default async function handler(req) {
       });
     }
 
-    // 2. Crear venta móvil transaccional e idempotente (PLAN.md §6.2)
+    // 3. Crear venta móvil transaccional e idempotente (PLAN.md §6.2)
     if (accion === 'crear_venta_movil') {
       const respVenta = await fetch(SUPABASE_URL + '/rest/v1/rpc/crear_venta_movil', {
         method: 'POST',
@@ -193,41 +292,8 @@ export default async function handler(req) {
       });
     }
 
-    // 3. Inicio de sesión móvil
-    if (accion === 'iniciar_sesion_movil') {
-      // Retorna sesión mock/autenticada o delega a Supabase
-      return new Response(JSON.stringify({
-        ok: true,
-        data: {
-          sesion_id: 'sesion-movil-' + Date.now(),
-          expira_at: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
-          comercio_id: payload.comercioId || '',
-          comercio_nombre: 'Comercio',
-          usuario: {
-            id: 'usr-movil-1',
-            nombre: payload.usuario || 'Cajero Móvil',
-            usuario: payload.usuario || 'cajero',
-            rol: 'cajero',
-          }
-        }
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    // Otras acciones de caja
-    return new Response(JSON.stringify({
-      ok: true,
-      data: {
-        abierta: true,
-        monto_apertura: 0,
-        total_recaudado: 0,
-        ventas_totales_dia: 0,
-        totales_por_medio: {},
-      }
-    }), {
-      status: 200,
+    return new Response(JSON.stringify({ ok: false, error: 'Acción no soportada: ' + String(accion || '') }), {
+      status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
 
@@ -332,6 +398,9 @@ window.__POS_CONFIG__ = {
     if (fs.existsSync(webPosDir)) {
       const archivosWebPos = agregarArchivosDesdeCarpeta(webPosDir);
       for (const item of archivosWebPos) {
+        if (item.nombre === 'pos-config.js') {
+          continue;
+        }
         // En index.html inyectamos el script de configuración y meta noindex
         if (item.nombre === 'index.html') {
           let html =
@@ -380,10 +449,18 @@ window.__POS_CONFIG__ = {
   return crearArchivoZip(archivos);
 }
 
+function normalizarUrlHttpsNetlify(urlRaw: string, fallbackName: string): string {
+  const base = (urlRaw || `https://${fallbackName}.netlify.app`)
+    .trim()
+    .replace(/^http:\/\//i, 'https://')
+    .replace(/\/+$/, '');
+  return base.startsWith('https://') ? base : `https://${base}`;
+}
+
 /**
  * Despliega el ZIP compilado en Netlify vía API REST.
  * Si ya existe siteId, hace un deploy al sitio existente.
- * Si no existe, crea un nuevo sitio en Netlify.
+ * Si no existe, busca si ya existe en la cuenta o crea un nuevo sitio en Netlify.
  */
 export async function desplegarSitioNetlify(params: {
   token: string;
@@ -397,27 +474,97 @@ export async function desplegarSitioNetlify(params: {
     'User-Agent': 'PuntoDeVentas-POS/1.0',
   };
 
+  if (
+    !Buffer.isBuffer(params.zipBuffer) ||
+    params.zipBuffer.length < 22 ||
+    params.zipBuffer.length > 50 * 1024 * 1024 ||
+    params.zipBuffer.readUInt32LE(0) !== 0x04034b50
+  ) {
+    return {
+      ok: false,
+      siteId: '',
+      siteName: '',
+      siteUrl: '',
+      urlVentaMovil: '',
+      deployId: '',
+      error: 'PAQUETE_ZIP_INVALIDO: El archivo ZIP de despliegue no es válido o excede 50 MB.',
+    };
+  }
+
+  const zipSha256 = crypto
+    .createHash('sha256')
+    .update(params.zipBuffer)
+    .digest('hex');
+
   let siteId = params.siteId?.trim() || null;
+  if (siteId && !/^[a-z0-9-]{4,64}$/i.test(siteId)) {
+    return {
+      ok: false,
+      siteId: '',
+      siteName: '',
+      siteUrl: '',
+      urlVentaMovil: '',
+      deployId: '',
+      zipSha256,
+      error: 'SITE_ID_INVALIDO: El identificador de sitio Netlify contiene caracteres no permitidos.',
+    };
+  }
   let siteName = params.siteName?.trim() || '';
   let siteUrl = '';
 
   try {
-    // 1. Si no hay siteId, crear o registrar el sitio en Netlify
+    // 1. Si no hay siteId, verificar si ya existe el sitio en la cuenta de Netlify o crearlo
     if (!siteId) {
-      if (siteName) {
-        // Intentar crear sitio con nombre específico
-        const slugNombre = siteName
-          .toLowerCase()
-          .replace(/[^a-z0-9\-]/g, '-')
-          .replace(/^-+|-+$/g, '');
+      const slugDeseado = siteName
+        ? siteName
+            .toLowerCase()
+            .replace(/\.netlify\.app.*$/i, '')
+            .replace(/^https?:\/\//i, '')
+            .replace(/[^a-z0-9\-]/g, '-')
+            .replace(/^-+|-+$/g, '')
+        : '';
 
+      try {
+        const respSitios = await fetch('https://api.netlify.com/api/v1/sites', {
+          method: 'GET',
+          headers: headersAuth,
+        });
+        if (respSitios.ok) {
+          const listaSitios = (await respSitios.json()) as Array<{
+            id: string;
+            name: string;
+            ssl_url?: string;
+            url?: string;
+          }>;
+          if (Array.isArray(listaSitios) && listaSitios.length > 0) {
+            const coincidente = slugDeseado
+              ? listaSitios.find(
+                  (s) => s.name.toLowerCase() === slugDeseado.toLowerCase()
+                )
+              : listaSitios[0];
+            if (coincidente) {
+              siteId = coincidente.id;
+              siteName = coincidente.name;
+              siteUrl = normalizarUrlHttpsNetlify(
+                coincidente.ssl_url || coincidente.url || '',
+                coincidente.name
+              );
+            }
+          }
+        }
+      } catch {
+        // Si falla el listado previo, continuar con la creación
+      }
+
+      if (!siteId && slugDeseado) {
+        // Intentar crear sitio con nombre específico
         const respCrear = await fetch('https://api.netlify.com/api/v1/sites', {
           method: 'POST',
           headers: {
             ...headersAuth,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ name: slugNombre }),
+          body: JSON.stringify({ name: slugDeseado }),
         });
 
         if (respCrear.ok) {
@@ -429,7 +576,10 @@ export async function desplegarSitioNetlify(params: {
           };
           siteId = sitioCreado.id;
           siteName = sitioCreado.name;
-          siteUrl = sitioCreado.ssl_url || sitioCreado.url || '';
+          siteUrl = normalizarUrlHttpsNetlify(
+            sitioCreado.ssl_url || sitioCreado.url || '',
+            sitioCreado.name
+          );
         }
       }
 
@@ -465,8 +615,11 @@ export async function desplegarSitioNetlify(params: {
           deploy_id?: string;
         };
 
-        const urlFinal = dataSitio.ssl_url || dataSitio.url || `https://${dataSitio.name}.netlify.app`;
-        const urlVentaMovil = `${urlFinal.replace(/\/+$/, '')}/web-pos`;
+        const urlFinal = normalizarUrlHttpsNetlify(
+          dataSitio.ssl_url || dataSitio.url || '',
+          dataSitio.name
+        );
+        const urlVentaMovil = `${urlFinal}/web-pos`;
 
         return {
           ok: true,
@@ -480,7 +633,19 @@ export async function desplegarSitioNetlify(params: {
     }
 
     // 2. Desplegar ZIP en el sitio (existente o recién creado)
-    const urlDeploy = `https://api.netlify.com/api/v1/sites/${siteId}/deploys`;
+    if (!/^[a-z0-9-]{4,64}$/i.test(siteId)) {
+      return {
+        ok: false,
+        siteId: '',
+        siteName,
+        siteUrl,
+        urlVentaMovil: '',
+        deployId: '',
+        zipSha256,
+        error: 'SITE_ID_INVALIDO: El siteId devuelto por Netlify no cumple el formato esperado.',
+      };
+    }
+    const urlDeploy = `https://api.netlify.com/api/v1/sites/${encodeURIComponent(siteId)}/deploys`;
     const respDeploy = await fetch(urlDeploy, {
       method: 'POST',
       headers: {
@@ -511,12 +676,11 @@ export async function desplegarSitioNetlify(params: {
       url?: string;
     };
 
-    const finalUrl =
-      dataDeploy.ssl_url ||
-      dataDeploy.url ||
-      siteUrl ||
-      `https://${dataDeploy.name || siteName}.netlify.app`;
-    const urlVentaMovil = `${finalUrl.replace(/\/+$/, '')}/web-pos`;
+    const finalUrl = normalizarUrlHttpsNetlify(
+      dataDeploy.ssl_url || dataDeploy.url || siteUrl || '',
+      dataDeploy.name || siteName || 'pos-movil'
+    );
+    const urlVentaMovil = `${finalUrl}/web-pos`;
 
     return {
       ok: true,
@@ -525,6 +689,7 @@ export async function desplegarSitioNetlify(params: {
       siteUrl: finalUrl,
       urlVentaMovil,
       deployId: dataDeploy.id,
+      zipSha256,
     };
   } catch (err) {
     return {

@@ -22,7 +22,16 @@ export function PanelUsuarios(): React.ReactElement {
   const [paginaUsuarios, setPaginaUsuarios] = useState(1);
   const [nuevoNombre, setNuevoNombre] = useState('');
   const [nuevoUsuario, setNuevoUsuario] = useState('');
+  const [nuevaClaveInicial, setNuevaClaveInicial] = useState('');
   const [nuevoRol, setNuevoRol] = useState<RolUsuario>('cajero');
+
+  // Estado para cambiar la contraseña directamente desde el listado de usuarios
+  const [usuarioEditandoClaveId, setUsuarioEditandoClaveId] = useState<
+    string | null
+  >(null);
+  const [claveNuevaEdicion, setClaveNuevaEdicion] = useState('');
+  const [mostrarClaveEdicion, setMostrarClaveEdicion] = useState(false);
+
   const [mensajeClaveTemporal, setMensajeClaveTemporal] = useState<
     string | null
   >(null);
@@ -53,23 +62,78 @@ export function PanelUsuarios(): React.ReactElement {
       return;
     }
 
+    if (
+      nuevaClaveInicial.trim().length > 0 &&
+      nuevaClaveInicial.trim().length < 8
+    ) {
+      setMensajeError(
+        'La contraseña debe tener al menos 8 caracteres (ej: Cajero1234).'
+      );
+      return;
+    }
+
     try {
-      await invocarPosApi('crear_usuario', {
+      const res = await invocarPosApi<{
+        id: string;
+        claveAsignada?: string;
+        esTemporal?: boolean;
+      }>('crear_usuario', {
         rolActivo: 'superadmin',
         nombre: nuevoNombre.trim(),
         usuario: nuevoUsuario.trim().toLowerCase(),
+        claveNueva: nuevaClaveInicial.trim() || undefined,
         rol: nuevoRol,
       });
 
+      const usrCreado = nuevoUsuario.trim().toLowerCase();
+      const fuePersonalizada = nuevaClaveInicial.trim().length >= 8;
       setNuevoNombre('');
       setNuevoUsuario('');
+      setNuevaClaveInicial('');
       setMensajeClaveTemporal(
-        `Usuario "${nuevoUsuario.trim().toLowerCase()}" guardado en la base de datos. Clave temporal asignada: Temporal2026!`
+        fuePersonalizada
+          ? `✅ Usuario "${usrCreado}" creado con su contraseña personalizada y estado "Al día".`
+          : `Usuario "${usrCreado}" guardado en la base de datos. Clave temporal asignada: ${res.claveAsignada ?? 'Temporal2026!'}`
       );
       await cargarUsuarios();
     } catch (err) {
       setMensajeError(
         err instanceof Error ? err.message : 'No se pudo crear el usuario.'
+      );
+    }
+  }
+
+  async function manejarGuardarNuevaClaveDirecta(u: UsuarioFilaUI) {
+    setMensajeError(null);
+    setMensajeClaveTemporal(null);
+
+    const limpia = claveNuevaEdicion.trim();
+    if (limpia.length < 8) {
+      setMensajeError(
+        `La nueva contraseña para "${u.usuario}" debe tener al menos 8 caracteres.`
+      );
+      return;
+    }
+
+    try {
+      await invocarPosApi('cambiar_clave_usuario', {
+        rolActivo: 'superadmin',
+        usuarioObjetivoId: u.id,
+        claveNueva: limpia,
+        debeCambiarAlIngresar: false,
+      });
+      setUsuarioEditandoClaveId(null);
+      setClaveNuevaEdicion('');
+      setMostrarClaveEdicion(false);
+      setMensajeClaveTemporal(
+        `✅ Contraseña actualizada correctamente para "${u.nombre}" (${u.usuario}). El estado de clave quedó "Al día".`
+      );
+      await cargarUsuarios();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo guardar la nueva contraseña.'
       );
     }
   }
@@ -158,6 +222,7 @@ export function PanelUsuarios(): React.ReactElement {
       <form
         onSubmit={(e) => void manejarCrearUsuario(e)}
         className="form-row"
+        style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}
       >
         <label>
           Nombre y apellido:
@@ -175,6 +240,15 @@ export function PanelUsuarios(): React.ReactElement {
             value={nuevoUsuario}
             onChange={(e) => setNuevoUsuario(e.target.value)}
             placeholder="sofia"
+          />
+        </label>
+        <label>
+          Contraseña inicial (mín. 8 caract.):
+          <input
+            type="password"
+            value={nuevaClaveInicial}
+            onChange={(e) => setNuevaClaveInicial(e.target.value)}
+            placeholder="Ej: Cajero1234 (o vacío = temporal)"
           />
         </label>
         <label>
@@ -210,45 +284,164 @@ export function PanelUsuarios(): React.ReactElement {
           </tr>
         </thead>
         <tbody>
-          {paginacionUsuarios.itemsPagina.map((u) => (
-            <tr key={u.id}>
-              <td>{u.nombre}</td>
-              <td>
-                <code>{u.usuario}</code>
-              </td>
-              <td>{u.rol}</td>
-              <td>
-                <label className="checkbox-inline" style={{ cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(u.puede_vender_movil)}
-                    onChange={() => void manejarCambiarPermisoMovil(u)}
-                  />
-                  <span>{u.puede_vender_movil ? 'Habilitado' : 'No'}</span>
-                </label>
-              </td>
-              <td>{u.activo ? 'Activo' : 'Desactivado'}</td>
-              <td>
-                {u.debe_cambiar_clave ? 'Pendiente al ingresar' : 'Al día'}
-              </td>
-              <td className="actions-cell">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => void manejarCambiarEstado(u)}
-                >
-                  {u.activo ? 'Desactivar' : 'Reactivar'}
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => void manejarResetearClave(u)}
-                >
-                  Resetear clave
-                </button>
-              </td>
-            </tr>
-          ))}
+          {paginacionUsuarios.itemsPagina.map((u) => {
+            const editandoEstaFila = usuarioEditandoClaveId === u.id;
+            return (
+              <React.Fragment key={u.id}>
+                <tr>
+                  <td>{u.nombre}</td>
+                  <td>
+                    <code>{u.usuario}</code>
+                  </td>
+                  <td>{u.rol}</td>
+                  <td>
+                    <label
+                      className="checkbox-inline"
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(u.puede_vender_movil)}
+                        onChange={() => void manejarCambiarPermisoMovil(u)}
+                      />
+                      <span>{u.puede_vender_movil ? 'Habilitado' : 'No'}</span>
+                    </label>
+                  </td>
+                  <td>{u.activo ? 'Activo' : 'Desactivado'}</td>
+                  <td>
+                    {u.debe_cambiar_clave ? (
+                      <span
+                        className="badge-rol rol-encargado"
+                        style={{ cursor: 'pointer' }}
+                        title="Hacé clic para asignar la contraseña definitiva"
+                        onClick={() => {
+                          setUsuarioEditandoClaveId(u.id);
+                          setClaveNuevaEdicion('');
+                          setMensajeError(null);
+                        }}
+                      >
+                        Pendiente al ingresar (clic para cambiar)
+                      </span>
+                    ) : (
+                      <span className="badge-rol rol-cajero">Al día</span>
+                    )}
+                  </td>
+                  <td
+                    className="actions-cell"
+                    style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}
+                  >
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => {
+                        if (editandoEstaFila) {
+                          setUsuarioEditandoClaveId(null);
+                          setClaveNuevaEdicion('');
+                        } else {
+                          setUsuarioEditandoClaveId(u.id);
+                          setClaveNuevaEdicion('');
+                          setMensajeError(null);
+                        }
+                      }}
+                    >
+                      🔑 Cambiar clave
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => void manejarCambiarEstado(u)}
+                    >
+                      {u.activo ? 'Desactivar' : 'Reactivar'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => void manejarResetearClave(u)}
+                      title="Generar clave temporal aleatoria y pedir cambio al ingresar"
+                    >
+                      Resetear temporal
+                    </button>
+                  </td>
+                </tr>
+                {editandoEstaFila && (
+                  <tr>
+                    <td colSpan={7}>
+                      <div
+                        className="subcard-box"
+                        style={{
+                          padding: '0.85rem 1rem',
+                          borderRadius: '0.5rem',
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: '0.65rem',
+                          alignItems: 'flex-end',
+                        }}
+                      >
+                        <div style={{ flex: '1 1 260px' }}>
+                          <label
+                            htmlFor={`input-nueva-clave-${u.id}`}
+                            style={{
+                              display: 'block',
+                              fontWeight: 600,
+                              marginBottom: '0.3rem',
+                            }}
+                          >
+                            🔑 Nueva contraseña para {u.nombre} (
+                            <code>{u.usuario}</code>):
+                          </label>
+                          <div style={{ display: 'flex', gap: '0.4rem' }}>
+                            <input
+                              id={`input-nueva-clave-${u.id}`}
+                              type={mostrarClaveEdicion ? 'text' : 'password'}
+                              autoFocus
+                              value={claveNuevaEdicion}
+                              onChange={(e) =>
+                                setClaveNuevaEdicion(e.target.value)
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  void manejarGuardarNuevaClaveDirecta(u);
+                                }
+                              }}
+                              placeholder="Escribí la contraseña nueva (mínimo 8 caracteres)"
+                              style={{ flex: 1 }}
+                            />
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() =>
+                                setMostrarClaveEdicion((prev) => !prev)
+                              }
+                            >
+                              {mostrarClaveEdicion ? '🙈 Ocultar' : '👁️ Ver'}
+                            </button>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => void manejarGuardarNuevaClaveDirecta(u)}
+                        >
+                          💾 Guardar nueva contraseña
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => {
+                            setUsuarioEditandoClaveId(null);
+                            setClaveNuevaEdicion('');
+                          }}
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
         </tbody>
       </table>
       <PaginadorTabla

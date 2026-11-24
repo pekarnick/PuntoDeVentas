@@ -15,6 +15,10 @@ import {
   debeSubirImagenProducto,
 } from '../domain/sync.ts';
 import { generarUuidV7 } from '../domain/uuid.ts';
+import {
+  procesarImagenProducto,
+  resolverRutaSeguraImagen,
+} from '../db/imagenes_repo.ts';
 
 function obtenerRutasImagenProducto(
   directorioBaseDatos: string,
@@ -23,11 +27,11 @@ function obtenerRutasImagenProducto(
   absolutaPrincipal: string;
   absolutaMiniatura: string;
 } {
-  const carpetaImagenes = path.join(directorioBaseDatos, 'imagenes');
-  return {
-    absolutaPrincipal: path.join(carpetaImagenes, `${productoId}.webp`),
-    absolutaMiniatura: path.join(carpetaImagenes, `${productoId}_thumb.webp`),
-  };
+  const { absolutaPrincipal, absolutaMiniatura } = resolverRutaSeguraImagen(
+    directorioBaseDatos,
+    productoId
+  );
+  return { absolutaPrincipal, absolutaMiniatura };
 }
 
 export interface TransporteImagenesNube {
@@ -360,16 +364,43 @@ export async function procesarColaSincronizacionImagenes(
           nombrePrincipal
         );
         if (bytesRemotos) {
-          const dirImagenes = path.dirname(rutas.absolutaPrincipal);
-          fs.mkdirSync(dirImagenes, { recursive: true });
-          fs.writeFileSync(rutas.absolutaPrincipal, bytesRemotos);
+          if (item.imagen_hash && item.imagen_hash.trim().length > 0) {
+            const hashDescargado = calcularSha256Buffer(bytesRemotos);
+            if (hashDescargado !== item.imagen_hash.trim().toLowerCase()) {
+              throw new Error(
+                'HASH_IMAGEN_INVALIDO: El archivo descargado no coincide con el hash esperado.'
+              );
+            }
+          }
+
+          const procesada = await procesarImagenProducto(bytesRemotos);
+          const { carpetaImagenes, absolutaPrincipal, absolutaMiniatura } =
+            resolverRutaSeguraImagen(
+              params.directorioBaseDatos,
+              item.producto_id
+            );
+          fs.mkdirSync(carpetaImagenes, { recursive: true });
+          if (
+            fs.existsSync(carpetaImagenes) &&
+            fs.lstatSync(carpetaImagenes).isSymbolicLink()
+          ) {
+            throw new Error(
+              'SYMLINK_NO_PERMITIDO: La carpeta de imágenes es un enlace simbólico.'
+            );
+          }
+          fs.writeFileSync(absolutaPrincipal, procesada.principalWebp);
 
           const bytesThumbRemotos = await transporte.bajarArchivoImagen(
             params.comercioId,
             nombreMiniatura
           );
           if (bytesThumbRemotos) {
-            fs.writeFileSync(rutas.absolutaMiniatura, bytesThumbRemotos);
+            const thumbProcesada = await procesarImagenProducto(
+              bytesThumbRemotos
+            );
+            fs.writeFileSync(absolutaMiniatura, thumbProcesada.miniaturaWebp);
+          } else {
+            fs.writeFileSync(absolutaMiniatura, procesada.miniaturaWebp);
           }
 
           db.prepare(

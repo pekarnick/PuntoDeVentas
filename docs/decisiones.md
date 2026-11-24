@@ -80,3 +80,61 @@ Este documento registra las decisiones técnicas, refinamientos del modelo de da
   - Las etiquetas EAN-13 de balanzas comerciales con prefijo `20` (`20PPPPPPGGGGV`, peso en gramos) y `21` (`21PPPPPPIIIIV`, importe en pesos) se decodifican en `/packages/domain/src/arca_fase4.ts` validando el dígito verificador EAN-13.
   - Los combos (`combos` y `combos_items`) calculan su stock disponible dinámicamente a partir del stock actual de sus productos componentes (`Math.floor(min(stock / cantidad_requerida))`) y, al venderse, registran los movimientos de stock negativos sobre cada componente, respetando estrictamente la Regla 4 (el stock nunca es un campo editable).
 
+---
+
+## 5. Administración de Sucursales, Migración de Stock, Pedidos PDF y Mejoras Operativas de Caja y Móvil
+
+### 5.1 Modelo Multi-Sucursal con Movimientos Append-Only (`007_sucursales_y_transferencias.sql`)
+- **Decisión:**
+  - Cada comercio posee una sucursal principal por defecto (`Casa Central`, `es_principal = 1`) en la tabla `sucursales`.
+  - Los movimientos de stock (`movimientos_stock`), ventas (`ventas`), compras (`compras`) y sesiones de caja (`caja_sesiones`) incorporan `sucursal_id` (con fallback automático a la sucursal principal para registros previos, preservando el 100% de compatibilidad hacia atrás).
+  - La migración/transferencia de mercadería entre sucursales se asienta en la tabla append-only `transferencias_sucursales` y genera, dentro de la misma transacción atómica, un movimiento negativo (`ajuste` de salida) en la sucursal de origen y un movimiento positivo (`ajuste` de entrada) en la sucursal de destino, manteniendo invariante la suma global de `movimientos_stock` (Regla 4) y escribiendo el eslabón SHA-256 en `auditoria` (Reglas 13 y 14).
+
+### 5.2 Generación Nativa de PDFs de Pedidos por Stock Bajo (`src/domain/pdf.ts` y `src/domain/pedidos_reposicion.ts`)
+- **Decisión:**
+  - Las listas de pedido para productos con `stock_actual <= stock_minimo` se calculan con funciones puras agrupadas por **Proveedor**, por **Marca** y por **Categoría**, y se exportan mediante un generador `%PDF-1.4` nativo en TypeScript sin dependencias externas pesadas.
+
+### 5.3 Bloqueo Operativo en Caja Cerrada y Modal Instantáneo en Cajero Móvil (`/web-pos`)
+- **Decisión:**
+  - El acceso a **Caja y Arqueo** se ubica en el segundo lugar del menú principal (al lado de **Venta (Mostrador)**) con indicador de estado en vivo (`🟢 Abierta` / `🔴 Cerrada`). Mientras la caja está cerrada, se bloquean los cobros de ventas, movimientos manuales y arqueos, ofreciendo apertura rápida desde la propia pantalla de venta.
+  - En `/web-pos`, al confirmar una venta se hace scroll automático hacia arriba y el comprobante se presenta en una ventana modal centrada a pantalla completa (`role="dialog"`), evitando que el operador tenga que desplazarse manualmente para ver o compartir el ticket por WhatsApp.
+
+---
+
+## 6. Pantalla de Login, Cambio Directo de Clave, Combos en Buscador y Cajero Móvil, Sincronización Dual y Actualizaciones Tauri
+
+### 6.1 Login Obligatorio, Cambio Directo de Contraseña y Selector de Rol Exclusivo para Superadmin
+- **Decisión:**
+  - Al iniciar la aplicación se exige iniciar sesión con usuario y clave validados offline contra el hash Argon2id local (`autenticarUsuarioOffline` / `iniciar_sesion_operador`).
+  - El selector del encabezado **`🧪 Probar rol`** se muestra **únicamente** cuando el operador autenticado real tiene rol `superadmin` (`operadorAutenticado.rol === 'superadmin'`). Para `encargado` y `cajero`, dicho selector permanece oculto.
+  - En la gestión de usuarios (`PanelUsuarios.tsx`), además del reseteo con clave temporal, se incorpora `establecerClaveUsuarioDirecta` (`cambiar_clave_usuario`), que permite escribir directamente la nueva contraseña en la fila del usuario (o al hacer clic en `"Pendiente al ingresar"`), actualizando el hash Argon2id y dejando `debe_cambiar_clave = 0` (`"Al día"`).
+
+### 6.2 Búsqueda y Cálculo Exacto en Centavos de Combos en Escritorio y Cajero Móvil (`/web-pos`)
+- **Decisión:**
+  - En **Venta (POS)** de escritorio (`PanelVentaPOS.tsx`), el desplegable de autocompletado (`opcionesDesplegable`) incluye tanto productos individuales como **combos activos** coincidentes por nombre, descripción, código de barras o nombre de cualquiera de sus componentes.
+  - En **Venta Móvil Web (`/web-pos`)**, `obtener_catalogo_movil` entrega los combos activos sin `costo_compra` (Regla 20). Al agregar un combo al carrito móvil o de escritorio, se suman sus productos componentes (para descontar su stock por movimientos según la Regla 4) y se calcula la bonificación exacta en centavos (`sumaComponentesEnCatalogo - combo.precio_venta`) convirtiendo los importes mediante `pesosACentavos`, garantizando que el total a cobrar por el combo sea siempre exactamente `combo.precio_venta`.
+
+### 6.3 Script SQL Unificado de Supabase, Normalización UUID Nullable y Copia Completa a Firebase
+- **Decisión:**
+  - Se unifican las migraciones `001` a `004` de PostgreSQL en un único archivo idempotente `supabase/esquema_completo_unificado.sql` accesible desde la pestaña **📖 Ayuda y Manual** y **Configuración**.
+  - En `serializarRegistroParaPostgres` (`src/sync/motor_sync.ts`), las columnas UUID nullables (`CAMPOS_UUID_NULLABLES_POSTGRES`, incluyendo `auditoria.usuario_id` en intentos de login con usuario inexistente) convierten cadenas vacías `""` a `null` antes de hacer push a PostgreSQL (evitando el error `22P02`), mientras que los campos de tipo `TEXT` terminados en `_id` (`CAMPOS_TEXTO_ID_POSTGRES`: `device_id`, `dispositivo_id`, `entidad_id`, `referencia_id`) se preservan como texto para no anular `dispositivo_id` en `ventas` o `sesiones_moviles`. Asimismo, `recolectarPendientesLocalesEnCola` desbloquea y re-encola automáticamente cualquier ítem en estado `error` por `PGRST205`, `22P02`, `23502` o `23503`.
+  - Se incorpora `copiarBaseCompletaAFirebaseSinDuplicados` para volcar bajo demanda todas las tablas locales sincronizables a Cloud Firestore usando el UUIDv7 de cada registro como ID de documento, garantizando cero duplicados.
+
+
+
+
+## Endurecimiento de Seguridad P0 (Auditoría)
+- **Asistente de Primer Uso sin credenciales por defecto:** En bases nuevas sin `superadmin` activo, la aplicación muestra `PantallaConfiguracionInicial` para que el dueño cree su comercio y contraseña inicial con Argon2id, eliminando contraseñas hardcodeadas (`Admin1234`, `Encargado1234`, `Cajero1234`, `Temporal2026!`) y `asegurarOperadoresPorDefecto`.
+- **Autenticación en la nube opcional sin romper modo offline:** El POS de escritorio continúa operando 100% offline contra SQLite con sesiones locales emitidas por `iniciar_sesion_operador` (`X-POS-Session`). Para sincronizar con las reglas estrictas `TO authenticated` de Supabase y `request.auth != null` de Firebase, `PanelConfiguracionSync` permite iniciar sesión en Supabase Auth / Firebase Auth manteniendo únicamente el token JWT en memoria.
+
+## Endurecimiento de Seguridad P1 (Auditoría)
+- **Token de Netlify en memoria efímera:** `netlify_token` dejó de persistirse en `configuracion_sistema` (SQLite) y en backups; si se reinicia la aplicación, el superadmin lo ingresa nuevamente en Configuración cuando desea publicar `/web-pos`.
+- **Configuración de `/web-pos` en producción:** `window.__POS_CONFIG__` tiene precedencia sobre `localStorage` y bloquea la edición manual del endpoint de Supabase cuando la app está desplegada oficialmente.
+
+## Endurecimiento de Seguridad P2 (Auditoría)
+- **Identificador único de terminal:** cada instalación genera un `device_id` único (`terminal-<uuidv7>`) persistido en `comercio_identidad.json` mediante `obtenerODefinirDeviceIdTerminal` para evitar colisiones en LWW entre terminales.
+- **Cuarentena y aislamiento en sincronización:** los ítems en `sync_cola` con `intentos >= MAX_INTENTOS_SYNC_COLA` (5) quedan en cuarentena para no bloquear la cola; la adopción de un comercio remoto requiere confirmación explícita (`permitirAdopcionRemota: true`) y cada fila de pull se aplica dentro de su propio `SAVEPOINT`.
+
+## Endurecimiento de Seguridad P3 (Auditoría)
+- **Límite de crédito `$ 0,00` sin fiado:** `limite_credito = 0` en `clientes` significa explícitamente sin crédito habilitado (`$ 0,00`), requiriendo un límite positivo autorizado por `encargado`/`superadmin` para vender en cuenta corriente.
+- **Saneamiento de exportaciones e imágenes:** las celdas de texto de Excel neutralizan fórmulas (`=`, `+`, `-`, `@`, `\t`, `\r`), los tickets ESC/POS eliminan bytes de control y las imágenes descargadas validan SHA-256 y se re-codifican con Sharp bajo `limitInputPixels = 25 MP`.

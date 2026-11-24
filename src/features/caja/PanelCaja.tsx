@@ -168,8 +168,11 @@ export function PanelCaja({
     <section className="panel-grid">
       <div className="pos-card">
         <div className="card-header">
-          <h2>Estado de Caja ({cajaAbierta ? 'Abierta' : 'Cerrada'})</h2>
-          {estadoCaja && (
+          <h2>
+            {cajaAbierta ? '🟢 ' : '🔴 '}
+            Estado de Caja ({cajaAbierta ? 'Abierta' : 'Cerrada'})
+          </h2>
+          {estadoCaja && cajaAbierta && (
             <span className="text-muted">
               Apertura: {formatearFechaHoraAR(estadoCaja.sesion.fecha_apertura)}
             </span>
@@ -180,90 +183,113 @@ export function PanelCaja({
         {mensajeExito && <div className="alert-ok">{mensajeExito}</div>}
 
         {!cajaAbierta ? (
-          <form
-            onSubmit={(e) => void manejarAbrirCaja(e)}
-            className="form-inline"
-          >
-            <label>
-              Monto inicial en efectivo ($):
-              <input
-                type="text"
-                value={montoInicialInput}
-                onChange={(e) => setMontoInicialInput(e.target.value)}
-                placeholder="15000,00"
-              />
-            </label>
-            <button type="submit" className="btn-primary">
-              Abrir Caja
-            </button>
-          </form>
-        ) : (
-          <form
-            onSubmit={(e) => void manejarAgregarMovimiento(e)}
-            className="form-stack"
-          >
-            <h3>Registrar ingreso o egreso manual</h3>
-            <div className="form-row">
-              <label>
-                Tipo:
-                <select
-                  value={tipoMov}
-                  onChange={(e) =>
-                    setTipoMov(e.target.value as 'ingreso' | 'egreso')
-                  }
-                >
-                  <option value="egreso">Egreso / Retiro</option>
-                  <option value="ingreso">Ingreso de cambio</option>
-                </select>
-              </label>
-              <label>
-                Concepto:
-                <input
-                  type="text"
-                  value={conceptoMov}
-                  onChange={(e) => setConceptoMov(e.target.value)}
-                  placeholder="Ej. Pago proveedor o cambio chico"
-                />
-              </label>
-              <label>
-                Monto ($):
-                <input
-                  type="text"
-                  value={montoMovInput}
-                  onChange={(e) => setMontoMovInput(e.target.value)}
-                  placeholder="1500,00"
-                />
-              </label>
-              <button type="submit" className="btn-secondary">
-                Registrar Movimiento
-              </button>
+          <div className="form-stack">
+            <div
+              className="subcard-box"
+              style={{
+                padding: '1rem',
+                borderRadius: '0.65rem',
+                border: '1px solid #fecaca',
+                background: '#fef2f2',
+                color: '#991b1b',
+              }}
+            >
+              <strong>🔒 La caja se encuentra cerrada en este momento</strong>
+              <p style={{ margin: '0.35rem 0 0 0', fontSize: '0.9rem' }}>
+                Mientras la caja esté cerrada no es posible cobrar ventas, registrar ingresos/egresos
+                manuales ni realizar arqueos. Ingresá el cambio inicial del cajón para habilitar la
+                operación del turno.
+              </p>
             </div>
-          </form>
-        )}
 
-        <h3 className="section-subtitle">Movimientos manuales de la sesión</h3>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Fecha/Hora</th>
-              <th>Tipo</th>
-              <th>Concepto</th>
-              <th className="num">Importe</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(estadoCaja?.movimientosManuales ?? []).map((m) => (
-              <tr key={m.id}>
-                <td>{formatearFechaHoraAR(m.fecha)}</td>
-                <td>{m.tipo === 'ingreso' ? 'Ingreso' : 'Egreso'}</td>
-                <td>{m.concepto}</td>
-                <td className="num">
-                  {m.tipo === 'egreso' ? '-' : '+'} {formatearMonedaARS(m.monto)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            <form
+              onSubmit={(e) => void manejarAbrirCaja(e)}
+              className="form-inline"
+              style={{ marginTop: '0.5rem' }}
+            >
+              <label>
+                Monto inicial en efectivo ($):
+                <input
+                  type="text"
+                  value={montoInicialInput}
+                  onChange={(e) => setMontoInicialInput(e.target.value)}
+                  placeholder="15000,00"
+                />
+              </label>
+              <button type="submit" className="btn-primary">
+                Abrir Caja
+              </button>
+            </form>
+          </div>
+        ) : (
+          <>
+            <form
+              onSubmit={(e) => void manejarAgregarMovimiento(e)}
+              className="form-stack"
+            >
+              <h3>Registrar ingreso o egreso manual</h3>
+              <div className="form-row">
+                <label>
+                  Tipo:
+                  <select
+                    value={tipoMov}
+                    onChange={(e) =>
+                      setTipoMov(e.target.value as 'ingreso' | 'egreso')
+                    }
+                  >
+                    <option value="egreso">Egreso / Retiro</option>
+                    <option value="ingreso">Ingreso de cambio</option>
+                  </select>
+                </label>
+                <label>
+                  Concepto:
+                  <input
+                    type="text"
+                    value={conceptoMov}
+                    onChange={(e) => setConceptoMov(e.target.value)}
+                    placeholder="Ej. Pago proveedor o cambio chico"
+                  />
+                </label>
+                <label>
+                  Monto ($):
+                  <input
+                    type="text"
+                    value={montoMovInput}
+                    onChange={(e) => setMontoMovInput(e.target.value)}
+                    placeholder="1500,00"
+                  />
+                </label>
+                <button type="submit" className="btn-secondary">
+                  Registrar Movimiento
+                </button>
+              </div>
+            </form>
+
+            <h3 className="section-subtitle">Movimientos manuales de la sesión</h3>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Fecha/Hora</th>
+                  <th>Tipo</th>
+                  <th>Concepto</th>
+                  <th className="num">Importe</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(estadoCaja?.movimientosManuales ?? []).map((m) => (
+                  <tr key={m.id}>
+                    <td>{formatearFechaHoraAR(m.fecha)}</td>
+                    <td>{m.tipo === 'ingreso' ? 'Ingreso' : 'Egreso'}</td>
+                    <td>{m.concepto}</td>
+                    <td className="num">
+                      {m.tipo === 'egreso' ? '-' : '+'} {formatearMonedaARS(m.monto)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
       </div>
 
       <div className="pos-card">
@@ -272,99 +298,116 @@ export function PanelCaja({
           Desglose real de cobros de ventas completadas y cálculo de diferencia de efectivo.
         </p>
 
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Medio de pago</th>
-              <th className="num">Total cobrado</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Efectivo (ventas)</td>
-              <td className="num">
-                {formatearMonedaARS(totalesPorMedio.efectivo)}
-              </td>
-            </tr>
-            <tr>
-              <td>Mercado Pago</td>
-              <td className="num">
-                {formatearMonedaARS(totalesPorMedio.mercado_pago)}
-              </td>
-            </tr>
-            <tr>
-              <td>Transferencia</td>
-              <td className="num">
-                {formatearMonedaARS(totalesPorMedio.transferencia)}
-              </td>
-            </tr>
-            <tr>
-              <td>Tarjeta de Débito</td>
-              <td className="num">
-                {formatearMonedaARS(totalesPorMedio.debito)}
-              </td>
-            </tr>
-            <tr>
-              <td>Tarjeta de Crédito</td>
-              <td className="num">
-                {formatearMonedaARS(totalesPorMedio.credito)}
-              </td>
-            </tr>
-            <tr>
-              <td>QR / Otros</td>
-              <td className="num">
-                {formatearMonedaARS(totalesPorMedio.qr + totalesPorMedio.otro)}
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        {!cajaAbierta ? (
+          <div
+            className="subcard-box"
+            style={{
+              padding: '1.25rem',
+              borderRadius: '0.65rem',
+              textAlign: 'center',
+              marginTop: '0.75rem',
+            }}
+          >
+            <p className="text-muted" style={{ margin: 0 }}>
+              🔒 <strong>Operaciones de arqueo y cierre bloqueadas:</strong> abrí un turno de caja en
+              el panel izquierdo para empezar a registrar cobros por medio de pago y habilitar el
+              arqueo de cierre.
+            </p>
+          </div>
+        ) : (
+          <>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Medio de pago</th>
+                  <th className="num">Total cobrado</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Efectivo (ventas)</td>
+                  <td className="num">
+                    {formatearMonedaARS(totalesPorMedio.efectivo)}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Mercado Pago</td>
+                  <td className="num">
+                    {formatearMonedaARS(totalesPorMedio.mercado_pago)}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Transferencia</td>
+                  <td className="num">
+                    {formatearMonedaARS(totalesPorMedio.transferencia)}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Tarjeta de Débito</td>
+                  <td className="num">
+                    {formatearMonedaARS(totalesPorMedio.debito)}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Tarjeta de Crédito</td>
+                  <td className="num">
+                    {formatearMonedaARS(totalesPorMedio.credito)}
+                  </td>
+                </tr>
+                <tr>
+                  <td>QR / Otros</td>
+                  <td className="num">
+                    {formatearMonedaARS(totalesPorMedio.qr + totalesPorMedio.otro)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
 
-        <div className="arqueo-box">
-          <div className="arqueo-line">
-            <span>Monto inicial:</span>
-            <strong>{formatearMonedaARS(montoInicialCentavos)}</strong>
-          </div>
-          <div className="arqueo-line">
-            <span>Efectivo esperado en cajón:</span>
-            <strong>{formatearMonedaARS(efectivoEsperado)}</strong>
-          </div>
-          <div className="arqueo-line">
-            <label htmlFor="efectivo-contado">
-              Efectivo físico contado ($):
-            </label>
-            <input
-              id="efectivo-contado"
-              type="text"
-              value={efectivoContadoInput}
-              onChange={(e) => setEfectivoContadoInput(e.target.value)}
-              disabled={!cajaAbierta}
-            />
-          </div>
-          <div className="arqueo-line destaque">
-            <span>Diferencia de efectivo:</span>
-            <strong
-              className={
-                diferenciaEfectivo < 0
-                  ? 'diff-negativa'
-                  : diferenciaEfectivo > 0
-                    ? 'diff-positiva'
-                    : ''
-              }
-            >
-              {formatearMonedaARS(diferenciaEfectivo)}
-            </strong>
-          </div>
+            <div className="arqueo-box">
+              <div className="arqueo-line">
+                <span>Monto inicial:</span>
+                <strong>{formatearMonedaARS(montoInicialCentavos)}</strong>
+              </div>
+              <div className="arqueo-line">
+                <span>Efectivo esperado en cajón:</span>
+                <strong>{formatearMonedaARS(efectivoEsperado)}</strong>
+              </div>
+              <div className="arqueo-line">
+                <label htmlFor="efectivo-contado">
+                  Efectivo físico contado ($):
+                </label>
+                <input
+                  id="efectivo-contado"
+                  type="text"
+                  value={efectivoContadoInput}
+                  onChange={(e) => setEfectivoContadoInput(e.target.value)}
+                />
+              </div>
+              <div className="arqueo-line destaque">
+                <span>Diferencia de efectivo:</span>
+                <strong
+                  className={
+                    diferenciaEfectivo < 0
+                      ? 'diff-negativa'
+                      : diferenciaEfectivo > 0
+                        ? 'diff-positiva'
+                        : ''
+                  }
+                >
+                  {formatearMonedaARS(diferenciaEfectivo)}
+                </strong>
+              </div>
 
-          {cajaAbierta && (
-            <button
-              type="button"
-              className="btn-primary full-width"
-              onClick={() => void manejarCerrarCaja()}
-            >
-              Cerrar Caja y Guardar Arqueo
-            </button>
-          )}
-        </div>
+              <button
+                type="button"
+                className="btn-primary full-width"
+                onClick={() => void manejarCerrarCaja()}
+              >
+                Cerrar Caja y Guardar Arqueo
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </section>
   );

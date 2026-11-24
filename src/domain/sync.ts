@@ -7,6 +7,7 @@ import type { RolUsuario } from './permisos.ts';
 
 export const ORDEN_TABLAS_SYNC = [
   'comercios',
+  'sucursales',
   'usuarios',
   'dispositivos',
   'sesiones_moviles',
@@ -28,6 +29,7 @@ export const ORDEN_TABLAS_SYNC = [
   'ventas_pagos',
   'compras',
   'compras_items',
+  'transferencias_sucursales',
   'movimientos_stock',
   'cuenta_corriente_movimientos',
   'auditoria',
@@ -38,11 +40,15 @@ export type TablaSincronizable = (typeof ORDEN_TABLAS_SYNC)[number];
 export const TABLAS_APPEND_ONLY: ReadonlySet<TablaSincronizable> = new Set([
   'auditoria',
   'movimientos_stock',
+  'transferencias_sucursales',
   'ventas',
   'ventas_items',
   'ventas_pagos',
   'caja_sesiones',
   'caja_movimientos',
+  'cuenta_corriente_movimientos',
+  'compras',
+  'compras_items',
 ]);
 
 export interface RegistroSincronizableBase {
@@ -133,39 +139,91 @@ export function resolverConflictoRegistro<T extends RegistroSincronizableBase>(
     );
   }
 
-  // 1. Tablas append-only (ventas, ventas_items, ventas_pagos, movimientos_stock, caja_*, auditoria)
+  // 1. Tablas append-only (ventas, ventas_items, ventas_pagos, movimientos_stock, caja_*, auditoria, etc.)
   if (TABLAS_APPEND_ONLY.has(tabla)) {
     if (tabla === 'ventas') {
       const estadoLocal = String(local.estado ?? 'completada');
       const estadoRemoto = String(remoto.estado ?? 'completada');
-      if (estadoLocal !== estadoRemoto) {
-        const ganador = estadoRemoto === 'anulada' ? 'remoto' : 'local';
-        const registroGanador = ganador === 'remoto' ? remoto : local;
-        return {
-          ganador,
-          registroResultante: { ...registroGanador },
-          huboConflicto: true,
-          reglaAplicada: 'append_only_transicion_estado',
-          detalleAuditoria: `Venta ${local.id}: prevalece estado 'anulada' (${ganador}).`,
-        };
-      }
-
       const factLocal = String(local.estado_facturacion ?? 'no_aplica');
       const factRemoto = String(remoto.estado_facturacion ?? 'no_aplica');
-      if (factLocal !== factRemoto) {
-        const ganador =
+
+      if (estadoLocal !== estadoRemoto || factLocal !== factRemoto) {
+        const comp = compararLastWriteWins(local, remoto);
+        const base = comp.ganador === 'remoto' ? { ...remoto } : { ...local };
+        const anulada =
+          estadoRemoto === 'anulada'
+            ? remoto
+            : estadoLocal === 'anulada'
+              ? local
+              : null;
+        const emitida =
           factRemoto === 'emitida'
-            ? 'remoto'
+            ? remoto
             : factLocal === 'emitida'
+              ? local
+              : null;
+
+        const fusionado: T = { ...base };
+        const fusionadoMut = fusionado as Record<string, unknown>;
+        if (anulada) {
+          fusionadoMut.estado = 'anulada';
+          if ('anulada_at' in anulada) {
+            fusionadoMut.anulada_at = anulada.anulada_at;
+          }
+          if ('anulada_por_usuario_id' in anulada) {
+            fusionadoMut.anulada_por_usuario_id = anulada.anulada_por_usuario_id;
+          }
+          if ('motivo_anulacion' in anulada) {
+            fusionadoMut.motivo_anulacion = anulada.motivo_anulacion;
+          }
+        }
+        if (emitida) {
+          fusionadoMut.estado_facturacion = 'emitida';
+          for (const campo of Object.keys(emitida)) {
+            if (
+              campo === 'cae' ||
+              campo.startsWith('arca_') ||
+              campo.startsWith('nota_credito_')
+            ) {
+              if (emitida[campo] !== null && emitida[campo] !== undefined) {
+                fusionadoMut[campo] = emitida[campo];
+              }
+            }
+          }
+        }
+        // Preservar también campos ARCA/NC de la contraparte si no existen en base
+        const otro = comp.ganador === 'remoto' ? local : remoto;
+        for (const campo of Object.keys(otro)) {
+          if (
+            (campo === 'cae' ||
+              campo.startsWith('arca_') ||
+              campo.startsWith('nota_credito_')) &&
+            (fusionadoMut[campo] === null ||
+              fusionadoMut[campo] === undefined) &&
+            otro[campo] !== null &&
+            otro[campo] !== undefined
+          ) {
+            fusionadoMut[campo] = otro[campo];
+          }
+        }
+
+        const ganador =
+          estadoRemoto === 'anulada'
+            ? 'remoto'
+            : estadoLocal === 'anulada'
               ? 'local'
-              : compararLastWriteWins(local, remoto).ganador;
-        const registroGanador = ganador === 'remoto' ? remoto : local;
+              : factRemoto === 'emitida'
+                ? 'remoto'
+                : factLocal === 'emitida'
+                  ? 'local'
+                  : comp.ganador;
+
         return {
           ganador,
-          registroResultante: { ...registroGanador },
+          registroResultante: fusionado,
           huboConflicto: true,
           reglaAplicada: 'append_only_transicion_estado',
-          detalleAuditoria: `Venta ${local.id}: prevalece estado_facturacion (${ganador}).`,
+          detalleAuditoria: `Venta ${local.id}: fusión no destructiva de estado (${String(fusionadoMut.estado ?? '')}) y facturación (${String(fusionadoMut.estado_facturacion ?? '')}).`,
         };
       }
     }
@@ -195,22 +253,8 @@ export function resolverConflictoRegistro<T extends RegistroSincronizableBase>(
     };
   }
 
-  // Si el registro local ya estaba sincronizado y no tenía cambios locales pendientes,
-  // aplicamos directamente la versión remota más nueva sin marcar conflicto.
-  if (!localEstabaPendiente) {
-    const comp = compararLastWriteWins(local, remoto);
-    const elegido = comp.ganador === 'remoto' ? remoto : local;
-    return {
-      ganador: comp.ganador,
-      registroResultante: { ...elegido },
-      huboConflicto: false,
-      reglaAplicada: comp.regla,
-      detalleAuditoria: `Actualización sin conflicto en ${tabla} (${local.id}).`,
-    };
-  }
-
-  // 2. Tabla usuarios: los cambios de rol, desactivación y reseteo de clave tienen
-  // prioridad sobre ediciones concurrentes (gana el cambio más restrictivo, PLAN.md §5).
+  // 2. Tabla usuarios: las reglas restrictivas y de seguridad aplican SIEMPRE
+  // (incluso si local no tenía cambios pendientes, p. ej. para no pisar clave_hash local con remoto sanitizado).
   if (tabla === 'usuarios') {
     const lww = compararLastWriteWins(local, remoto);
     const baseGanadora = lww.ganador === 'remoto' ? { ...remoto } : { ...local };
@@ -236,19 +280,62 @@ export function resolverConflictoRegistro<T extends RegistroSincronizableBase>(
     const puedeMovilRemoto = normalizarBooleanoSQLite(remoto.puede_vender_movil);
     const puedeMovilFinal = puedeMovilLocal && puedeMovilRemoto ? 1 : 0;
 
-    // Si un lado forzó debe_cambiar_clave = 1 y el otro no, preservar el hash de quien reseteó
-    let claveHashFinal = baseGanadora.clave_hash;
-    if (debeCambiarRemoto && !debeCambiarLocal) {
+    // Preservar clave_hash local si el remoto viene sanitizado (sin clave_hash)
+    const claveRemotaPresente =
+      typeof remoto.clave_hash === 'string' && remoto.clave_hash.length > 0;
+    let claveHashFinal =
+      baseGanadora.clave_hash ?? (claveRemotaPresente ? remoto.clave_hash : local.clave_hash);
+    if (!claveRemotaPresente && local.clave_hash) {
+      claveHashFinal = local.clave_hash;
+    } else if (debeCambiarRemoto && !debeCambiarLocal && claveRemotaPresente) {
       claveHashFinal = remoto.clave_hash;
-    } else if (debeCambiarLocal && !debeCambiarRemoto) {
+    } else if (debeCambiarLocal && !debeCambiarRemoto && local.clave_hash) {
       claveHashFinal = local.clave_hash;
     }
+
+    // Invalidación de PIN es monótona si alguno lo anuló explícitamente (o si falta en remoto cuando el otro lo borró)
+    const pinLocalNulo = local.pin_hash === null;
+    const pinRemotoNulo = remoto.pin_hash === null;
+    const pinHashFinal =
+      pinLocalNulo || pinRemotoNulo
+        ? null
+        : (baseGanadora.pin_hash ?? local.pin_hash ?? remoto.pin_hash ?? null);
+
+    // Monotonicidad de intentos fallidos y bloqueo temporal
+    const intentosLocal = Number(local.intentos_fallidos ?? 0) || 0;
+    const intentosRemoto = Number(remoto.intentos_fallidos ?? 0) || 0;
+    const intentosFinal = Math.max(intentosLocal, intentosRemoto);
+
+    const bloqLocal =
+      typeof local.bloqueado_hasta === 'string' && local.bloqueado_hasta.length > 0
+        ? local.bloqueado_hasta
+        : null;
+    const bloqRemoto =
+      typeof remoto.bloqueado_hasta === 'string' && remoto.bloqueado_hasta.length > 0
+        ? remoto.bloqueado_hasta
+        : null;
+    let bloqueadoHastaFinal: string | null = bloqLocal ?? bloqRemoto ?? null;
+    if (bloqLocal && bloqRemoto) {
+      const msLocal = Date.parse(bloqLocal);
+      const msRemoto = Date.parse(bloqRemoto);
+      bloqueadoHastaFinal =
+        !Number.isNaN(msLocal) && !Number.isNaN(msRemoto)
+          ? msLocal >= msRemoto
+            ? bloqLocal
+            : bloqRemoto
+          : bloqLocal >= bloqRemoto
+            ? bloqLocal
+            : bloqRemoto;
+    }
+
+    const deletedAtFinal = local.deleted_at ?? remoto.deleted_at ?? null;
 
     const huboDiferenciaRestrictiva =
       rolLocal !== rolRemoto ||
       activoLocal !== activoRemoto ||
       debeCambiarLocal !== debeCambiarRemoto ||
-      puedeMovilLocal !== puedeMovilRemoto;
+      puedeMovilLocal !== puedeMovilRemoto ||
+      (local.deleted_at ?? null) !== (remoto.deleted_at ?? null);
 
     const fusionado: T = {
       ...baseGanadora,
@@ -257,28 +344,76 @@ export function resolverConflictoRegistro<T extends RegistroSincronizableBase>(
       debe_cambiar_clave: debeCambiarFinal,
       puede_vender_movil: puedeMovilFinal,
       clave_hash: claveHashFinal,
-      deleted_at: local.deleted_at ?? remoto.deleted_at ?? null,
+      pin_hash: pinHashFinal,
+      intentos_fallidos: intentosFinal,
+      bloqueado_hasta: bloqueadoHastaFinal,
+      deleted_at: deletedAtFinal,
     };
 
     return {
       ganador: huboDiferenciaRestrictiva ? 'fusionado_restrictivo' : lww.ganador,
       registroResultante: fusionado,
-      huboConflicto: true,
+      huboConflicto: localEstabaPendiente && huboDiferenciaRestrictiva,
       reglaAplicada: huboDiferenciaRestrictiva
         ? 'usuarios_cambio_mas_restrictivo'
         : lww.regla,
-      detalleAuditoria: `Conflicto concurrente en usuario ${local.id}: rol=${rolMasRestrictivo}, activo=${activoFinal}, debe_cambiar_clave=${debeCambiarFinal}.`,
+      detalleAuditoria: `Fusión usuario ${local.id}: rol=${rolMasRestrictivo}, activo=${activoFinal}, debe_cambiar_clave=${debeCambiarFinal}.`,
+    };
+  }
+
+  // 2b. Sesiones móviles: 'revocada' es monótona (una sesión revocada no puede reactivarse).
+  if (tabla === 'sesiones_moviles') {
+    const estadoLocal = String(local.estado ?? 'activa');
+    const estadoRemoto = String(remoto.estado ?? 'activa');
+    if (estadoLocal === 'revocada' || estadoRemoto === 'revocada') {
+      const ganador = estadoRemoto === 'revocada' && estadoLocal !== 'revocada' ? 'remoto' : 'local';
+      const base = ganador === 'remoto' ? { ...remoto } : { ...local };
+      return {
+        ganador,
+        registroResultante: {
+          ...base,
+          estado: 'revocada',
+          deleted_at: local.deleted_at ?? remoto.deleted_at ?? null,
+        },
+        huboConflicto: localEstabaPendiente && estadoLocal !== estadoRemoto,
+        reglaAplicada: 'append_only_transicion_estado',
+        detalleAuditoria: `Sesión móvil ${local.id}: prevalece estado 'revocada'.`,
+      };
+    }
+  }
+
+  // Si el registro local ya estaba sincronizado y no tenía cambios locales pendientes,
+  // aplicamos directamente la versión remota más nueva sin marcar conflicto,
+  // preservando monotonicidad de deleted_at.
+  if (!localEstabaPendiente) {
+    const comp = compararLastWriteWins(local, remoto);
+    const elegido = comp.ganador === 'remoto' ? remoto : local;
+    const deletedAtFinal = local.deleted_at ?? remoto.deleted_at ?? null;
+    return {
+      ganador: comp.ganador,
+      registroResultante: {
+        ...elegido,
+        ...(deletedAtFinal !== undefined ? { deleted_at: deletedAtFinal } : {}),
+      },
+      huboConflicto: false,
+      reglaAplicada: comp.regla,
+      detalleAuditoria: `Actualización sin conflicto en ${tabla} (${local.id}).`,
     };
   }
 
   // 3. Resto de tablas maestras (productos, precios, clientes, proveedores, etc.):
-  // Last-Write-Wins por updated_at; empate desempata por device_id menor (PLAN.md §5).
+  // Last-Write-Wins por updated_at; empate desempata por device_id menor (PLAN.md §5),
+  // con precedencia monótona de deleted_at no nulo.
   const comp = compararLastWriteWins(local, remoto);
   const elegido = comp.ganador === 'remoto' ? remoto : local;
+  const deletedAtFinal = local.deleted_at ?? remoto.deleted_at ?? null;
 
   return {
     ganador: comp.ganador,
-    registroResultante: { ...elegido },
+    registroResultante: {
+      ...elegido,
+      ...(deletedAtFinal !== undefined ? { deleted_at: deletedAtFinal } : {}),
+    },
     huboConflicto: true,
     reglaAplicada: comp.regla,
     detalleAuditoria: `Conflicto LWW en ${tabla} (${local.id}): ganó ${comp.ganador} (regla=${comp.regla}, local.updated_at=${local.updated_at} [${local.device_id}] vs remoto.updated_at=${remoto.updated_at} [${remoto.device_id}]).`,

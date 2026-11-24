@@ -18,6 +18,7 @@ import {
   exportarAuditoriaAXlsx,
   exportarInformeGestionFase1AXlsx,
   exportarPedidoReposicionBajoStockAPdf,
+  exportarPedidoReposicionBajoStockAXlsx,
   inicializarComercioYSuperadmin,
   obtenerInformeGestionFase1,
   registrarMovimientoManualCaja,
@@ -423,14 +424,72 @@ describe('Tarea 4 — Informes de Fase 1, Ganancia Histórica, Stock Valorizado 
     );
     expect(pdfPorCategoria.resumen.total_productos_bajo_stock).toBe(1);
 
-    // Verificar que las 3 exportaciones a PDF quedaron auditadas con SHA-256 íntegro
-    const auditoriasPdf = consultarRegistrosAuditoria(db, actorSuperadmin, {
+    // 4. Exportar Excel (.xlsx) permitiendo elegir Proveedores, Categorías o Marcas
+    expect(() =>
+      exportarPedidoReposicionBajoStockAXlsx(db, actorCajero, {
+        criterio: 'proveedor',
+      })
+    ).toThrow(/PERMISO_DENEGADO/);
+
+    const xlsxPorProveedor = exportarPedidoReposicionBajoStockAXlsx(
+      db,
+      actorEncargado,
+      {
+        criterio: 'proveedor',
+      }
+    );
+    expect(xlsxPorProveedor.xlsxBytes[0]).toBe(0x50); // 'P'
+    expect(xlsxPorProveedor.xlsxBytes[1]).toBe(0x4b); // 'K'
+    const entradasXlsxProv = inspeccionarEntradasXlsx(
+      xlsxPorProveedor.xlsxBytes
+    );
+    expect(entradasXlsxProv['xl/workbook.xml']).toContain(
+      'Pedido por Proveedor'
+    );
+    expect(entradasXlsxProv['xl/workbook.xml']).toContain(
+      'Resumen Proveedores'
+    );
+    expect(entradasXlsxProv['xl/worksheets/sheet1.xml']).toContain(
+      'Distribuidora Norte S.A.'
+    );
+    expect(entradasXlsxProv['xl/worksheets/sheet1.xml']).toContain(
+      'Destornillador Phillips PH2'
+    );
+
+    const xlsxPorCategoria = exportarPedidoReposicionBajoStockAXlsx(
+      db,
+      actorEncargado,
+      {
+        criterio: 'categoria',
+      }
+    );
+    const entradasXlsxCat = inspeccionarEntradasXlsx(
+      xlsxPorCategoria.xlsxBytes
+    );
+    expect(entradasXlsxCat['xl/workbook.xml']).toContain(
+      'Pedido por Categoría'
+    );
+    expect(entradasXlsxCat['xl/workbook.xml']).toContain('Resumen Categorías');
+
+    const xlsxPorMarca = exportarPedidoReposicionBajoStockAXlsx(
+      db,
+      actorEncargado,
+      {
+        criterio: 'marca',
+      }
+    );
+    const entradasXlsxMarca = inspeccionarEntradasXlsx(xlsxPorMarca.xlsxBytes);
+    expect(entradasXlsxMarca['xl/workbook.xml']).toContain('Pedido por Marca');
+    expect(entradasXlsxMarca['xl/workbook.xml']).toContain('Resumen Marcas');
+
+    // Verificar que las 6 exportaciones (3 PDF + 3 Excel) quedaron auditadas con SHA-256 íntegro
+    const auditoriasExport = consultarRegistrosAuditoria(db, actorSuperadmin, {
       accion: 'informe_exportar',
     });
-    expect(auditoriasPdf.length).toBe(3);
+    expect(auditoriasExport.length).toBe(6);
     expect(verificarIntegridadAuditoriaDb(db, comercioId).integra).toBe(true);
 
-    // Verificar renderizado en PanelComprasProveedores
+    // Verificar renderizado en PanelComprasProveedores (con selector Excel y paginación 10 por página)
     const htmlCompras = renderToStaticMarkup(
       React.createElement(PanelComprasProveedores, {
         rolActivo: 'encargado',
@@ -465,7 +524,9 @@ describe('Tarea 4 — Informes de Fase 1, Ganancia Histórica, Stock Valorizado 
     expect(htmlCompras).toContain('Por Proveedor');
     expect(htmlCompras).toContain('Por Marca');
     expect(htmlCompras).toContain('Por Categoría');
+    expect(htmlCompras).toContain('Exportar Excel (.xlsx)');
     expect(htmlCompras).toContain('Exportar PDF');
+    expect(htmlCompras).toContain('(10 por página)');
     expect(htmlCompras).toContain('Distribuidora Norte S.A.');
   });
 });

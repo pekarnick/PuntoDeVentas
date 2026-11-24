@@ -192,15 +192,20 @@ export function registrarMovimientoManualCaja(
   return ejecutarEnTransaccion(db, () => {
     const sesion = db
       .prepare(
-        `SELECT id, estado FROM caja_sesiones
+        `SELECT id, usuario_id, estado FROM caja_sesiones
          WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
       )
       .get(params.cajaSesionId, actor.comercio_id) as
-      | { id: string; estado: 'abierta' | 'cerrada' }
+      | { id: string; usuario_id: string; estado: 'abierta' | 'cerrada' }
       | undefined;
 
     if (!sesion) {
       throw new Error('Sesión de caja no encontrada.');
+    }
+    if (sesion.usuario_id !== actor.usuario_id && actor.rol === 'cajero') {
+      throw new Error(
+        'CAJA_OTRO_OPERADOR: Solo el titular de la caja o un encargado/superadmin puede registrar movimientos en esta sesión.'
+      );
     }
     if (sesion.estado !== 'abierta') {
       throw new Error(
@@ -361,6 +366,15 @@ export function cerrarSesionCaja(
       params.cajaSesionId,
       params.efectivoContadoCentavos
     );
+
+    if (
+      estadoCalculado.sesion.usuario_id !== actor.usuario_id &&
+      actor.rol === 'cajero'
+    ) {
+      throw new Error(
+        'CAJA_OTRO_OPERADOR: Solo el titular de la caja o un encargado/superadmin puede cerrar esta sesión.'
+      );
+    }
 
     if (estadoCalculado.sesion.estado === 'cerrada') {
       throw new Error('CAJA_YA_CERRADA: Esta sesión de caja ya se encuentra cerrada.');

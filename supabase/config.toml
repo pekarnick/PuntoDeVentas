@@ -1,0 +1,2 @@
+[functions.emitir_comprobante_arca]
+verify_jwt = true

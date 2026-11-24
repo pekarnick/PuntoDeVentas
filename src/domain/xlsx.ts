@@ -11,6 +11,13 @@ export interface HojaXlsxInput {
   readonly filas: ReadonlyArray<ReadonlyArray<ValorCeldaXlsx>>;
 }
 
+export function neutralizarFormulaXlsx(valor: string): string {
+  if (/^[=+\-@\t\r]/.test(valor)) {
+    return `'${valor}`;
+  }
+  return valor;
+}
+
 function escaparXml(texto: string): string {
   return texto
     .replace(/&/g, '&amp;')
@@ -65,8 +72,9 @@ function generarXmlHoja(hoja: HojaXlsxInput): string {
           `<c r="${refCelda}" t="b"${atributoEstilo}><v>${valor ? 1 : 0}</v></c>`
         );
       } else {
+        const textoSeguro = neutralizarFormulaXlsx(String(valor));
         celdasXml.push(
-          `<c r="${refCelda}" t="inlineStr"${atributoEstilo}><is><t>${escaparXml(String(valor))}</t></is></c>`
+          `<c r="${refCelda}" t="inlineStr"${atributoEstilo}><is><t>${escaparXml(textoSeguro)}</t></is></c>`
         );
       }
     }

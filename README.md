@@ -9,7 +9,7 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.2-yellowgreen.svg)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL-lightblue.svg)](https://www.sqlite.org/)
 [![Supabase](https://img.shields.io/badge/Supabase-Postgres_&_RLS-emerald.svg)](https://supabase.com/)
-[![Vitest](https://img.shields.io/badge/Tests-47%20passing-brightgreen.svg)](https://vitest.dev/)
+[![Vitest](https://img.shields.io/badge/Tests-85%20passing-brightgreen.svg)](https://vitest.dev/)
 
 ---
 
@@ -49,35 +49,40 @@ Este sistema fue concebido como una solución integral y robusta para resolver l
 
 ### 🛒 Caja y Ventas
 - **Operación ultra rápida:** Optimizado para lectores de código de barras y teclado sin ratón (`F1` a `F9`, `Escape`).
+- **Control intuitivo de Caja Abierta / Cerrada:** La sección **Caja y Arqueo** está ubicada junto a **Venta (Mostrador)** con indicador en vivo (`🟢 Caja y Arqueo` / `🔴 Caja y Arqueo (Cerrada)`). Si la caja está cerrada, se bloquean los cobros, movimientos manuales y arqueos, ofreciendo en la pantalla de venta un formulario directo para abrir el turno en el acto.
 - **Pagos múltiples combinados (`F9`):** Cobro fraccionado en varios medios (Efectivo, Mercado Pago, Transferencia, Débito, Crédito, QR, Cuenta Corriente u Otros) con botón *"Completar resto"* y validación matemática de suma exacta.
 - **Lectura de balanzas comerciales EAN-13:** Decodificación automática de etiquetas con prefijo `20` (peso en gramos) y prefijo `21` (importe en pesos).
 - **Ventas inmutables (Append-Only):** Las ventas no se editan ni se eliminan; se anulan mediante transacciones compensatorias auditadas.
 - **Tickets y comprobantes:** Emisión en formato térmico ESC/POS y comprobante digital compartible por WhatsApp.
 
-### 📦 Gestión de Stock y Catálogo
-- **Stock derivado de movimientos:** El stock no es un campo modificable a mano; se calcula dinámicamente como la suma estricta de sus movimientos (compras, ventas, anulaciones y ajustes auditados).
+### 📦 Gestión de Stock, Sucursales y Catálogo
+- **Stock derivado de movimientos:** El stock no es un campo modificable a mano; se calcula dinámicamente como la suma estricta de sus movimientos (compras, ventas, anulaciones, transferencias y ajustes auditados).
+- **Administración de Sucursales y Migración de Mercadería:** Creación de múltiples sucursales o depósitos (con *"Casa Central"* por defecto), selector de sucursal activa por terminal, visualización exacta de dónde se encuentran las unidades de cada producto (`📍 Casa Central: X · Sucursal 2: Y`) y migración atómica de productos entre sucursales (individual o todo el stock de origen en 1 clic).
+- **Panel de Armado de Combos con Stock Inteligente:** Configuración de combos/promociones con componentes, cantidades requeridas y precio especial de venta. El stock disponible del combo se calcula automáticamente en base al componente de menor existencia, y cada venta descuenta automáticamente las unidades correspondientes de cada componente.
 - **Imágenes WebP optimizadas:** Compresión automática local con Sharp (imagen principal `≤ 150 KB` y miniatura `_thumb.webp ≤ 25 KB`), eliminación de metadatos GPS/EXIF y sincronización asíncrona hacia Supabase Storage.
 - **Edición ágil de catálogo:** Actualización rápida de precios, costos, nombres y `stock_minimo` directamente desde la grilla.
-- **Combos y Variantes:** Artículos compuestos cuyo stock se calcula a partir de los insumos o productos componentes.
 - **Múltiples listas de precios:** Manejo de precios mayoristas, minoristas y promocionales.
 - **Importación masiva CSV:** Tolerante a códigos compartidos, omisión de códigos inexistentes (`0`, `-`, `S/C`) y reactivación automática de productos dados de baja.
 
-### 💼 Compras, Proveedores y Clientes
+### 💼 Compras, Pedidos Automáticos en PDF, Proveedores y Clientes
+- **Listas automáticas de pedido por Stock Bajo (Exportación PDF):** Detección automática de artículos con `stock_actual <= stock_minimo`, agrupados **por Proveedor**, **por Marca** y **por Categoría**, con exportación automática en **PDF** lista para enviar al proveedor y botón de carga en 1 clic al formulario de compra.
 - **Cuentas corrientes:** Control de saldo deudor/acreedor y validación de límite de crédito para clientes.
 - **Validación CUIT Módulo 11:** Verificación algorítmica de CUIT/CUIL tanto de clientes como de proveedores.
 - **Actualización masiva de precios:** Ajustes porcentuales o por importe fijo con reglas de redondeo rioplatense configurables (al entero, decenas o cientos).
-- **Libros de IVA en Excel (.xlsx):** Generación de Libro IVA Ventas y Libro IVA Compras listo para el contador.
+- **Informes de Gestión y Libros de IVA en Excel (.xlsx):** Tablero en tiempo real filtrable por sucursal o consolidado (Total Facturado, Ganancia Bruta Real con costo histórico, Margen de Rentabilidad, Ticket Promedio, Distribución de Cobranza, Stock Valorizado con Ganancia Proyectada y Libro IVA Ventas/Compras exportable a `.xlsx`).
 
 ### 📱 Terminal Móvil Web (`/web-pos`)
-- **PWA sin instalación:** Aplicación ligera accesible desde navegador móvil mediante QR público seguro.
+- **PWA sin instalación y publicación en 1 clic en Netlify:** Aplicación ligera accesible desde navegador móvil mediante QR público seguro, con bloqueo automático de indexación en buscadores (`robots.txt` + `X-Robots-Tag: noindex`).
+- **Comprobante en ventana modal instantánea y barra rápida de cobro:** Al confirmar una venta, la vista sube automáticamente y muestra el ticket en un modal centrado a pantalla completa (con botones para WhatsApp, Imprimir y Nueva Venta), además de una barra flotante superior (`🛒 N ítems · $ Total` + *"Ir a Cobrar ↓"*).
 - **Escáner de código de barras:** Lectura por cámara mediante API nativa `BarcodeDetector` con linterna integrada.
 - **Seguridad perimetral:** RLS en servidor, catálogo proyectado sin costos (`productos_venta`), autorización individual `puede_vender_movil` y cierre forzado ante revocación de sesión.
 - **Idempotencia transaccional:** Cada venta genera un UUIDv7 en el dispositivo para impedir duplicaciones por cortes de red.
 
 ### 🔒 Auditoría Criptográfica y Seguridad
 - **Hash encadenado SHA-256:** Cada cambio en el sistema genera un registro inmutable en la tabla `auditoria` encadenando `hash = SHA-256(hash_prev + payload)`.
-- **Autenticación robusta:** Almacenamiento de contraseñas mediante derivación de clave Argon2id.
-- **Roles y Permisos:** `superadmin` (control total y auditoría), `encargado` (gestión de stock, precios y compras) y `cajero` (operación exclusiva de venta y caja).
+- **Autenticación robusta y Asistente de Primer Uso:** En instalaciones nuevas, un asistente guiado permite al dueño crear su comercio y contraseña personal (`superadmin`) sin claves de fábrica hardcodeadas. Las contraseñas se derivan con **Argon2id**, el sistema aplica bloqueo temporal ante intentos fallidos y revoca automáticamente las sesiones móviles al cambiar claves, roles o estados.
+- **Roles y Permisos:** `superadmin` (control total y auditoría), `encargado` (gestión de stock, precios, compras y límites de crédito) y `cajero` (operación exclusiva de venta y su propia caja).
+- **Integridad y Exportaciones Seguras:** Neutralización de fórmulas en `.xlsx` (`=`, `+`, `-`, `@`), eliminación de bytes de control en tickets ESC/POS, validación SHA-256 + `limitInputPixels` en imágenes y copias de seguridad sanitizadas (sin tokens ni hashes de PIN).
 
 ### 🖥️ Experiencia de Usuario
 - **Paginación inteligente:** Listados de 10 elementos por página en todas las pantallas operativas para máxima fluidez.
@@ -134,18 +139,24 @@ El proyecto sigue 20 principios rectores definidos en `PLAN.md`:
 ```text
 PuntoDeVentas/
 ├── data/                             # Base de datos SQLite local (pos_local.db) e identidad
-├── docs/                             # Documentación técnica y registro de decisiones de arquitectura
-│   └── decisiones.md
+├── docs/                             # Documentación técnica y Manual de Usuario modular
+│   ├── decisiones.md                 # Registro de decisiones de arquitectura
+│   └── manual/                       # Manual de Usuario completo (10 módulos + índice)
 ├── migrations/                       # Migraciones SQL versionadas para SQLite local
 │   ├── 001_esquema_inicial.sql
 │   ├── 002_sync_imagenes_y_config_backup.sql
 │   ├── 003_venta_movil_sesiones.sql
 │   ├── 004_arca_y_extras_fase4.sql
-│   └── 005_firebase_multinube.sql
+│   ├── 005_firebase_multinube.sql
+│   ├── 006_netlify_despliegue.sql
+│   ├── 007_sucursales_y_transferencias.sql
+│   ├── 008_endurecimiento_seguridad_p0.sql
+│   └── 009_endurecimiento_seguridad_p1.sql
 ├── packages/
 │   └── domain/                       # Biblioteca de lógica pura de negocio (@pos/domain)
 │       └── src/
 │           ├── arca_fase4.ts         # Facturación ARCA, QR oficial RG 4892/2020 y balanzas EAN-13
+│           ├── despliegue_web.ts     # Publicación segura de /web-pos y bloqueo anti-indexación
 │           ├── gestion_fase3.ts      # CUIT módulo 11, redondeo y listas de precio
 │           ├── totales.ts            # Cálculo de totales, IVA, descuentos y pagos combinados
 │           └── venta_movil.ts        # QR SVG, validación de URLs públicas y comprobantes
@@ -155,32 +166,42 @@ PuntoDeVentas/
 │   │   ├── arca_fase4_repo.ts
 │   │   ├── backup_repo.ts
 │   │   ├── gestion_fase3_repo.ts
+│   │   ├── informes_repo.ts
 │   │   ├── repositorios.ts
+│   │   ├── sucursales_repo.ts
 │   │   └── venta_movil_repo.ts
-│   ├── domain/                       # Exportaciones y funciones de dominio para la app
+│   ├── domain/                       # Exportaciones y funciones puras (sucursales, PDF, pedidos, informes)
 │   ├── features/                     # Módulos y pantallas del sistema
 │   │   ├── auditoria/                # Registro inmutable con verificación de hash encadenado
+│   │   ├── auth/                     # Asistente de Primer Uso, Login Argon2id y cambio de clave
+│   │   ├── caja/                     # Apertura obligatoria, ingresos/egresos y arqueo por medio
 │   │   ├── clientes/                 # Padrón de clientes y cuentas corrientes
-│   │   ├── compras/                  # Registro de compras y proveedores
-│   │   ├── configuracion/            # Sincronización, backups, QR móvil, ARCA y multinube
-│   │   ├── informes/                 # Rentabilidad, stock valorizado, alertas y exportación Excel
-│   │   ├── productos/                # Catálogo, precios, costos, stock mínimo y fotos
+│   │   ├── compras/                  # Compras, proveedores y pedidos PDF de stock bajo
+│   │   ├── configuracion/            # Sincronización, backups, QR móvil, Netlify, ARCA y multinube
+│   │   ├── informes/                 # Tablero en tiempo real, stock valorizado, sucursales y Libro IVA
+│   │   ├── productos/                # Catálogo, sucursales, migración de stock, combos y fotos WebP
 │   │   ├── usuarios/                 # Usuarios, roles Argon2id y permisos móviles
-│   │   └── venta/                    # Pantalla principal de caja POS con pagos F9
-│   ├── sync/                         # Motor de sincronización bidireccional (Supabase / Firebase)
+│   │   └── venta/                    # Pantalla principal de caja POS con pagos F9 y combos
+│   ├── sync/                         # Motor de sincronización (Supabase / Firebase) y desplegador Netlify
 │   │   ├── adaptador_firebase.ts
-│   │   └── motor_sync.ts
-│   ├── App.tsx                       # Contenedor raíz con selector de temas y navegación
+│   │   ├── desplegador_netlify.ts
+│   │   ├── motor_sync.ts
+│   │   └── zip_ligero.ts
+│   ├── App.tsx                       # Contenedor raíz con selector de sucursal, estado de caja y temas
 │   └── styles.css                    # Estilos globales y paleta de modo oscuro/claro
 ├── src-tauri/                        # Configuración y backend nativo de Tauri 2 (Rust)
 ├── supabase/                         # Recursos para la nube de Supabase
+│   ├── config.toml                   # Configuración de Edge Functions (verify_jwt = true)
+│   ├── esquema_completo_unificado.sql # Script único idempotente (001 a 005) para SQL Editor
 │   ├── functions/                    # Edge Functions aisladas (ej. emisión ARCA)
-│   └── migrations/                   # Migraciones SQL para Postgres con RLS
+│   └── migrations/                   # Migraciones SQL para Postgres con RLS (001 a 005)
+├── firestore.rules                   # Reglas estrictas de Cloud Firestore (Firebase Auth + claims)
+├── storage.rules                     # Reglas estrictas de Firebase Storage (WebP <= 200 KB)
 ├── web-pos/                          # Aplicación Web Progresiva (PWA) de Venta Móvil
 │   ├── index.html
 │   ├── manifest.webmanifest
 │   └── src/
-│       ├── WebPosApp.tsx             # Terminal móvil con escáner, carrito, WhatsApp y caja
+│       ├── WebPosApp.tsx             # Terminal móvil con escáner, modal de ticket, WhatsApp y caja
 │       └── estilos_web_pos.css
 ├── AGENTS.md                         # Guía de desarrollo y reglas inviolables para agentes IA
 ├── PLAN.md                           # Plan maestro y especificación técnica por fases
@@ -194,19 +215,31 @@ PuntoDeVentas/
 
 ## 💻 Instalación y Puesta en Marcha
 
-### Requisitos Previos
+### Opción A — Para Comercios (Instalador de Windows, sin conocimientos técnicos)
+1. Descargá el instalador para Windows (`.msi` o `-setup.exe`) desde la sección **Releases** de GitHub.
+2. Ejecutá el instalador (**Siguiente → Instalar**). No necesitás instalar Node.js, bases de datos ni programas adicionales.
+3. Al abrir el sistema por primera vez, el **Asistente de Primer Uso** te pedirá:
+   - El nombre de tu comercio (y CUIT/condición fiscal opcional).
+   - Tu usuario y contraseña segura de dueño (**Superadmin**, mínimo 8 caracteres).
+4. ¡Listo! Ya podés cargar productos, abrir la caja y vender **100% sin internet**. Podés consultar el paso a paso completo en [docs/manual/01_primeros_pasos_y_login.md](docs/manual/01_primeros_pasos_y_login.md).
+
+---
+
+### Opción B — Para Desarrolladores (desde código fuente)
+
+#### Requisitos Previos
 - **Node.js:** Versión 20 o 22 LTS (se recomienda 22+ para soporte nativo de `node:sqlite`).
 - **NPM:** Incluido con Node.js.
 - **Rust y Cargo:** (Opcional, únicamente requerido para compilar el instalador nativo de Tauri 2 en Windows).
 
-### 1. Clonar el Repositorio e Instalar Dependencias
+#### 1. Clonar el Repositorio e Instalar Dependencias
 ```bash
 git clone https://github.com/tu-usuario/punto-de-ventas.git
 cd punto-de-ventas
 npm install
 ```
 
-### 2. Iniciar en Modo Desarrollo (Navegador / Servidor Local)
+#### 2. Iniciar en Modo Desarrollo (Navegador / Servidor Local)
 El proyecto incluye un servidor de desarrollo integrado que gestiona la base SQLite local y el procesamiento de imágenes:
 ```bash
 npm run dev
@@ -214,19 +247,19 @@ npm run dev
 - La aplicación de escritorio estará disponible en: `http://localhost:5173`
 - La terminal móvil estará disponible en: `http://localhost:5173/web-pos`
 
-### 3. Ejecutar Pruebas Automatizadas
-Verifica que las 47 pruebas unitarias y de integración se ejecuten con éxito:
+#### 3. Ejecutar Pruebas Automatizadas
+Verifica que las 85 pruebas unitarias y de integración (16 archivos) se ejecuten con éxito:
 ```bash
 npm test
 ```
 
-### 4. Compilar para Producción (Web / Dist)
+#### 4. Compilar para Producción (Web / Dist)
 Valida los tipos TypeScript y genera los archivos estáticos optimizados tanto para el POS de escritorio como para la PWA de `/web-pos`:
 ```bash
 npm run build
 ```
 
-### 5. Compilar la Aplicación de Escritorio con Tauri 2 (Windows)
+#### 5. Compilar la Aplicación de Escritorio con Tauri 2 (Windows)
 ```bash
 npm run tauri dev      # Para ejecutar la ventana nativa de Tauri en desarrollo
 npm run tauri build    # Para generar el ejecutable .exe / instalador de Windows
@@ -255,36 +288,36 @@ La pantalla principal de caja fue diseñada para operarse al 100% mediante tecla
 
 ## ⚙️ Configuraciones Avanzadas
 
-### Sincronización con Supabase
+### Sincronización con Supabase (Segura con RLS + Supabase Auth)
 1. Ingresá a la sección **Configuración** en el menú superior del POS.
-2. Ingresá la **URL del proyecto Supabase** (ej. `https://xxxx.supabase.co`) y la **Anon Key (clave pública)**.
-3. Hacé clic en **"Probar Conexión"** y **"Guardar Configuración"**.
-4. Podés activar la **Sincronización Automática** (intervalo configurable entre 10 y 600 segundos).
-5. Las migraciones requeridas para Postgres se encuentran en el directorio `/supabase/migrations`. Podés utilizar el botón *"📋 Copiar SQL actualización Supabase"* en pantalla para replicar el esquema.
+2. Ingresá la **URL del proyecto Supabase** (ej. `https://xxxx.supabase.co`) y la **Anon Key (clave pública)** — nunca la `service_role`.
+3. Ejecutá en el **SQL Editor** de Supabase el script unificado (`supabase/esquema_completo_unificado.sql`, migraciones `001` a `005`) que podés copiar en 1 clic desde **📖 Ayuda y Manual** o **Configuración**. Las políticas RLS exigen usuarios autenticados (`TO authenticated`) y validan `comercio_id` y `rol` desde los claims firmados del JWT (`app_metadata`).
+4. Creá tu usuario en **Supabase Authentication → Users** (asignando `comercio_id` y `rol` en `raw_app_meta_data`) e iniciá sesión en la nube desde **Configuración** (el token JWT queda únicamente en memoria; la contraseña de la nube nunca se guarda en SQLite y la PC sigue operando 100% offline).
+5. Podés activar la **Sincronización Automática** (intervalo configurable entre 10 y 600 segundos). Guía completa en [docs/manual/10_configuracion_y_bases_remotas.md](docs/manual/10_configuracion_y_bases_remotas.md).
 
 ### Venta Móvil Web PWA (`/web-pos`)
 1. En **Configuración -> Venta Móvil**, activá la casilla *"Habilitar venta móvil web"*.
-2. Configurá la **URL pública** donde está alojada tu PWA (debe ser HTTPS o localhost para desarrollo, sin tokens ni secretos en la URL).
-3. El sistema generará automáticamente el **Código QR SVG** oficial. Podés imprimirlo o copiar la dirección para que el personal lo escanee desde su celular.
-4. En **Administración de Usuarios**, asigná el permiso *"Puede vender por móvil"* a los usuarios autorizados.
-5. El panel muestra todas las sesiones móviles activas en tiempo real, permitiendo revocar cualquier sesión al instante.
+2. Podés publicar la PWA en Netlify en 1 clic (el token de Netlify se mantiene únicamente en memoria efímera durante la sesión y nunca se guarda en SQLite ni en backups) o configurar tu **URL pública HTTPS** (sin tokens ni secretos en la URL).
+3. El sistema generará automáticamente el **Código QR SVG** oficial para que el personal lo escanee desde su celular.
+4. En **Administración de Usuarios**, asigná el permiso *"Puede vender por móvil"* a los usuarios autorizados. En `/web-pos`, el vendedor autentica contra **Supabase Auth** (nunca se descargan hashes ni tablas de usuarios).
+5. El panel muestra todas las sesiones móviles activas en tiempo real y revoca automáticamente las sesiones si cambia la contraseña, el rol o se desactiva el usuario.
 
 ### Facturación Electrónica ARCA (ex-AFIP)
 1. ARCA se encuentra **desactivada por defecto**.
 2. Para activarla, habilitá el interruptor en **Configuración -> Facturación Electrónica**.
 3. Seleccioná el entorno (**Homologación / Testing** o **Producción**) e ingresá el Punto de Venta fiscal y CUIT del comercio.
-4. Las llamadas de autorización se despachan de forma segura hacia la Edge Function de Supabase (`supabase/functions/emitir_comprobante_arca`), evitando que certificados privados residan en las terminales.
-5. Si se produce un corte de internet, el sistema guarda la venta como *"Pendiente"* y la reintenta automáticamente al restablecer el servicio.
+4. Las llamadas de autorización se despachan con JWT verificado (`verify_jwt = true` y validación de pertenencia a `comercio_id`) hacia la Edge Function de Supabase (`supabase/functions/emitir_comprobante_arca`), prohibiendo simuladores en `produccion` y evitando que certificados privados residan en las terminales.
+5. Si se produce un corte de internet, el sistema guarda la venta como *"Pendiente"* y la reintenta automáticamente con backoff exponencial hasta `MAX_REINTENTOS_ARCA = 5`.
 
 ### Multinube Opcional (Firebase Firestore / Storage)
 El sistema incluye arquitectura multinube configurable:
 - Permite operar en modo `supabase`, `firebase` o `ambos` (espejo redundante).
-- Para Firebase, se configuran el `Project ID`, `Storage Bucket` y la `API Key Web Pública` cumpliendo la Regla 8 (nunca claves privadas de servicio en la terminal).
+- Para Firebase, se configuran el `Project ID`, `Storage Bucket` y la `API Key Web Pública`, iniciando sesión con **Firebase Auth** (el proyecto incluye las reglas estrictas en `firestore.rules` y `storage.rules` con validación de `request.auth != null` y custom claims `comercio_id`/`rol`).
 
 ### Copias de Seguridad y Restauración
-- **Backups Atómicos:** Generación de copias completas mediante la directiva nativa `VACUUM INTO` de SQLite, garantizando consistencia total sin frenar la actividad de la caja.
+- **Backups Atómicos y Sanitizados:** Generación de copias completas mediante `VACUUM INTO` de SQLite sobre archivo temporal y limpieza automática de datos sensibles (`netlify_token`, `sesiones_moviles`, `pin_hash`) antes de guardar el `.db.bak`.
 - **Backups Automáticos:** Resguardo diario programado y copia de seguridad preventiva antes de cualquier restauración.
-- **Verificación de Integridad:** Cada restauración valida el encabezado SQLite, `PRAGMA integrity_check` y la cadena criptográfica SHA-256 de auditoría.
+- **Verificación Estricta de Integridad:** Cada restauración abre el archivo en solo lectura (`PRAGMA query_only = ON`, `trusted_schema = OFF`), valida el encabezado SQLite, `PRAGMA integrity_check`, coincidencia de `comercio_id`, cadena criptográfica SHA-256 de auditoría no vacía, supervivencia de al menos un `superadmin` activo y `PRAGMA foreign_key_check`.
 
 ---
 
@@ -296,16 +329,19 @@ El proyecto posee una suite completa de pruebas unitarias y de integración que 
 npm test
 ```
 
-### Cobertura de Pruebas:
+### Cobertura de Pruebas (12 suites / 58 tests):
+- `packages/domain/src/__tests__/zip.test.ts`: Empaquetado ZIP nativo y archivos anti-indexación (`robots.txt`, `_headers`, `_redirects`).
 - `src/domain/__tests__/dominio.test.ts`: Totales, IVA, redondeos, CUIT módulo 11 y pagos combinados.
 - `src/db/__tests__/esquema_y_stock.test.ts`: Verificación de esquema SQLite y cálculo estricto de stock mediante movimientos.
 - `src/db/__tests__/usuarios_auth_y_caja.test.ts`: Autenticación Argon2id, roles y control de caja.
 - `src/db/__tests__/sync_y_backups.test.ts`: Motor de sincronización, integridad de backups y recuperación ante desastres.
 - `src/db/__tests__/gestion_fase3.test.ts`: Proveedores, compras, cuentas corrientes y listas de precio.
 - `src/db/__tests__/venta_movil.test.ts`: Generación de QR, RPC de venta móvil y control de sesiones.
-- `src/db/__tests__/arca_fase4.test.ts`: Comprobantes fiscales ARCA, notas de crédito, balanzas EAN-13, combos y variantes.
-- `src/db/__tests__/informes_y_excel.test.ts`: Generación de Libro IVA y reportes contables.
+- `src/db/__tests__/arca_fase4.test.ts`: Comprobantes fiscales ARCA, notas de crédito, balanzas EAN-13, combos con stock inteligente y descuento de componentes.
+- `src/db/__tests__/informes_y_excel.test.ts`: Tablero de métricas, Libro IVA, pedidos de reposición de stock bajo en PDF (por proveedor, marca y categoría) y reportes contables.
 - `src/db/__tests__/venta_imagenes_y_productos.test.ts`: Procesamiento WebP con Sharp y miniaturas.
+- `src/db/__tests__/desplegador_netlify.test.ts`: Publicación automática de `/web-pos` en Netlify y seguridad perimetral.
+- `src/db/__tests__/sucursales_caja_y_movil.test.ts`: Administración de sucursales, stock por ubicación, migración atómica entre locales e informes filtrados por sucursal.
 
 ---
 

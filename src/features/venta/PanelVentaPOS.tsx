@@ -17,6 +17,7 @@ import {
   calcularResumenCarritoPOS,
   detectarEscaneoRafaga,
   filtrarSugerenciasCatalogoPOS,
+  quitarComponentesDeCarrito,
   resolverAtajoTecladoPOS,
   sanitizarProductoCatalogoParaPOS,
   type EventoTeclaLector,
@@ -43,6 +44,7 @@ import {
   parsearCodigoBarrasBalanza,
 } from '../../domain/arca_fase4.ts';
 import type { ClienteConSaldoUI } from '../clientes/PanelClientesCuentaCorriente.tsx';
+import type { EstadoCajaServidorUI } from '../caja/PanelCaja.tsx';
 import type { EstadoConfiguracionArcaDTO } from '../configuracion/PanelConfiguracionSync.tsx';
 
 export interface ListaPrecioUI {
@@ -97,6 +99,8 @@ export interface PanelVentaPOSProps {
   readonly configArca?: EstadoConfiguracionArcaDTO | null;
   readonly listasPrecioDisponibles?: readonly ListaPrecioUI[];
   readonly combosDisponibles?: readonly ComboPromocionUI[];
+  readonly estadoCaja?: EstadoCajaServidorUI | null;
+  readonly onIrACaja?: () => void;
   readonly onDatosActualizados?: () => void;
 }
 
@@ -168,12 +172,24 @@ export function PanelVentaPOS({
   configArca = null,
   listasPrecioDisponibles = [],
   combosDisponibles = [],
+  estadoCaja,
+  onIrACaja,
   onDatosActualizados,
 }: PanelVentaPOSProps): React.ReactElement {
+  const cajaCerradaBloqueada =
+    estadoCaja !== undefined &&
+    (estadoCaja === null || estadoCaja.sesion.estado !== 'abierta');
+  const [montoAperturaRapidaInput, setMontoAperturaRapidaInput] =
+    useState('15000,00');
+  const [abriendoCajaRapido, setAbriendoCajaRapido] = useState(false);
+
   const [catalogo, setCatalogo] = useState<ProductoCatalogoVenta[]>(() =>
     catalogoInicial.map((p) => sanitizarProductoCatalogoParaPOS(p))
   );
   const [carrito, setCarrito] = useState<ItemCarritoPOS[]>([]);
+  const [combosEnCarrito, setCombosEnCarrito] = useState<
+    Array<{ uid: string; combo: ComboPromocionUI }>
+  >([]);
   const [entradaLector, setEntradaLector] = useState('');
   const [indiceSugerenciaActiva, setIndiceSugerenciaActiva] = useState(0);
   const [desplegableAbierto, setDesplegableAbierto] = useState(true);
@@ -196,6 +212,7 @@ export function PanelVentaPOS({
   // Pagos mixtos / combinados y cliente (Cuenta Corriente Fase 3)
   const [clienteSeleccionadoId, setClienteSeleccionadoId] =
     useState<string>('');
+  const [busquedaClienteCobro, setBusquedaClienteCobro] = useState<string>('');
   const [medioPrincipal, setMedioPrincipal] = useState<MedioPago>('efectivo');
   const [modoPagoMixto, setModoPagoMixto] = useState(false);
   const [pagosCombinadosUI, setPagosCombinadosUI] = useState<
@@ -235,7 +252,7 @@ export function PanelVentaPOS({
 
   const [ventaAAnularId, setVentaAAnularId] = useState<string | null>(null);
   const [motivoAnulacion, setMotivoAnulacion] = useState('');
-  const [autorizadorUsuario, setAutorizadorUsuario] = useState('carlos');
+  const [autorizadorUsuario, setAutorizadorUsuario] = useState('');
   const [autorizadorClave, setAutorizadorClave] = useState('');
 
   const [mensajeEstado, setMensajeEstado] = useState<string | null>(null);
@@ -254,6 +271,34 @@ export function PanelVentaPOS({
   const sugerencias = useMemo(
     () => filtrarSugerenciasCatalogoPOS(catalogo, entradaLector, 8),
     [catalogo, entradaLector]
+  );
+
+  // Combos que coinciden con la búsqueda (por nombre, descripción, código de barras o nombre de sus productos componentes)
+  const sugerenciasCombos = useMemo(() => {
+    const q = entradaLector.trim().toLowerCase();
+    if (!q) return [];
+    return combosDisponibles
+      .filter(
+        (c) =>
+          c.nombre.toLowerCase().includes(q) ||
+          (c.descripcion && c.descripcion.toLowerCase().includes(q)) ||
+          (c.codigo_barras && c.codigo_barras.toLowerCase().includes(q)) ||
+          c.items.some((it) => it.producto_nombre.toLowerCase().includes(q))
+      )
+      .slice(0, 5);
+  }, [combosDisponibles, entradaLector]);
+
+  const opcionesDesplegable = useMemo<
+    ReadonlyArray<
+      | { readonly tipo: 'combo'; readonly combo: ComboPromocionUI }
+      | { readonly tipo: 'producto'; readonly prod: ProductoCatalogoVenta }
+    >
+  >(
+    () => [
+      ...sugerenciasCombos.map((combo) => ({ tipo: 'combo' as const, combo })),
+      ...sugerencias.map((prod) => ({ tipo: 'producto' as const, prod })),
+    ],
+    [sugerenciasCombos, sugerencias]
   );
 
   let descuentoGlobalCentavos = 0;
@@ -461,15 +506,21 @@ export function PanelVentaPOS({
       return;
     }
 
-    // 2. Si hay sugerencias en el desplegable, Enter selecciona la opción resaltada actualmente
-    if (sugerencias.length > 0) {
+    // 2. Si hay sugerencias (combos o productos) en el desplegable, Enter selecciona la opción resaltada actualmente
+    if (opcionesDesplegable.length > 0) {
       const indiceSeguro = Math.min(
         Math.max(0, indiceSugerenciaActiva),
-        sugerencias.length - 1
+        opcionesDesplegable.length - 1
       );
-      const prodElegido = sugerencias[indiceSeguro];
-      if (prodElegido) {
-        seleccionarProductoParaCarrito(prodElegido, '[Buscador]');
+      const opcionElegida = opcionesDesplegable[indiceSeguro];
+      if (opcionElegida) {
+        if (opcionElegida.tipo === 'combo') {
+          setEntradaLector('');
+          setDesplegableAbierto(false);
+          manejarAgregarComboAlCarrito(opcionElegida.combo);
+        } else {
+          seleccionarProductoParaCarrito(opcionElegida.prod, '[Buscador]');
+        }
         return;
       }
     }
@@ -482,24 +533,27 @@ export function PanelVentaPOS({
   function manejarKeyDownLector(e: React.KeyboardEvent<HTMLInputElement>) {
     const ahora = performance.now();
 
-    if (e.key === 'ArrowDown' && sugerencias.length > 0) {
-      e.preventDefault();
-      setDesplegableAbierto(true);
-      setIndiceSugerenciaActiva((prev) => (prev + 1) % sugerencias.length);
-      return;
-    }
-
-    if (e.key === 'ArrowUp' && sugerencias.length > 0) {
+    if (e.key === 'ArrowDown' && opcionesDesplegable.length > 0) {
       e.preventDefault();
       setDesplegableAbierto(true);
       setIndiceSugerenciaActiva(
-        (prev) => (prev - 1 + sugerencias.length) % sugerencias.length
+        (prev) => (prev + 1) % opcionesDesplegable.length
+      );
+      return;
+    }
+
+    if (e.key === 'ArrowUp' && opcionesDesplegable.length > 0) {
+      e.preventDefault();
+      setDesplegableAbierto(true);
+      setIndiceSugerenciaActiva(
+        (prev) =>
+          (prev - 1 + opcionesDesplegable.length) % opcionesDesplegable.length
       );
       return;
     }
 
     if (e.key === 'Escape') {
-      if (desplegableAbierto && sugerencias.length > 0) {
+      if (desplegableAbierto && opcionesDesplegable.length > 0) {
         e.preventDefault();
         setDesplegableAbierto(false);
         return;
@@ -558,9 +612,9 @@ export function PanelVentaPOS({
         e.preventDefault();
         if (carrito.length > 0) {
           const ultimo = carrito[carrito.length - 1]!;
-          setCarrito((prev) =>
+          actualizarCarritoYSincronizarCombos(
             actualizarCantidadEnCarrito(
-              prev,
+              carrito,
               ultimo.producto_id,
               ultimo.cantidad - 1
             )
@@ -638,11 +692,45 @@ export function PanelVentaPOS({
     }
   }
 
+  async function manejarAbrirCajaDesdeVenta(e: React.FormEvent) {
+    e.preventDefault();
+    setMensajeError(null);
+    setMensajeEstado(null);
+    setAbriendoCajaRapido(true);
+    try {
+      const inicial = pesosACentavos(montoAperturaRapidaInput);
+      if (inicial < 0) {
+        throw new Error('El monto inicial de caja no puede ser negativo.');
+      }
+      await invocarPosApi('abrir_caja', {
+        rolActivo,
+        montoInicialCentavos: inicial,
+      });
+      setMensajeEstado(
+        'Turno de caja abierto correctamente. Ya podés escanear productos y cobrar ventas.'
+      );
+      onDatosActualizados?.();
+      enfocarEntradaLector();
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error ? err.message : 'No se pudo abrir la caja.'
+      );
+    } finally {
+      setAbriendoCajaRapido(false);
+    }
+  }
+
   async function confirmarCobroVenta() {
     setMensajeError(null);
     setMensajeEstado(null);
 
     try {
+      if (cajaCerradaBloqueada) {
+        throw new Error(
+          'La caja está cerrada. Abrí el turno de caja antes de registrar o cobrar una venta.'
+        );
+      }
+
       if (carrito.length === 0) {
         throw new Error('Agregá al menos un producto al carrito antes de cobrar.');
       }
@@ -721,7 +809,10 @@ export function PanelVentaPOS({
       setUltimoTicketTexto(ticketTexto);
 
       setCarrito([]);
+      setCombosEnCarrito([]);
       setDescuentoGlobalInput('0,00');
+      setClienteSeleccionadoId('');
+      setBusquedaClienteCobro('');
       setPagosCombinadosUI([
         { id: 'pago-1', medio: 'efectivo', montoInput: '' },
         { id: 'pago-2', medio: 'mercado_pago', montoInput: '' },
@@ -799,9 +890,9 @@ export function PanelVentaPOS({
       return;
     }
 
-    if (cajeroRequiereAutorizacion && !autorizadorUsuario.trim()) {
+    if (cajeroRequiereAutorizacion && (!autorizadorUsuario.trim() || !autorizadorClave)) {
       setMensajeError(
-        'Como cajero necesitás indicar el usuario de un encargado o superadmin para autorizar la anulación.'
+        'Como cajero necesitás indicar el usuario y la clave de un encargado o superadmin para autorizar la anulación.'
       );
       return;
     }
@@ -855,6 +946,72 @@ export function PanelVentaPOS({
     }
   }
 
+  function calcularAhorroEfectivoComboEnCatalogo(
+    combo: ComboPromocionUI
+  ): Centavos {
+    const sumaEnCatalogo = combo.items.reduce((acc, item) => {
+      const prod = catalogo.find((p) => p.id === item.producto_id);
+      const precioUnit = prod
+        ? prod.precio_venta
+        : item.precio_unitario_normal;
+      return acc + Math.round(precioUnit * item.cantidad);
+    }, 0);
+    return Math.max(0, sumaEnCatalogo - combo.precio_venta);
+  }
+
+  function actualizarCarritoYSincronizarCombos(nuevoCarrito: ItemCarritoPOS[]) {
+    setCarrito(nuevoCarrito);
+
+    if (nuevoCarrito.length === 0) {
+      setCombosEnCarrito([]);
+      setDescuentoGlobalInput('0,00');
+      return;
+    }
+
+    // Verificar qué combos siguen teniendo todos sus componentes cubiertos en el carrito restante
+    const disponiblePorProd = new Map<string, number>();
+    for (const it of nuevoCarrito) {
+      disponiblePorProd.set(
+        it.producto_id,
+        (disponiblePorProd.get(it.producto_id) ?? 0) + it.cantidad
+      );
+    }
+
+    const combosVigentes: Array<{ uid: string; combo: ComboPromocionUI }> = [];
+    let ahorroQuitadoCentavos = 0;
+
+    for (const entrada of combosEnCarrito) {
+      const alcanza = entrada.combo.items.every(
+        (comp) =>
+          (disponiblePorProd.get(comp.producto_id) ?? 0) + 1e-6 >= comp.cantidad
+      );
+      if (alcanza) {
+        for (const comp of entrada.combo.items) {
+          disponiblePorProd.set(
+            comp.producto_id,
+            (disponiblePorProd.get(comp.producto_id) ?? 0) - comp.cantidad
+          );
+        }
+        combosVigentes.push(entrada);
+      } else {
+        ahorroQuitadoCentavos += calcularAhorroEfectivoComboEnCatalogo(
+          entrada.combo
+        );
+      }
+    }
+
+    setCombosEnCarrito(combosVigentes);
+
+    const resumenNuevoSinDesc = calcularResumenCarritoPOS(nuevoCarrito, 0);
+    const descuentoAjustado = Math.min(
+      Math.max(0, descuentoGlobalCentavos - ahorroQuitadoCentavos),
+      resumenNuevoSinDesc.subtotal
+    );
+    if (descuentoAjustado !== descuentoGlobalCentavos) {
+      setDescuentoGlobalInput(centavosAInputPesos(descuentoAjustado));
+    }
+  }
+
   function manejarAgregarComboAlCarrito(combo: ComboPromocionUI) {
     setMensajeError(null);
     let nuevoCarrito = [...carrito];
@@ -869,17 +1026,71 @@ export function PanelVentaPOS({
       }
     }
     setCarrito(nuevoCarrito);
-    if (combo.ahorro_centavos > 0) {
-      const descuentoNuevo = descuentoGlobalCentavos + combo.ahorro_centavos;
-      setDescuentoGlobalInput(
-        (descuentoNuevo / 100).toFixed(2).replace('.', ',')
+    setCombosEnCarrito((prev) => [
+      ...prev,
+      {
+        uid: `combo-${combo.id}-${Date.now()}-${prev.length + 1}`,
+        combo,
+      },
+    ]);
+    const ahorroEfectivo = calcularAhorroEfectivoComboEnCatalogo(combo);
+    if (ahorroEfectivo > 0) {
+      const resumenTemp = calcularResumenCarritoPOS(nuevoCarrito, 0);
+      const descuentoNuevo = Math.min(
+        resumenTemp.subtotal,
+        descuentoGlobalCentavos + ahorroEfectivo
       );
+      setDescuentoGlobalInput(centavosAInputPesos(descuentoNuevo));
     }
     setMensajeEstado(
-      `[Combo] Agregado "${combo.nombre}" por ${formatearMonedaARS(combo.precio_venta)} (Ahorro: ${formatearMonedaARS(combo.ahorro_centavos)})`
+      `[Combo] Agregado "${combo.nombre}" por ${formatearMonedaARS(combo.precio_venta)} (Bonificación: ${formatearMonedaARS(ahorroEfectivo)})`
     );
     enfocarEntradaLector();
   }
+
+  function manejarQuitarComboDelCarrito(uid: string) {
+    setMensajeError(null);
+    const objetivo = combosEnCarrito.find((c) => c.uid === uid);
+    if (!objetivo) return;
+
+    const ahorroEfectivo = calcularAhorroEfectivoComboEnCatalogo(
+      objetivo.combo
+    );
+    const nuevoCarrito = quitarComponentesDeCarrito(
+      carrito,
+      objetivo.combo.items
+    );
+    const nuevosCombos = combosEnCarrito.filter((c) => c.uid !== uid);
+    setCarrito(nuevoCarrito);
+    setCombosEnCarrito(nuevosCombos);
+
+    if (nuevoCarrito.length === 0) {
+      setDescuentoGlobalInput('0,00');
+    } else {
+      const resumenRestante = calcularResumenCarritoPOS(nuevoCarrito, 0);
+      const descuentoRestante = Math.min(
+        Math.max(0, descuentoGlobalCentavos - ahorroEfectivo),
+        resumenRestante.subtotal
+      );
+      setDescuentoGlobalInput(centavosAInputPesos(descuentoRestante));
+    }
+
+    setMensajeEstado(
+      `[Combo] Quitado "${objetivo.combo.nombre}" del carrito.`
+    );
+    enfocarEntradaLector();
+  }
+
+  const clientesFiltradosCobro = useMemo(() => {
+    const q = busquedaClienteCobro.trim().toLowerCase();
+    if (!q) return clientesDisponibles;
+    return clientesDisponibles.filter((cli) => {
+      const texto = `${cli.nombre} ${cli.documento ?? ''}`.toLowerCase();
+      return (
+        texto.includes(q) || cli.id === clienteSeleccionadoId
+      );
+    });
+  }, [clientesDisponibles, busquedaClienteCobro, clienteSeleccionadoId]);
 
   const clienteActualObj = clientesDisponibles.find(
     (c) => c.id === clienteSeleccionadoId
@@ -931,6 +1142,60 @@ export function PanelVentaPOS({
       {mensajeError && <div className="alert-error">{mensajeError}</div>}
       {mensajeEstado && <div className="alert-ok">{mensajeEstado}</div>}
 
+      {cajaCerradaBloqueada && (
+        <div
+          className="pos-card"
+          style={{
+            border: '2px solid #ef4444',
+            background: '#fef2f2',
+            marginBottom: '1rem',
+          }}
+        >
+          <div className="card-header" style={{ marginBottom: '0.5rem' }}>
+            <div>
+              <h2 style={{ color: '#991b1b', margin: 0 }}>
+                🔴 La Caja está Cerrada — Apertura obligatoria antes de vender
+              </h2>
+              <p style={{ color: '#7f1d1d', margin: '0.35rem 0 0 0' }}>
+                No se pueden registrar ventas ni cobros mientras el turno de caja esté cerrado.
+                Podés abrir la caja directamente desde acá o ir a la sección Caja.
+              </p>
+            </div>
+            {onIrACaja && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={onIrACaja}
+              >
+                Ir a Sección Caja
+              </button>
+            )}
+          </div>
+
+          <form
+            onSubmit={(e) => void manejarAbrirCajaDesdeVenta(e)}
+            className="form-inline"
+          >
+            <label style={{ color: '#7f1d1d', fontWeight: 600 }}>
+              Monto inicial en efectivo ($):
+              <input
+                type="text"
+                value={montoAperturaRapidaInput}
+                onChange={(e) => setMontoAperturaRapidaInput(e.target.value)}
+                placeholder="15000,00"
+              />
+            </label>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={abriendoCajaRapido}
+            >
+              🟢 Abrir Caja Ahora y Habilitar Ventas
+            </button>
+          </form>
+        </div>
+      )}
+
       <div className="panel-grid">
         <div className="pos-card">
           <div className="scanner-box">
@@ -969,14 +1234,92 @@ export function PanelVentaPOS({
 
               {desplegableAbierto &&
                 entradaLector.trim().length > 0 &&
-                sugerencias.length > 0 && (
+                opcionesDesplegable.length > 0 && (
                   <ul
                     className="autocomplete-dropdown"
                     role="listbox"
-                    aria-label="Productos coincidentes"
+                    aria-label="Productos y combos coincidentes"
                   >
-                    {sugerencias.map((prod, idx) => {
+                    {opcionesDesplegable.map((opcion, idx) => {
                       const esActiva = idx === indiceSugerenciaActiva;
+                      if (opcion.tipo === 'combo') {
+                        const combo = opcion.combo;
+                        return (
+                          <li
+                            key={`combo-${combo.id}`}
+                            role="option"
+                            aria-selected={esActiva}
+                            className={
+                              esActiva
+                                ? 'autocomplete-item active'
+                                : 'autocomplete-item'
+                            }
+                            style={
+                              esActiva
+                                ? undefined
+                                : { background: '#faf5ff', borderLeft: '4px solid #7e22ce' }
+                            }
+                            onMouseEnter={() => setIndiceSugerenciaActiva(idx)}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setEntradaLector('');
+                              setDesplegableAbierto(false);
+                              manejarAgregarComboAlCarrito(combo);
+                            }}
+                          >
+                            <div className="autocomplete-main">
+                              <strong>
+                                🎁 [Combo] {combo.nombre}
+                              </strong>
+                              <span className="autocomplete-codes">
+                                {combo.codigo_barras
+                                  ? `Cód: ${combo.codigo_barras} · `
+                                  : ''}
+                                Incluye:{' '}
+                                {combo.items
+                                  .map(
+                                    (it) =>
+                                      `${it.cantidad}x ${it.producto_nombre}`
+                                  )
+                                  .join(' + ')}
+                              </span>
+                            </div>
+                            <div className="autocomplete-meta">
+                              <span
+                                className="badge-rol"
+                                style={{
+                                  background:
+                                    combo.stock_combos_disponibles > 0
+                                      ? '#f3e8ff'
+                                      : '#fee2e2',
+                                  color:
+                                    combo.stock_combos_disponibles > 0
+                                      ? '#6b21a8'
+                                      : '#991b1b',
+                                }}
+                              >
+                                Disp: {combo.stock_combos_disponibles} combos
+                              </span>
+                              {combo.ahorro_centavos > 0 && (
+                                <span
+                                  className="badge-rol"
+                                  style={{
+                                    background: '#dcfce7',
+                                    color: '#166534',
+                                  }}
+                                >
+                                  Ahorra {formatearMonedaARS(combo.ahorro_centavos)}
+                                </span>
+                              )}
+                              <strong className="autocomplete-price">
+                                {formatearMonedaARS(combo.precio_venta)}
+                              </strong>
+                            </div>
+                          </li>
+                        );
+                      }
+
+                      const prod = opcion.prod;
                       return (
                         <li
                           key={prod.id}
@@ -1023,9 +1366,9 @@ export function PanelVentaPOS({
 
               {desplegableAbierto &&
                 entradaLector.trim().length > 0 &&
-                sugerencias.length === 0 && (
+                opcionesDesplegable.length === 0 && (
                   <div className="autocomplete-empty">
-                    No hay productos cargados que coincidan con "
+                    No hay productos ni combos cargados que coincidan con "
                     <strong>{entradaLector.trim()}</strong>". Presioná{' '}
                     <kbd>Enter</kbd> para darlo de alta rápido.
                   </div>
@@ -1137,6 +1480,47 @@ export function PanelVentaPOS({
           </div>
 
           <h3>Carrito de Venta (Solo precios de venta al público)</h3>
+          {combosEnCarrito.length > 0 && (
+            <div
+              className="alert-info"
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                gap: '0.5rem',
+                marginBottom: '0.65rem',
+              }}
+              aria-label="Combos aplicados en el carrito"
+            >
+              <strong>Combos en carrito ({combosEnCarrito.length}):</strong>
+              {combosEnCarrito.map((entrada) => (
+                <span
+                  key={entrada.uid}
+                  className="badge-rol"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    padding: '0.25rem 0.55rem',
+                  }}
+                >
+                  <span>
+                    [Combo] {entrada.combo.nombre} (
+                    {formatearMonedaARS(entrada.combo.precio_venta)})
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ padding: '0.1rem 0.45rem', fontSize: '0.78rem' }}
+                    onClick={() => manejarQuitarComboDelCarrito(entrada.uid)}
+                    title={`Quitar el combo "${entrada.combo.nombre}" y sus productos del carrito`}
+                  >
+                    ✕ Quitar combo
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <table className="data-table">
             <thead>
               <tr>
@@ -1169,9 +1553,9 @@ export function PanelVentaPOS({
                         onChange={(e) => {
                           const val = parseFloat(e.target.value);
                           if (!Number.isNaN(val)) {
-                            setCarrito((prev) =>
+                            actualizarCarritoYSincronizarCombos(
                               actualizarCantidadEnCarrito(
-                                prev,
+                                carrito,
                                 item.producto_id,
                                 val
                               )
@@ -1213,9 +1597,9 @@ export function PanelVentaPOS({
                         type="button"
                         className="btn-secondary"
                         onClick={() =>
-                          setCarrito((prev) =>
+                          actualizarCarritoYSincronizarCombos(
                             actualizarCantidadEnCarrito(
-                              prev,
+                              carrito,
                               item.producto_id,
                               0
                             )
@@ -1301,27 +1685,71 @@ export function PanelVentaPOS({
               </div>
             )}
 
-            <div className="form-row">
-              <label>
-                Cliente (opcional o requerido en Cta. Cte.):
-                <select
-                  value={clienteSeleccionadoId}
-                  onChange={(e) => setClienteSeleccionadoId(e.target.value)}
-                >
-                  <option value="">Consumidor Final (Anónimo)</option>
-                  {clientesDisponibles.map((cli) => (
-                    <option key={cli.id} value={cli.id}>
-                      {cli.nombre}
-                      {cli.documento ? ` (${cli.documento})` : ''} — Disp.:{' '}
-                      {cli.limite_credito_centavos > 0
-                        ? formatearMonedaARS(
-                            cli.credito_disponible_centavos as Centavos
-                          )
-                        : 'Sin tope'}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <div className="form-stack" style={{ gap: '0.4rem' }}>
+              <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                <label style={{ flex: 1 }}>
+                  Buscar cliente (por nombre, CUIT o DNI):
+                  <input
+                    type="search"
+                    aria-label="Buscar cliente para cobro"
+                    value={busquedaClienteCobro}
+                    onChange={(e) => {
+                      const valor = e.target.value;
+                      setBusquedaClienteCobro(valor);
+                      if (!valor.trim()) {
+                        return;
+                      }
+                      const q = valor.trim().toLowerCase();
+                      const coincidencia = clientesDisponibles.find((cli) =>
+                        `${cli.nombre} ${cli.documento ?? ''}`
+                          .toLowerCase()
+                          .includes(q)
+                      );
+                      if (coincidencia) {
+                        setClienteSeleccionadoId(coincidencia.id);
+                      }
+                    }}
+                    placeholder="🔍 Escribí nombre o DNI/CUIT (por defecto: Consumidor Final)..."
+                  />
+                </label>
+                {(clienteSeleccionadoId !== '' ||
+                  busquedaClienteCobro.trim() !== '') && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setClienteSeleccionadoId('');
+                      setBusquedaClienteCobro('');
+                    }}
+                    title="Volver a Consumidor Final (Anónimo)"
+                  >
+                    Consumidor Final
+                  </button>
+                )}
+              </div>
+
+              <div className="form-row">
+                <label style={{ flex: 1 }}>
+                  Cliente (opcional o requerido en Cta. Cte.):
+                  <select
+                    value={clienteSeleccionadoId}
+                    onChange={(e) => setClienteSeleccionadoId(e.target.value)}
+                  >
+                    <option value="">Consumidor Final (Anónimo)</option>
+                    {clientesFiltradosCobro.map((cli) => (
+                      <option key={cli.id} value={cli.id}>
+                        {cli.nombre}
+                        {cli.documento ? ` (${cli.documento})` : ''} — Disp.:{' '}
+                        {cli.limite_credito_centavos > 0
+                          ? formatearMonedaARS(
+                              cli.credito_disponible_centavos as Centavos
+                            )
+                          : 'Sin tope'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </div>
 
             <div className="form-row">
@@ -1519,9 +1947,16 @@ export function PanelVentaPOS({
               type="button"
               className="btn-primary full-width"
               onClick={() => void confirmarCobroVenta()}
-              disabled={carrito.length === 0}
+              disabled={carrito.length === 0 || cajaCerradaBloqueada}
+              title={
+                cajaCerradaBloqueada
+                  ? 'Abrí el turno de caja antes de cobrar una venta'
+                  : undefined
+              }
             >
-              Confirmar y Registrar Venta (F4)
+              {cajaCerradaBloqueada
+                ? '🔒 Caja Cerrada — Abrí la Caja para Cobrar'
+                : 'Confirmar y Registrar Venta (F4)'}
             </button>
           </div>
 

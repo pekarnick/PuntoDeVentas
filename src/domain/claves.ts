@@ -6,8 +6,19 @@
 import { argon2id } from '@noble/hashes/argon2.js';
 
 export const LARGO_MINIMO_CLAVE = 8;
+export const LARGO_MAXIMO_CLAVE_BYTES = 256;
 export const MAX_INTENTOS_FALLIDOS = 5;
 export const MINUTOS_BLOQUEO_LOGIN = 15;
+
+export const ARGON2_M_MIN = 1024;
+export const ARGON2_M_DEFAULT = 16384;
+export const ARGON2_M_MAX = 65536;
+export const ARGON2_T_MIN = 1;
+export const ARGON2_T_DEFAULT = 2;
+export const ARGON2_T_MAX = 4;
+export const ARGON2_P_MIN = 1;
+export const ARGON2_P_DEFAULT = 1;
+export const ARGON2_P_MAX = 4;
 
 export interface OpcionesArgon2id {
   /** Costo de memoria en KiB (por defecto 16384 KiB = 16 MiB, ágil en terminales de caja y seguro) */
@@ -57,6 +68,11 @@ export function validarPoliticaClave(clave: string): void {
       `CLAVE_DEBIL: La clave debe tener al menos ${LARGO_MINIMO_CLAVE} caracteres.`
     );
   }
+  if (new TextEncoder().encode(clave).length > LARGO_MAXIMO_CLAVE_BYTES) {
+    throw new Error(
+      `CLAVE_INVALIDA: La clave no puede superar los ${LARGO_MAXIMO_CLAVE_BYTES} bytes.`
+    );
+  }
 }
 
 /**
@@ -79,9 +95,19 @@ export function hashearClaveArgon2id(
     throw new Error('La clave a hashear no puede estar vacía.');
   }
 
-  const m = opciones.m ?? 16384;
-  const t = opciones.t ?? 2;
-  const p = opciones.p ?? 1;
+  const m = opciones.m ?? ARGON2_M_DEFAULT;
+  const t = opciones.t ?? ARGON2_T_DEFAULT;
+  const p = opciones.p ?? ARGON2_P_DEFAULT;
+  if (
+    m < ARGON2_M_MIN ||
+    m > ARGON2_M_MAX ||
+    t < ARGON2_T_MIN ||
+    t > ARGON2_T_MAX ||
+    p < ARGON2_P_MIN ||
+    p > ARGON2_P_MAX
+  ) {
+    throw new Error('ARGON2_PARAMETROS_INVALIDOS: Parámetros PHC fuera de rango seguro.');
+  }
 
   const salt = opciones.salt ?? new Uint8Array(16);
   if (!opciones.salt) {
@@ -108,7 +134,12 @@ export function verificarClaveArgon2id(
   clave: string,
   hashAlmacenado: string
 ): boolean {
-  if (!clave || !hashAlmacenado || !hashAlmacenado.startsWith('$argon2id$')) {
+  if (
+    !clave ||
+    !hashAlmacenado ||
+    !hashAlmacenado.startsWith('$argon2id$') ||
+    new TextEncoder().encode(clave).length > LARGO_MAXIMO_CLAVE_BYTES
+  ) {
     return false;
   }
 
@@ -134,7 +165,20 @@ export function verificarClaveArgon2id(
   const t = paramsMap.get('t');
   const p = paramsMap.get('p');
 
-  if (!m || !t || !p || Number.isNaN(m) || Number.isNaN(t) || Number.isNaN(p)) {
+  if (
+    !m ||
+    !t ||
+    !p ||
+    Number.isNaN(m) ||
+    Number.isNaN(t) ||
+    Number.isNaN(p) ||
+    m < ARGON2_M_MIN ||
+    m > ARGON2_M_MAX ||
+    t < ARGON2_T_MIN ||
+    t > ARGON2_T_MAX ||
+    p < ARGON2_P_MIN ||
+    p > ARGON2_P_MAX
+  ) {
     return false;
   }
 

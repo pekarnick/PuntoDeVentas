@@ -26,6 +26,57 @@ export const MAX_BYTES_WEBP_PRINCIPAL = 150 * 1024; // 150 KB
 export const MAX_BYTES_WEBP_MINIATURA = 25 * 1024; // 25 KB
 export const LADO_MAXIMO_PRINCIPAL_PX = 800;
 export const LADO_MAXIMO_MINIATURA_PX = 200;
+export const MAX_PIXELES_ENTRADA_SHARP = 25_000_000;
+export const REGEX_UUID_ESTRICTO =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function verificarNoEsSymlink(ruta: string): void {
+  if (fs.existsSync(ruta) && fs.lstatSync(ruta).isSymbolicLink()) {
+    throw new Error(
+      `SYMLINK_NO_PERMITIDO: La ruta "${path.basename(ruta)}" es un enlace simbólico.`
+    );
+  }
+}
+
+export function resolverRutaSeguraImagen(
+  directorioBase: string,
+  productoId: string
+): {
+  carpetaImagenes: string;
+  absolutaPrincipal: string;
+  absolutaMiniatura: string;
+} {
+  if (!REGEX_UUID_ESTRICTO.test(productoId)) {
+    throw new Error(
+      'ID_PRODUCTO_INVALIDO: El identificador de producto debe ser un UUID válido.'
+    );
+  }
+
+  const carpetaImagenes = path.resolve(directorioBase, 'imagenes');
+  const absolutaPrincipal = path.resolve(carpetaImagenes, `${productoId}.webp`);
+  const absolutaMiniatura = path.resolve(
+    carpetaImagenes,
+    `${productoId}_thumb.webp`
+  );
+  const prefijo = carpetaImagenes.endsWith(path.sep)
+    ? carpetaImagenes
+    : `${carpetaImagenes}${path.sep}`;
+
+  if (
+    !absolutaPrincipal.startsWith(prefijo) ||
+    !absolutaMiniatura.startsWith(prefijo)
+  ) {
+    throw new Error(
+      'RUTA_IMAGEN_INVALIDA: La ruta resuelta escapa del directorio de imágenes.'
+    );
+  }
+
+  verificarNoEsSymlink(carpetaImagenes);
+  verificarNoEsSymlink(absolutaPrincipal);
+  verificarNoEsSymlink(absolutaMiniatura);
+
+  return { carpetaImagenes, absolutaPrincipal, absolutaMiniatura };
+}
 
 const FORMATOS_PERMITIDOS = new Set(['jpeg', 'jpg', 'png', 'webp', 'heif']);
 
@@ -81,7 +132,10 @@ export async function procesarImagenProducto(
 
   let metadata: Metadata;
   try {
-    metadata = await sharp(buffer, { failOn: 'error' }).metadata();
+    metadata = await sharp(buffer, {
+      failOn: 'error',
+      limitInputPixels: MAX_PIXELES_ENTRADA_SHARP,
+    }).metadata();
   } catch {
     if (esPosibleArchivoHeic(buffer, nombreArchivo)) {
       throw new Error(
@@ -105,13 +159,16 @@ export async function procesarImagenProducto(
     // 1. Corregir orientación EXIF (.rotate() sin argumentos usa el tag EXIF Orientation y luego lo resetea)
     // 2. No llamar a .withMetadata() elimina todos los metadatos EXIF y ubicación GPS
     // 3. Redimensionar a máx 800 px de lado mayor sin agrandar imágenes más chicas
-    const calidades = [80, 72, 64, 56, 48, 40, 32, 24, 16, 10];
+    const calidades = [80, 64, 48, 32, 16];
     let principalWebp: Buffer | null = null;
     let infoPrincipal: OutputInfo | null = null;
     let calidadAplicada = 80;
 
     for (const q of calidades) {
-      const resultado = await sharp(buffer)
+      const resultado = await sharp(buffer, {
+        failOn: 'error',
+        limitInputPixels: MAX_PIXELES_ENTRADA_SHARP,
+      })
         .rotate()
         .resize({
           width: LADO_MAXIMO_PRINCIPAL_PX,
@@ -135,9 +192,12 @@ export async function procesarImagenProducto(
       throw new Error('No se pudo generar la imagen WebP.');
     }
 
-    // Si aún con calidad 10 superara 150 KB (caso extremo de ruido puro), reducir levemente dimensión
+    // Si aún con calidad 16 superara 150 KB (caso extremo de ruido puro), reducir levemente dimensión
     if (principalWebp.byteLength > MAX_BYTES_WEBP_PRINCIPAL) {
-      const reducido = await sharp(buffer)
+      const reducido = await sharp(buffer, {
+        failOn: 'error',
+        limitInputPixels: MAX_PIXELES_ENTRADA_SHARP,
+      })
         .rotate()
         .resize({
           width: 600,
@@ -153,12 +213,15 @@ export async function procesarImagenProducto(
     }
 
     // 4. Generar miniatura de ~200 px (WebP, ~10-20 KB)
-    const calidadesThumb = [75, 60, 45, 30];
+    const calidadesThumb = [75, 50, 30];
     let miniaturaWebp: Buffer | null = null;
     let infoMiniatura: OutputInfo | null = null;
 
     for (const qt of calidadesThumb) {
-      const resThumb = await sharp(buffer)
+      const resThumb = await sharp(buffer, {
+        failOn: 'error',
+        limitInputPixels: MAX_PIXELES_ENTRADA_SHARP,
+      })
         .rotate()
         .resize({
           width: LADO_MAXIMO_MINIATURA_PX,
@@ -254,14 +317,12 @@ export async function guardarImagenProductoLocal(
     params.nombreArchivoOriginal
   );
 
-  const carpetaImagenes = path.join(params.directorioBase, 'imagenes');
+  const { carpetaImagenes, absolutaPrincipal: rutaAbsolutaPrincipal, absolutaMiniatura: rutaAbsolutaMiniatura } =
+    resolverRutaSeguraImagen(params.directorioBase, params.productoId);
   fs.mkdirSync(carpetaImagenes, { recursive: true });
 
   const nombrePrincipal = `${params.productoId}.webp`;
   const nombreMiniatura = `${params.productoId}_thumb.webp`;
-
-  const rutaAbsolutaPrincipal = path.join(carpetaImagenes, nombrePrincipal);
-  const rutaAbsolutaMiniatura = path.join(carpetaImagenes, nombreMiniatura);
 
   fs.writeFileSync(rutaAbsolutaPrincipal, procesada.principalWebp);
   fs.writeFileSync(rutaAbsolutaMiniatura, procesada.miniaturaWebp);

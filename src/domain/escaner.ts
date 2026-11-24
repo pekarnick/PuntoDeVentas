@@ -196,6 +196,7 @@ export function agregarProductoAlCarrito(
 
 /**
  * Modifica la cantidad de un ítem del carrito (si llega a <= 0, lo quita del carrito).
+ * Ajusta automáticamente el descuento del ítem si supera el nuevo subtotal bruto.
  */
 export function actualizarCantidadEnCarrito(
   carritoActual: readonly ItemCarritoPOS[],
@@ -210,11 +211,49 @@ export function actualizarCantidadEnCarrito(
   return carritoActual.map((item) => {
     if (item.producto_id !== productoId) return item;
     validarCantidadProducto(nuevaCantidad, item.permite_decimales);
+    const cantidadNormalizada = desdeMiliunidades(mili);
+    const nuevoBruto = Math.max(
+      0,
+      Math.round((mili * item.precio_unitario) / 1000)
+    );
+    const descuentoAjustado = Math.min(
+      Math.max(0, item.descuento),
+      nuevoBruto
+    );
     return {
       ...item,
-      cantidad: desdeMiliunidades(mili),
+      cantidad: cantidadNormalizada,
+      descuento: descuentoAjustado,
     };
   });
+}
+
+/**
+ * Resta del carrito las cantidades de los componentes indicados (por ejemplo al quitar un combo completo).
+ */
+export function quitarComponentesDeCarrito(
+  carritoActual: readonly ItemCarritoPOS[],
+  componentes: ReadonlyArray<{
+    readonly producto_id: string;
+    readonly cantidad: number;
+  }>
+): ItemCarritoPOS[] {
+  let resultado = [...carritoActual];
+  for (const comp of componentes) {
+    const existente = resultado.find(
+      (it) => it.producto_id === comp.producto_id
+    );
+    if (!existente) continue;
+    const restanteMili =
+      aMiliunidades(existente.cantidad) - aMiliunidades(comp.cantidad);
+    const restante = desdeMiliunidades(Math.max(0, restanteMili));
+    resultado = actualizarCantidadEnCarrito(
+      resultado,
+      comp.producto_id,
+      restante
+    );
+  }
+  return resultado;
 }
 
 /**
@@ -247,6 +286,8 @@ export function aplicarDescuentoItemEnCarrito(
 
 /**
  * Calcula los totales del carrito para la pantalla de venta (sin incluir ningún costo de compra, Regla 20).
+ * Ajusta de forma segura el descuento global si al quitar productos del carrito (ej. un combo)
+ * el descuento previo supera temporalmente al subtotal restante, evitando que el render falle.
  */
 export function calcularResumenCarritoPOS(
   carrito: readonly ItemCarritoPOS[],
@@ -262,18 +303,34 @@ export function calcularResumenCarritoPOS(
     };
   }
 
-  const calculado = calcularTotalesVenta(
-    carrito.map((it) => ({
+  let subtotalDisponible = 0;
+  const itemsSeguros = carrito.map((it) => {
+    const bruto = Math.max(
+      0,
+      Math.round((aMiliunidades(it.cantidad) * it.precio_unitario) / 1000)
+    );
+    const descuentoItemSeguro = Math.min(Math.max(0, it.descuento), bruto);
+    subtotalDisponible += bruto - descuentoItemSeguro;
+    return {
       producto_id: it.producto_id,
       descripcion: it.descripcion,
       cantidad: it.cantidad,
       precio_unitario: it.precio_unitario,
       costo_unitario: 0, // En el carrito de cliente/cajero no se expone ni calcula costo_compra (Regla 20)
-      descuento: it.descuento,
+      descuento: descuentoItemSeguro,
       alicuota_iva: it.alicuota_iva,
       exento_iva: it.exento_iva,
-    })),
-    descuentoGlobalCentavos,
+    };
+  });
+
+  const descuentoGlobalSeguro = Math.min(
+    Math.max(0, Math.round(descuentoGlobalCentavos)),
+    subtotalDisponible
+  );
+
+  const calculado = calcularTotalesVenta(
+    itemsSeguros,
+    descuentoGlobalSeguro,
     true
   );
 

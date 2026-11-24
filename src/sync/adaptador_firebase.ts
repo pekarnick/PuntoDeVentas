@@ -72,12 +72,69 @@ interface FirestoreDocument {
   fields?: Record<string, FirestoreFieldValue>;
 }
 
+export const REGLAS_SEGURIDAD_FIRESTORE_RECOMENDADAS = `rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function estaAutenticado() {
+      return request.auth != null && request.auth.token.comercio_id != null;
+    }
+    function esMismoComercio(comercioId) {
+      return estaAutenticado() && request.auth.token.comercio_id == comercioId;
+    }
+    function esAdminOEncargado() {
+      return request.auth.token.rol in ['superadmin', 'encargado'];
+    }
+    function esSuperadmin() {
+      return request.auth.token.rol == 'superadmin';
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /comercios/{comercioId} {
+      allow read: if esMismoComercio(comercioId);
+      allow create, update: if esMismoComercio(comercioId) && esSuperadmin();
+      allow delete: if false;
+
+      match /{coleccionAppend}/{docId} {
+        allow read: if esMismoComercio(comercioId)
+          && coleccionAppend in ['ventas', 'ventas_items', 'ventas_pagos', 'movimientos_stock', 'cuenta_corriente_movimientos', 'transferencias_sucursales', 'auditoria']
+          && (coleccionAppend != 'auditoria' || esSuperadmin());
+        allow create: if esMismoComercio(comercioId)
+          && coleccionAppend in ['ventas', 'ventas_items', 'ventas_pagos', 'movimientos_stock', 'cuenta_corriente_movimientos', 'transferencias_sucursales', 'auditoria']
+          && request.resource.data.comercio_id == comercioId;
+        allow update, delete: if false;
+      }
+
+      match /usuarios/{usuarioId} {
+        allow read: if esMismoComercio(comercioId) && esSuperadmin();
+        allow create, update: if esMismoComercio(comercioId) && esSuperadmin()
+          && !('clave_hash' in request.resource.data)
+          && !('pin_hash' in request.resource.data);
+        allow delete: if false;
+      }
+
+      match /{coleccion}/{docId} {
+        allow read: if esMismoComercio(comercioId)
+          && coleccion in ['productos', 'precios', 'listas_precio', 'codigos_barras', 'categorias', 'marcas', 'proveedores', 'clientes', 'caja_sesiones', 'caja_movimientos', 'sucursales', 'variantes', 'combos', 'combos_items'];
+        allow create, update: if esMismoComercio(comercioId)
+          && coleccion in ['productos', 'precios', 'listas_precio', 'codigos_barras', 'categorias', 'marcas', 'proveedores', 'clientes', 'caja_sesiones', 'caja_movimientos', 'sucursales', 'variantes', 'combos', 'combos_items']
+          && (coleccion in ['clientes', 'caja_sesiones', 'caja_movimientos'] || esAdminOEncargado())
+          && request.resource.data.comercio_id == comercioId;
+        allow delete: if false;
+      }
+    }
+  }
+}`;
+
 export function serializarRegistroAFirestoreFields(
   registro: RegistroSincronizableBase
 ): Record<string, FirestoreFieldValue> {
   const fields: Record<string, FirestoreFieldValue> = {};
   for (const [clave, valor] of Object.entries(registro)) {
-    if (clave === 'sync_status') continue;
+    // Regla 16: nunca subir clave_hash, pin_hash ni metadato local sync_status
+    if (clave === 'sync_status' || clave === 'clave_hash' || clave === 'pin_hash') continue;
     if (valor === null || valor === undefined) {
       fields[clave] = { nullValue: null };
     } else if (typeof valor === 'boolean') {
@@ -96,7 +153,9 @@ export function serializarRegistroAFirestoreFields(
 }
 
 export function deserializarFirestoreDocumentARegistro(
-  doc: FirestoreDocument
+  doc: FirestoreDocument,
+  comercioIdEsperado?: string,
+  esTablaComercios = false
 ): RegistroSincronizableBase | null {
   if (!doc.fields) return null;
   const obj: Record<string, unknown> = {};
@@ -118,10 +177,72 @@ export function deserializarFirestoreDocumentARegistro(
   if (typeof obj.id !== 'string' || !obj.id) {
     return null;
   }
-  if (typeof obj.comercio_id !== 'string' && obj.id) {
-    obj.comercio_id = obj.id;
+  if (esTablaComercios) {
+    if (typeof obj.comercio_id !== 'string' || !obj.comercio_id) {
+      obj.comercio_id = obj.id;
+    }
+    if (comercioIdEsperado && obj.id !== comercioIdEsperado) {
+      return null;
+    }
+  } else {
+    if (typeof obj.comercio_id !== 'string' || !obj.comercio_id) {
+      return null;
+    }
+    if (comercioIdEsperado && obj.comercio_id !== comercioIdEsperado) {
+      return null;
+    }
   }
   return obj as RegistroSincronizableBase;
+}
+
+export interface SesionFirebaseAuth {
+  readonly idToken: string;
+  readonly refreshToken: string | null;
+  readonly localId: string;
+  readonly email: string;
+  readonly expiresIn: number;
+}
+
+export async function autenticarFirebaseEmailClave(params: {
+  apiKey: string;
+  email: string;
+  password: string;
+}): Promise<SesionFirebaseAuth> {
+  const key = params.apiKey.trim();
+  const resp = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(key)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: params.email.trim(),
+        password: params.password,
+        returnSecureToken: true,
+      }),
+      signal: AbortSignal.timeout(10000),
+    }
+  );
+  const txt = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`Error al autenticar con Firebase Auth (HTTP ${resp.status}): ${txt}`);
+  }
+  const data = JSON.parse(txt) as {
+    idToken?: string;
+    refreshToken?: string;
+    localId?: string;
+    email?: string;
+    expiresIn?: string;
+  };
+  if (!data.idToken || !data.localId) {
+    throw new Error('Firebase Auth no devolvió un idToken válido.');
+  }
+  return {
+    idToken: data.idToken,
+    refreshToken: data.refreshToken ?? null,
+    localId: data.localId,
+    email: data.email ?? params.email.trim(),
+    expiresIn: Number(data.expiresIn ?? 3600),
+  };
 }
 
 /**
@@ -133,16 +254,25 @@ export function deserializarFirestoreDocumentARegistro(
 export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
   private readonly projectId: string;
   private readonly apiKey: string;
+  private readonly idToken: string | null;
   private readonly baseDocsUrl: string;
 
-  constructor(projectId: string, apiKey: string) {
+  constructor(projectId: string, apiKey: string, idToken?: string | null) {
     const validacion = validarConfiguracionFirebaseCliente(projectId, apiKey);
     if (!validacion.valida) {
       throw new Error(validacion.motivo);
     }
     this.projectId = projectId.trim();
     this.apiKey = apiKey.trim();
+    this.idToken = idToken && idToken.trim() ? idToken.trim() : null;
     this.baseDocsUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(this.projectId)}/databases/(default)/documents`;
+  }
+
+  private construirCabeceras(extra?: Record<string, string>): Record<string, string> {
+    return {
+      ...(this.idToken ? { Authorization: `Bearer ${this.idToken}` } : {}),
+      ...extra,
+    };
   }
 
   private construirNombreDocumento(
@@ -161,7 +291,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
     try {
       const resp = await fetch(
         `${this.baseDocsUrl}/comercios?pageSize=1&key=${encodeURIComponent(this.apiKey)}`,
-        { method: 'GET' }
+        { method: 'GET', headers: this.construirCabeceras() }
       );
       return resp.status < 500;
     } catch {
@@ -175,10 +305,21 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
   ): Promise<void> {
     if (registros.length === 0) return;
 
+    // Deduplicar por UUID (id) dentro de la misma tanda para garantizar idempotencia
+    // y evitar que Firestore rechace un commit con dos writes al mismo document path.
+    const mapaUnicos = new Map<string, RegistroSincronizableBase>();
+    for (const reg of registros) {
+      if (reg && typeof reg.id === 'string' && reg.id.trim()) {
+        mapaUnicos.set(reg.id, reg);
+      }
+    }
+    const registrosUnicos = Array.from(mapaUnicos.values());
+    if (registrosUnicos.length === 0) return;
+
     // Firestore commit soporta hasta 500 writes por lote; usamos lotes de 200
     const TAMANO_LOTE = 200;
-    for (let i = 0; i < registros.length; i += TAMANO_LOTE) {
-      const lote = registros.slice(i, i + TAMANO_LOTE);
+    for (let i = 0; i < registrosUnicos.length; i += TAMANO_LOTE) {
+      const lote = registrosUnicos.slice(i, i + TAMANO_LOTE);
       const writes = lote.map((reg) => {
         const comercioId =
           tabla === 'comercios' ? reg.id : (reg.comercio_id ?? reg.id);
@@ -194,7 +335,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
         `${this.baseDocsUrl}:commit?key=${encodeURIComponent(this.apiKey)}`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: this.construirCabeceras({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ writes }),
         }
       );
@@ -216,7 +357,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
     if (tabla === 'comercios') {
       const resp = await fetch(
         `${this.baseDocsUrl}/comercios/${encodeURIComponent(comercioId)}?key=${encodeURIComponent(this.apiKey)}`,
-        { method: 'GET' }
+        { method: 'GET', headers: this.construirCabeceras() }
       );
       if (resp.status === 404) return [];
       if (!resp.ok) {
@@ -226,7 +367,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
         );
       }
       const doc = (await resp.json()) as FirestoreDocument;
-      const reg = deserializarFirestoreDocumentARegistro(doc);
+      const reg = deserializarFirestoreDocumentARegistro(doc, comercioId, true);
       if (!reg) return [];
       if (desdeUpdatedAt && reg.updated_at <= desdeUpdatedAt) {
         return [];
@@ -235,14 +376,48 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
     }
 
     const acumulado: RegistroSincronizableBase[] = [];
-    let pageToken = '';
+    const LIMITE_PAGINA = 300;
+    const MAX_PAGINAS = 50;
+    let offset = 0;
 
-    while (true) {
-      const tokenParam = pageToken
-        ? `&pageToken=${encodeURIComponent(pageToken)}`
-        : '';
-      const url = `${this.baseDocsUrl}/comercios/${encodeURIComponent(comercioId)}/${tabla}?pageSize=300${tokenParam}&key=${encodeURIComponent(this.apiKey)}`;
-      const resp = await fetch(url, { method: 'GET' });
+    for (let pagina = 0; pagina < MAX_PAGINAS; pagina++) {
+      const filtros: Array<Record<string, unknown>> = [
+        {
+          fieldFilter: {
+            field: { fieldPath: 'comercio_id' },
+            op: 'EQUAL',
+            value: { stringValue: comercioId },
+          },
+        },
+      ];
+      if (desdeUpdatedAt) {
+        filtros.push({
+          fieldFilter: {
+            field: { fieldPath: 'updated_at' },
+            op: 'GREATER_THAN_OR_EQUAL',
+            value: { stringValue: desdeUpdatedAt },
+          },
+        });
+      }
+
+      const structuredQuery: Record<string, unknown> = {
+        from: [{ collectionId: tabla }],
+        where:
+          filtros.length === 1
+            ? filtros[0]
+            : { compositeFilter: { op: 'AND', filters: filtros } },
+        orderBy: [{ field: { fieldPath: 'updated_at' }, direction: 'ASCENDING' }],
+        limit: LIMITE_PAGINA,
+        offset,
+      };
+
+      const url = `${this.baseDocsUrl}/comercios/${encodeURIComponent(comercioId)}:runQuery?key=${encodeURIComponent(this.apiKey)}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: this.construirCabeceras({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ structuredQuery }),
+      });
+
       if (resp.status === 404) return [];
       if (!resp.ok) {
         const detalle = await resp.text();
@@ -251,21 +426,20 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
         );
       }
 
-      const body = (await resp.json()) as {
-        documents?: FirestoreDocument[];
-        nextPageToken?: string;
-      };
-      const docs = body.documents ?? [];
-      for (const doc of docs) {
-        const reg = deserializarFirestoreDocumentARegistro(doc);
+      const filas = (await resp.json()) as Array<{ document?: FirestoreDocument }>;
+      let countDocs = 0;
+      for (const item of filas) {
+        if (!item.document) continue;
+        countDocs++;
+        const reg = deserializarFirestoreDocumentARegistro(item.document, comercioId, false);
         if (!reg) continue;
-        if (!desdeUpdatedAt || reg.updated_at > desdeUpdatedAt) {
+        if (!desdeUpdatedAt || reg.updated_at >= desdeUpdatedAt) {
           acumulado.push(reg);
         }
       }
 
-      if (!body.nextPageToken) break;
-      pageToken = body.nextPageToken;
+      if (countDocs < LIMITE_PAGINA) break;
+      offset += countDocs;
     }
 
     acumulado.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
@@ -294,12 +468,12 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
     try {
       const resp = await fetch(
         `${this.baseDocsUrl}/comercios?pageSize=5&key=${encodeURIComponent(this.apiKey)}`,
-        { method: 'GET' }
+        { method: 'GET', headers: this.construirCabeceras() }
       );
       if (resp.ok) {
         const body = (await resp.json()) as { documents?: FirestoreDocument[] };
         for (const doc of body.documents ?? []) {
-          const reg = deserializarFirestoreDocumentARegistro(doc);
+          const reg = deserializarFirestoreDocumentARegistro(doc, undefined, true);
           if (reg && !reg.deleted_at) {
             return reg;
           }
@@ -355,7 +529,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
             `${this.baseDocsUrl}:commit?key=${encodeURIComponent(this.apiKey)}`,
             {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: this.construirCabeceras({ 'Content-Type': 'application/json' }),
               body: JSON.stringify({ writes }),
             }
           );
@@ -392,7 +566,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
     const url = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(this.projectId)}.appspot.com/o?uploadType=media&name=${objectName}&key=${encodeURIComponent(this.apiKey)}`;
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'image/webp' },
+      headers: this.construirCabeceras({ 'Content-Type': 'image/webp' }),
       body: new Uint8Array(contenido),
     });
     if (!resp.ok) {
@@ -410,7 +584,7 @@ export class AdaptadorFirebaseFirestoreHttp implements AdaptadorNubeSupabase {
       `productos/${comercioId}/${nombreArchivo}`
     );
     const url = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(this.projectId)}.appspot.com/o/${objectName}?alt=media&key=${encodeURIComponent(this.apiKey)}`;
-    const resp = await fetch(url, { method: 'GET' });
+    const resp = await fetch(url, { method: 'GET', headers: this.construirCabeceras() });
     if (resp.status === 404) return null;
     if (!resp.ok) {
       throw new Error(
@@ -450,11 +624,28 @@ export class AdaptadorNubeMultiProveedor implements AdaptadorNubeSupabase {
     tabla: TablaSincronizable,
     registros: RegistroSincronizableBase[]
   ): Promise<void> {
-    await this.primario.subirRegistrosTabla(tabla, registros);
-    try {
-      await this.secundario.subirRegistrosTabla(tabla, registros);
-    } catch {
-      // El espejo secundario no bloquea al primario si falla temporalmente
+    const [resPrimario, resSecundario] = await Promise.allSettled([
+      this.primario.subirRegistrosTabla(tabla, registros),
+      this.secundario.subirRegistrosTabla(tabla, registros),
+    ]);
+
+    const errores: string[] = [];
+    if (resPrimario.status === 'rejected') {
+      errores.push(
+        resPrimario.reason instanceof Error
+          ? resPrimario.reason.message
+          : String(resPrimario.reason)
+      );
+    }
+    if (resSecundario.status === 'rejected') {
+      errores.push(
+        resSecundario.reason instanceof Error
+          ? resSecundario.reason.message
+          : String(resSecundario.reason)
+      );
+    }
+    if (errores.length > 0) {
+      throw new Error(errores.join(' | '));
     }
   }
 
@@ -463,13 +654,17 @@ export class AdaptadorNubeMultiProveedor implements AdaptadorNubeSupabase {
     comercioId: string,
     desdeUpdatedAt: string | null
   ): Promise<RegistroSincronizableBase[]> {
-    const delPrimario = await this.primario.bajarRegistrosTabla(
-      tabla,
-      comercioId,
-      desdeUpdatedAt
-    );
-    if (delPrimario.length > 0) {
-      return delPrimario;
+    try {
+      const delPrimario = await this.primario.bajarRegistrosTabla(
+        tabla,
+        comercioId,
+        desdeUpdatedAt
+      );
+      if (delPrimario.length > 0) {
+        return delPrimario;
+      }
+    } catch {
+      // Si el primario falla, intentar desde el secundario (Firebase)
     }
     try {
       return await this.secundario.bajarRegistrosTabla(
@@ -478,7 +673,7 @@ export class AdaptadorNubeMultiProveedor implements AdaptadorNubeSupabase {
         desdeUpdatedAt
       );
     } catch {
-      return delPrimario;
+      return [];
     }
   }
 

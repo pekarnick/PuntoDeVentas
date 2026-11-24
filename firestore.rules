@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function estaAutenticado() {
+      return request.auth != null && request.auth.token.comercio_id != null;
+    }
+    function esMismoComercio(comercioId) {
+      return estaAutenticado() && request.auth.token.comercio_id == comercioId;
+    }
+    function esAdminOEncargado() {
+      return request.auth.token.rol in ['superadmin', 'encargado'];
+    }
+    function esSuperadmin() {
+      return request.auth.token.rol == 'superadmin';
+    }
+
+    // Denegar todo por defecto
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /comercios/{comercioId} {
+      allow read: if esMismoComercio(comercioId);
+      allow create, update: if esMismoComercio(comercioId) && esSuperadmin();
+      allow delete: if false;
+
+      // Tablas append-only: solo crear, nunca update ni delete
+      match /{coleccionAppend}/{docId} {
+        allow read: if esMismoComercio(comercioId)
+          && coleccionAppend in ['ventas', 'ventas_items', 'ventas_pagos', 'movimientos_stock', 'cuenta_corriente_movimientos', 'transferencias_sucursales', 'auditoria']
+          && (coleccionAppend != 'auditoria' || esSuperadmin());
+        allow create: if esMismoComercio(comercioId)
+          && coleccionAppend in ['ventas', 'ventas_items', 'ventas_pagos', 'movimientos_stock', 'cuenta_corriente_movimientos', 'transferencias_sucursales', 'auditoria']
+          && request.resource.data.comercio_id == comercioId;
+        allow update, delete: if false;
+      }
+
+      // Usuarios: solo superadmin escribe; nunca exponer clave_hash ni pin_hash
+      match /usuarios/{usuarioId} {
+        allow read: if esMismoComercio(comercioId) && esSuperadmin();
+        allow create, update: if esMismoComercio(comercioId) && esSuperadmin()
+          && !('clave_hash' in request.resource.data)
+          && !('pin_hash' in request.resource.data);
+        allow delete: if false;
+      }
+
+      // Catálogo y configuración operativa
+      match /{coleccion}/{docId} {
+        allow read: if esMismoComercio(comercioId)
+          && coleccion in ['productos', 'precios', 'listas_precio', 'codigos_barras', 'categorias', 'marcas', 'proveedores', 'clientes', 'caja_sesiones', 'caja_movimientos', 'sucursales', 'variantes', 'combos', 'combos_items'];
+        allow create, update: if esMismoComercio(comercioId)
+          && coleccion in ['productos', 'precios', 'listas_precio', 'codigos_barras', 'categorias', 'marcas', 'proveedores', 'clientes', 'caja_sesiones', 'caja_movimientos', 'sucursales', 'variantes', 'combos', 'combos_items']
+          && (coleccion in ['clientes', 'caja_sesiones', 'caja_movimientos'] || esAdminOEncargado())
+          && request.resource.data.comercio_id == comercioId;
+        allow delete: if false;
+      }
+    }
+  }
+}

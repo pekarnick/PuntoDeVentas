@@ -44,6 +44,12 @@ describe('Despliegue en Netlify y Bloqueo de Buscadores', () => {
     expect(guardado.netlify_token).toBe('nfp_PruebaToken1234567890abcdef');
     expect(guardado.netlify_site_name).toBe('kiosco-central-pos');
 
+    // El token NO debe persistirse en texto plano dentro de SQLite
+    const filaDb = db
+      .prepare('SELECT netlify_token FROM configuracion_sistema WHERE comercio_id = ?')
+      .get(comercioId) as { netlify_token: string | null } | undefined;
+    expect(filaDb?.netlify_token).toBeNull();
+
     // 3. Registrar despliegue exitoso
     const estadoFinal = registrarDespliegueNetlifyExitoso(db, {
       actor,

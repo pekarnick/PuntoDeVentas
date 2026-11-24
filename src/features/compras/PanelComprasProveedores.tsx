@@ -15,6 +15,7 @@ import {
 import {
   agruparPedidoReposicionStockBajo,
   generarPdfPedidoReposicion,
+  generarXlsxPedidoReposicion,
   ID_GRUPO_SIN_ASIGNAR,
   type CriterioAgrupacionPedido,
   type GrupoPedidoReposicion,
@@ -92,14 +93,21 @@ export function PanelComprasProveedores({
   const tienePermisoCompras =
     rolActivo === 'superadmin' || rolActivo === 'encargado';
 
-  // Estado Lista Automática de Pedidos por Stock Bajo (Proveedor / Marca / Categoría + PDF)
+  // Estado Lista Automática de Pedidos por Stock Bajo (Proveedor / Marca / Categoría + PDF y Excel)
   const [criterioAgrupacionPedido, setCriterioAgrupacionPedido] =
+    useState<CriterioAgrupacionPedido>('proveedor');
+  const [criterioExportacionExcel, setCriterioExportacionExcel] =
     useState<CriterioAgrupacionPedido>('proveedor');
   const [filtroGrupoPedidoId, setFiltroGrupoPedidoId] =
     useState<string>('todos');
   const [cantidadesPersonalizadasPedido, setCantidadesPersonalizadasPedido] =
     useState<Record<string, number>>({});
   const [exportandoPdfPedido, setExportandoPdfPedido] = useState(false);
+  const [exportandoXlsxPedido, setExportandoXlsxPedido] = useState(false);
+  const [paginaGruposPedido, setPaginaGruposPedido] = useState(1);
+  const [paginasItemsPorGrupo, setPaginasItemsPorGrupo] = useState<
+    Record<string, number>
+  >({});
 
   // Estado ABM Proveedor
   const [razonSocial, setRazonSocial] = useState('');
@@ -110,14 +118,32 @@ export function PanelComprasProveedores({
   // Estado Nueva Compra
   const [proveedorCompraId, setProveedorCompraId] = useState<string>('');
   const [numeroComprobante, setNumeroComprobante] = useState('');
+  const [busquedaProductoCompra, setBusquedaProductoCompra] =
+    useState<string>('');
   const [productoSeleccionadoId, setProductoSeleccionadoId] = useState<string>(
     catalogoProductos[0]?.id ?? ''
   );
+
+  const productosFiltradosCompra = useMemo(() => {
+    const q = busquedaProductoCompra.trim().toLowerCase();
+    if (!q) return catalogoProductos;
+    return catalogoProductos.filter((p) => {
+      const texto = [
+        p.nombre,
+        p.codigo_interno ?? '',
+        ...(p.codigos_barras ?? []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return texto.includes(q);
+    });
+  }, [catalogoProductos, busquedaProductoCompra]);
   const [cantidadItemInput, setCantidadItemInput] = useState('1');
   const [costoUnitarioInput, setCostoUnitarioInput] = useState('');
   const [alicuotaItem, setAlicuotaItem] = useState<AlicuotaIva>(21);
   const [actualizarCostoCheck, setActualizarCostoCheck] = useState(true);
   const [itemsCompra, setItemsCompra] = useState<ItemBorradorCompra[]>([]);
+  const [paginaItemsBorradorCompra, setPaginaItemsBorradorCompra] = useState(1);
   const [cargarEnCuentaCorriente, setCargarEnCuentaCorriente] = useState(true);
   const [montoPagadoActoInput, setMontoPagadoActoInput] = useState('0');
 
@@ -149,6 +175,11 @@ export function PanelComprasProveedores({
   const paginacionMovsProveedor = paginarListado(
     movimientosCc,
     paginaMovsProveedor,
+    TAMANIO_PAGINA_POR_DEFECTO
+  );
+  const paginacionItemsBorradorCompra = paginarListado(
+    itemsCompra,
+    paginaItemsBorradorCompra,
     TAMANIO_PAGINA_POR_DEFECTO
   );
 
@@ -225,6 +256,12 @@ export function PanelComprasProveedores({
       filtroGrupoPedidoId,
       cantidadesPersonalizadasPedido,
     ]
+  );
+
+  const paginacionGruposPedido = paginarListado(
+    resumenPedidoReposicionActivo.grupos,
+    paginaGruposPedido,
+    TAMANIO_PAGINA_POR_DEFECTO
   );
 
   if (!tienePermisoCompras) {
@@ -560,6 +597,92 @@ export function PanelComprasProveedores({
     }
   }
 
+  async function manejarExportarXlsxPedido(
+    criterio: CriterioAgrupacionPedido,
+    filtroGrupoIdEspecifico: string | null,
+    etiquetaNombreArchivo?: string
+  ) {
+    setExportandoXlsxPedido(true);
+    setErrorMsg(null);
+    setMensajeExito(null);
+
+    try {
+      let bytesXlsx: Uint8Array | null = null;
+      let nombreArchivoSugerido = `pedido_${criterio}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+      try {
+        const respuesta = await invocarPosApi<{
+          xlsxBase64: string;
+          nombreArchivoSugerido: string;
+          auditoriaId: string;
+        }>('exportar_pedido_reposicion_xlsx', {
+          rolActivo,
+          criterio,
+          filtroGrupoId: filtroGrupoIdEspecifico,
+          cantidadesPersonalizadasPorProducto: cantidadesPersonalizadasPedido,
+        });
+
+        const binario = atob(respuesta.xlsxBase64);
+        const arreglo = new Uint8Array(binario.length);
+        for (let i = 0; i < binario.length; i += 1) {
+          arreglo[i] = binario.charCodeAt(i);
+        }
+        bytesXlsx = arreglo;
+        nombreArchivoSugerido = respuesta.nombreArchivoSugerido;
+      } catch {
+        // Fallback local offline puro usando las funciones de dominio
+        const resumenLocal = agruparPedidoReposicionStockBajo({
+          productos: productosNormalizadosParaPedido,
+          criterio,
+          filtroGrupoId: filtroGrupoIdEspecifico,
+          cantidadesPersonalizadasPorProducto: cantidadesPersonalizadasPedido,
+        });
+        bytesXlsx = generarXlsxPedidoReposicion({
+          resumen: resumenLocal,
+        });
+        const sufijo = etiquetaNombreArchivo
+          ? `_${etiquetaNombreArchivo
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/gi, '_')
+              .replace(/^_+|_+$/g, '')}`
+          : '';
+        nombreArchivoSugerido = `pedido_${criterio}${sufijo}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      }
+
+      if (
+        bytesXlsx &&
+        typeof window !== 'undefined' &&
+        typeof URL.createObjectURL === 'function'
+      ) {
+        const bufferSeguro = new ArrayBuffer(bytesXlsx.byteLength);
+        new Uint8Array(bufferSeguro).set(bytesXlsx);
+        const blob = new Blob([bufferSeguro], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nombreArchivoSugerido;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      setMensajeExito(
+        `Planilla Excel (.xlsx) de pedido generada y descargada (${nombreArchivoSugerido}). Acción registrada en auditoría SHA-256.`
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo generar el Excel del pedido de reposición.'
+      );
+    } finally {
+      setExportandoXlsxPedido(false);
+    }
+  }
+
   const etiquetaCriterioPlural: Record<CriterioAgrupacionPedido, string> = {
     proveedor: 'Por Proveedor',
     marca: 'Por Marca',
@@ -579,7 +702,7 @@ export function PanelComprasProveedores({
         </div>
       )}
 
-      {/* Lista Automática de Productos con Stock Bajo para Pedido a Proveedor (Proveedor / Marca / Categoría + PDF) */}
+      {/* Lista Automática de Productos con Stock Bajo para Pedido a Proveedor (Proveedor / Marca / Categoría + PDF y Excel) */}
       <section
         className="card"
         aria-label="Lista Automática de Pedidos por Stock Bajo"
@@ -604,27 +727,84 @@ export function PanelComprasProveedores({
               <code>stock_actual &lt;= stock_minimo</code> y arma las órdenes de
               pedido agrupadas <strong>por Proveedor</strong>,{' '}
               <strong>por Marca</strong> o <strong>por Categoría</strong> con
-              exportación directa a <strong>PDF</strong>.
+              exportación directa a <strong>Excel (.xlsx)</strong> y{' '}
+              <strong>PDF</strong>.
             </p>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: '0.5rem',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+              <label
+                htmlFor="select-criterio-exportacion-pedido"
+                style={{ fontSize: '0.82rem', fontWeight: 600 }}
+              >
+                Exportar de:
+              </label>
+              <select
+                id="select-criterio-exportacion-pedido"
+                aria-label="Elegir si exportar de proveedores, categorías o marcas"
+                value={criterioExportacionExcel}
+                onChange={(e) =>
+                  setCriterioExportacionExcel(
+                    e.target.value as CriterioAgrupacionPedido
+                  )
+                }
+                style={{ padding: '0.4rem 0.6rem' }}
+              >
+                <option value="proveedor">🚚 Proveedores</option>
+                <option value="categoria">📂 Categorías</option>
+                <option value="marca">🏷️ Marcas</option>
+              </select>
+            </div>
+
             <button
               type="button"
               className="btn-primary"
+              disabled={
+                exportandoXlsxPedido ||
+                resumenPedidoReposicionActivo.total_productos_bajo_stock === 0
+              }
+              onClick={() =>
+                void manejarExportarXlsxPedido(
+                  criterioExportacionExcel,
+                  criterioExportacionExcel === criterioAgrupacionPedido &&
+                    filtroGrupoPedidoId !== 'todos'
+                    ? filtroGrupoPedidoId
+                    : null
+                )
+              }
+            >
+              {exportandoXlsxPedido
+                ? 'Generando Excel...'
+                : `📊 Exportar Excel (.xlsx) (${etiquetaCriterioPlural[criterioExportacionExcel]})`}
+            </button>
+
+            <button
+              type="button"
+              className="btn-secondary"
               disabled={
                 exportandoPdfPedido ||
                 resumenPedidoReposicionActivo.total_productos_bajo_stock === 0
               }
               onClick={() =>
                 void manejarExportarPdfPedido(
-                  criterioAgrupacionPedido,
-                  filtroGrupoPedidoId === 'todos' ? null : filtroGrupoPedidoId
+                  criterioExportacionExcel,
+                  criterioExportacionExcel === criterioAgrupacionPedido &&
+                    filtroGrupoPedidoId !== 'todos'
+                    ? filtroGrupoPedidoId
+                    : null
                 )
               }
             >
               {exportandoPdfPedido
                 ? 'Generando PDF...'
-                : `📄 Exportar PDF (${etiquetaCriterioPlural[criterioAgrupacionPedido]})`}
+                : `📄 Exportar PDF (${etiquetaCriterioPlural[criterioExportacionExcel]})`}
             </button>
           </div>
         </div>
@@ -665,7 +845,9 @@ export function PanelComprasProveedores({
                   }
                   onClick={() => {
                     setCriterioAgrupacionPedido('proveedor');
+                    setCriterioExportacionExcel('proveedor');
                     setFiltroGrupoPedidoId('todos');
+                    setPaginaGruposPedido(1);
                   }}
                 >
                   🚚 Por Proveedor
@@ -679,7 +861,9 @@ export function PanelComprasProveedores({
                   }
                   onClick={() => {
                     setCriterioAgrupacionPedido('marca');
+                    setCriterioExportacionExcel('marca');
                     setFiltroGrupoPedidoId('todos');
+                    setPaginaGruposPedido(1);
                   }}
                 >
                   🏷️ Por Marca
@@ -693,7 +877,9 @@ export function PanelComprasProveedores({
                   }
                   onClick={() => {
                     setCriterioAgrupacionPedido('categoria');
+                    setCriterioExportacionExcel('categoria');
                     setFiltroGrupoPedidoId('todos');
+                    setPaginaGruposPedido(1);
                   }}
                 >
                   📂 Por Categoría
@@ -713,7 +899,10 @@ export function PanelComprasProveedores({
               <select
                 id="select-filtro-grupo-pedido"
                 value={filtroGrupoPedidoId}
-                onChange={(e) => setFiltroGrupoPedidoId(e.target.value)}
+                onChange={(e) => {
+                  setFiltroGrupoPedidoId(e.target.value);
+                  setPaginaGruposPedido(1);
+                }}
               >
                 <option value="todos">
                   Todos ({resumenTodosLosGruposCriterio.total_grupos} grupo(s) ·{' '}
@@ -769,148 +958,198 @@ export function PanelComprasProveedores({
           </p>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {resumenPedidoReposicionActivo.grupos.map((grupo) => (
-              <div
-                key={`${grupo.criterio}-${grupo.grupo_id}`}
-                className="subcard-box"
-                style={{
-                  padding: '0.9rem',
-                  borderRadius: '0.65rem',
-                }}
-              >
+            {paginacionGruposPedido.itemsPagina.map((grupo) => {
+              const claveGrupo = `${grupo.criterio}-${grupo.grupo_id}`;
+              const paginaGrupoActual = paginasItemsPorGrupo[claveGrupo] ?? 1;
+              const paginacionItemsGrupo = paginarListado(
+                grupo.items,
+                paginaGrupoActual,
+                TAMANIO_PAGINA_POR_DEFECTO
+              );
+              const etiquetaSingularGrupo =
+                grupo.criterio === 'proveedor'
+                  ? 'Proveedor'
+                  : grupo.criterio === 'marca'
+                    ? 'Marca'
+                    : 'Categoría';
+
+              return (
                 <div
+                  key={claveGrupo}
+                  className="subcard-box"
                   style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    flexWrap: 'wrap',
-                    gap: '0.65rem',
-                    marginBottom: '0.65rem',
+                    padding: '0.9rem',
+                    borderRadius: '0.65rem',
                   }}
                 >
-                  <div>
-                    <strong style={{ fontSize: '1rem' }}>
-                      {grupo.criterio === 'proveedor'
-                        ? '🚚 Proveedor: '
-                        : grupo.criterio === 'marca'
-                          ? '🏷️ Marca: '
-                          : '📂 Categoría: '}
-                      {grupo.grupo_nombre}
-                    </strong>
-                    <span
-                      className="text-muted"
-                      style={{ marginLeft: '0.65rem', fontSize: '0.85rem' }}
-                    >
-                      ({grupo.cantidad_productos} producto(s) ·{' '}
-                      {grupo.total_unidades_a_pedir} unid. · Subtotal estimado:{' '}
-                      <strong>
-                        {formatearPesos(grupo.costo_total_estimado_centavos)}
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: '0.65rem',
+                      marginBottom: '0.65rem',
+                    }}
+                  >
+                    <div>
+                      <strong style={{ fontSize: '1rem' }}>
+                        {grupo.criterio === 'proveedor'
+                          ? '🚚 Proveedor: '
+                          : grupo.criterio === 'marca'
+                            ? '🏷️ Marca: '
+                            : '📂 Categoría: '}
+                        {grupo.grupo_nombre}
                       </strong>
-                      )
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => cargarGrupoPedidoEnFormularioCompra(grupo)}
-                    >
-                      🛒 Cargar en formulario de compra
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={exportandoPdfPedido}
-                      onClick={() =>
-                        void manejarExportarPdfPedido(
-                          grupo.criterio,
-                          grupo.grupo_id,
-                          grupo.grupo_nombre
+                      <span
+                        className="text-muted"
+                        style={{ marginLeft: '0.65rem', fontSize: '0.85rem' }}
+                      >
+                        ({grupo.cantidad_productos} producto(s) ·{' '}
+                        {grupo.total_unidades_a_pedir} unid. · Subtotal estimado:{' '}
+                        <strong>
+                          {formatearPesos(grupo.costo_total_estimado_centavos)}
+                        </strong>
                         )
-                      }
-                    >
-                      📄 Exportar PDF de este{' '}
-                      {grupo.criterio === 'proveedor'
-                        ? 'Proveedor'
-                        : grupo.criterio === 'marca'
-                          ? 'Marca'
-                          : 'Categoría'}
-                    </button>
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => cargarGrupoPedidoEnFormularioCompra(grupo)}
+                      >
+                        🛒 Cargar en formulario de compra
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={exportandoXlsxPedido}
+                        onClick={() =>
+                          void manejarExportarXlsxPedido(
+                            grupo.criterio,
+                            grupo.grupo_id,
+                            grupo.grupo_nombre
+                          )
+                        }
+                      >
+                        📊 Exportar Excel de este {etiquetaSingularGrupo}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={exportandoPdfPedido}
+                        onClick={() =>
+                          void manejarExportarPdfPedido(
+                            grupo.criterio,
+                            grupo.grupo_id,
+                            grupo.grupo_nombre
+                          )
+                        }
+                      >
+                        📄 Exportar PDF de este {etiquetaSingularGrupo}
+                      </button>
+                    </div>
                   </div>
-                </div>
 
-                <table className="pos-table">
-                  <thead>
-                    <tr>
-                      <th>Código</th>
-                      <th>Producto</th>
-                      <th>Proveedor / Marca / Categoría</th>
-                      <th>Stock Actual</th>
-                      <th>Stock Mínimo</th>
-                      <th>Cant. a Pedir</th>
-                      <th>Costo Unit.</th>
-                      <th>Subtotal Est.</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {grupo.items.map((item) => (
-                      <tr key={item.producto_id}>
-                        <td>
-                          <code>{item.codigo_mostrar}</code>
-                        </td>
-                        <td>
-                          <strong>{item.nombre}</strong>
-                        </td>
-                        <td className="text-muted" style={{ fontSize: '0.84rem' }}>
-                          {item.proveedor_nombre} · {item.marca_nombre} ·{' '}
-                          {item.categoria_nombre}
-                        </td>
-                        <td>
-                          <span className="badge-stock-bajo">
-                            {item.stock_actual} {item.unidad}
-                          </span>
-                        </td>
-                        <td>
-                          {item.stock_minimo} {item.unidad}
-                        </td>
-                        <td style={{ maxWidth: '110px' }}>
-                          <input
-                            type="number"
-                            min="1"
-                            step="1"
-                            aria-label={`Cantidad a pedir ${item.nombre}`}
-                            value={
-                              cantidadesPersonalizadasPedido[item.producto_id] ??
-                              item.cantidad_a_pedir
-                            }
-                            onChange={(e) =>
-                              actualizarCantidadPersonalizadaPedido(
-                                item.producto_id,
-                                e.target.value
-                              )
-                            }
-                            style={{
-                              width: '82px',
-                              padding: '0.25rem 0.4rem',
-                            }}
-                          />
-                        </td>
-                        <td>
-                          {formatearPesos(item.costo_unitario_centavos)}
-                        </td>
-                        <td>
-                          <strong>
-                            {formatearPesos(
-                              item.subtotal_costo_estimado_centavos
-                            )}
-                          </strong>
-                        </td>
+                  <table className="pos-table">
+                    <thead>
+                      <tr>
+                        <th>Código</th>
+                        <th>Producto</th>
+                        <th>Proveedor / Marca / Categoría</th>
+                        <th>Stock Actual</th>
+                        <th>Stock Mínimo</th>
+                        <th>Cant. a Pedir</th>
+                        <th>Costo Unit.</th>
+                        <th>Subtotal Est.</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ))}
+                    </thead>
+                    <tbody>
+                      {paginacionItemsGrupo.itemsPagina.map((item) => (
+                        <tr key={item.producto_id}>
+                          <td>
+                            <code>{item.codigo_mostrar}</code>
+                          </td>
+                          <td>
+                            <strong>{item.nombre}</strong>
+                          </td>
+                          <td className="text-muted" style={{ fontSize: '0.84rem' }}>
+                            {item.proveedor_nombre} · {item.marca_nombre} ·{' '}
+                            {item.categoria_nombre}
+                          </td>
+                          <td>
+                            <span className="badge-stock-bajo">
+                              {item.stock_actual} {item.unidad}
+                            </span>
+                          </td>
+                          <td>
+                            {item.stock_minimo} {item.unidad}
+                          </td>
+                          <td style={{ maxWidth: '110px' }}>
+                            <input
+                              type="number"
+                              min="1"
+                              step="1"
+                              aria-label={`Cantidad a pedir ${item.nombre}`}
+                              value={
+                                cantidadesPersonalizadasPedido[item.producto_id] ??
+                                item.cantidad_a_pedir
+                              }
+                              onChange={(e) =>
+                                actualizarCantidadPersonalizadaPedido(
+                                  item.producto_id,
+                                  e.target.value
+                                )
+                              }
+                              style={{
+                                width: '82px',
+                                padding: '0.25rem 0.4rem',
+                              }}
+                            />
+                          </td>
+                          <td>
+                            {formatearPesos(item.costo_unitario_centavos)}
+                          </td>
+                          <td>
+                            <strong>
+                              {formatearPesos(
+                                item.subtotal_costo_estimado_centavos
+                              )}
+                            </strong>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <PaginadorTabla
+                    paginaActual={paginacionItemsGrupo.paginaActual}
+                    totalPaginas={paginacionItemsGrupo.totalPaginas}
+                    totalItems={paginacionItemsGrupo.totalItems}
+                    desdeRegistro={paginacionItemsGrupo.desdeRegistro}
+                    hastaRegistro={paginacionItemsGrupo.hastaRegistro}
+                    tamanioPagina={paginacionItemsGrupo.tamanioPagina}
+                    onCambiarPagina={(nuevaPagina) =>
+                      setPaginasItemsPorGrupo((prev) => ({
+                        ...prev,
+                        [claveGrupo]: nuevaPagina,
+                      }))
+                    }
+                    etiquetaItems="artículos del pedido"
+                  />
+                </div>
+              );
+            })}
+            <PaginadorTabla
+              paginaActual={paginacionGruposPedido.paginaActual}
+              totalPaginas={paginacionGruposPedido.totalPaginas}
+              totalItems={paginacionGruposPedido.totalItems}
+              desdeRegistro={paginacionGruposPedido.desdeRegistro}
+              hastaRegistro={paginacionGruposPedido.hastaRegistro}
+              tamanioPagina={paginacionGruposPedido.tamanioPagina}
+              onCambiarPagina={setPaginaGruposPedido}
+              etiquetaItems="grupos de pedido"
+            />
           </div>
         )}
       </section>
@@ -969,20 +1208,58 @@ export function PanelComprasProveedores({
               <strong style={{ display: 'block', marginBottom: '0.55rem' }}>
                 Agregar producto al comprobante
               </strong>
+              <div className="form-group" style={{ marginBottom: '0.55rem' }}>
+                <label htmlFor="input-buscar-prod-compra">
+                  Buscar artículo (por nombre, código interno o código de barras)
+                </label>
+                <input
+                  id="input-buscar-prod-compra"
+                  type="search"
+                  aria-label="Buscar producto para compra"
+                  value={busquedaProductoCompra}
+                  onChange={(e) => {
+                    const valor = e.target.value;
+                    setBusquedaProductoCompra(valor);
+                    const q = valor.trim().toLowerCase();
+                    if (!q) return;
+                    const coincidencia = catalogoProductos.find((p) =>
+                      [
+                        p.nombre,
+                        p.codigo_interno ?? '',
+                        ...(p.codigos_barras ?? []),
+                      ]
+                        .join(' ')
+                        .toLowerCase()
+                        .includes(q)
+                    );
+                    if (coincidencia) {
+                      setProductoSeleccionadoId(coincidencia.id);
+                    }
+                  }}
+                  placeholder="🔍 Escribí nombre, código interno o EAN para filtrar el listado..."
+                />
+              </div>
               <div className="form-row">
                 <div className="form-group">
-                  <label htmlFor="select-prod-compra">Producto</label>
+                  <label htmlFor="select-prod-compra">
+                    Producto ({productosFiltradosCompra.length} coincidencia(s))
+                  </label>
                   <select
                     id="select-prod-compra"
                     value={
-                      productoSeleccionadoId || catalogoProductos[0]?.id || ''
+                      productoSeleccionadoId ||
+                      productosFiltradosCompra[0]?.id ||
+                      catalogoProductos[0]?.id ||
+                      ''
                     }
                     onChange={(e) => setProductoSeleccionadoId(e.target.value)}
                   >
-                    {catalogoProductos.length === 0 && (
-                      <option value="">Sin productos cargados</option>
+                    {productosFiltradosCompra.length === 0 && (
+                      <option value="">
+                        Sin artículos que coincidan con la búsqueda
+                      </option>
                     )}
-                    {catalogoProductos.map((p) => (
+                    {productosFiltradosCompra.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.nombre} ({p.codigo_interno || 'S/C'}) — Costo actual:{' '}
                         {formatearPesos(aCentavos(p.costo_compra ?? 0))}
@@ -1072,34 +1349,50 @@ export function PanelComprasProveedores({
                     </tr>
                   </thead>
                   <tbody>
-                    {itemsCompra.map((item, idx) => (
-                      <tr key={`${item.productoId}-${idx}`}>
-                        <td>{item.nombreProducto}</td>
-                        <td>{item.cantidad}</td>
-                        <td>{formatearPesos(aCentavos(item.costoUnitarioCentavos))}</td>
-                        <td>{item.alicuotaIva}%</td>
-                        <td>
-                          {formatearPesos(
-                            aCentavos(
-                              Math.round(
-                                item.cantidad * item.costoUnitarioCentavos
+                    {paginacionItemsBorradorCompra.itemsPagina.map((item, idxPagina) => {
+                      const idxReal =
+                        (paginacionItemsBorradorCompra.paginaActual - 1) *
+                          paginacionItemsBorradorCompra.tamanioPagina +
+                        idxPagina;
+                      return (
+                        <tr key={`${item.productoId}-${idxReal}`}>
+                          <td>{item.nombreProducto}</td>
+                          <td>{item.cantidad}</td>
+                          <td>{formatearPesos(aCentavos(item.costoUnitarioCentavos))}</td>
+                          <td>{item.alicuotaIva}%</td>
+                          <td>
+                            {formatearPesos(
+                              aCentavos(
+                                Math.round(
+                                  item.cantidad * item.costoUnitarioCentavos
+                                )
                               )
-                            )
-                          )}
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            className="btn-danger-outline"
-                            onClick={() => quitarItemCompra(idx)}
-                          >
-                            Quitar
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                            )}
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="btn-danger-outline"
+                              onClick={() => quitarItemCompra(idxReal)}
+                            >
+                              Quitar
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
+                <PaginadorTabla
+                  paginaActual={paginacionItemsBorradorCompra.paginaActual}
+                  totalPaginas={paginacionItemsBorradorCompra.totalPaginas}
+                  totalItems={paginacionItemsBorradorCompra.totalItems}
+                  desdeRegistro={paginacionItemsBorradorCompra.desdeRegistro}
+                  hastaRegistro={paginacionItemsBorradorCompra.hastaRegistro}
+                  tamanioPagina={paginacionItemsBorradorCompra.tamanioPagina}
+                  onCambiarPagina={setPaginaItemsBorradorCompra}
+                  etiquetaItems="ítems en el comprobante"
+                />
                 <div
                   style={{
                     marginTop: '0.5rem',

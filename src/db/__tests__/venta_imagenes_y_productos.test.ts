@@ -392,10 +392,25 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
     const rutaDbPrueba = path.join(dirTemp, 'pos_local_test.db');
 
     try {
+      const initRes = ejecutarAccionPosLocal(
+        'inicializar_primer_superadmin',
+        {
+          nombreComercio: 'Comercio Disco Test',
+          cuit: '20-12345678-6',
+          condicionIva: 'monotributo',
+          nombreAdmin: 'Admin Disco',
+          usuarioAdmin: 'admindisco',
+          claveAdmin: 'ClaveDisco2026!',
+        },
+        rutaDbPrueba
+      ) as { sessionToken: string };
+      const ctxAuth = { sessionToken: initRes.sessionToken };
+
       const estadoInicial = ejecutarAccionPosLocal(
         'obtener_estado_inicial',
-        { rolActivo: 'superadmin' },
-        rutaDbPrueba
+        {},
+        rutaDbPrueba,
+        ctxAuth
       ) as {
         rutaBaseDatos: string;
         catalogoVenta: Array<{
@@ -418,7 +433,6 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
       const creado = ejecutarAccionPosLocal(
         'crear_producto',
         {
-          rolActivo: 'encargado',
           nombre: 'Pila Alcalina AA x2',
           codigoInterno: 'PIL-AA',
           costoCompraCentavos: 120000,
@@ -426,13 +440,15 @@ describe('Tarea 3 — Imágenes WebP sin EXIF, Escáner, Venta por Teclado y Reg
           codigosBarras: ['7798888777766'],
           stockInicial: 40,
         },
-        rutaDbPrueba
+        rutaDbPrueba,
+        ctxAuth
       ) as { productoId: string };
 
       const estadoPosterior = ejecutarAccionPosLocal(
         'obtener_estado_inicial',
-        { rolActivo: 'cajero' },
-        rutaDbPrueba
+        { rolDemo: 'cajero' },
+        rutaDbPrueba,
+        ctxAuth
       ) as {
         catalogoVenta: Array<{
           id: string;

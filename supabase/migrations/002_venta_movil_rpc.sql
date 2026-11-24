@@ -3,7 +3,10 @@
 -- y RPC transaccional e idempotente crear_venta_movil (PLAN.md §6.2 — Fase 3b)
 -- ============================================================================
 
--- 1. Tabla de sesiones móviles sincronizable con revocación y expiración
+-- 1. Asegurar compatibilidad de columnas en movimientos_stock
+ALTER TABLE public.movimientos_stock ADD COLUMN IF NOT EXISTS referencia_tipo TEXT;
+
+-- 2. Tabla de sesiones móviles sincronizable con revocación y expiración
 CREATE TABLE IF NOT EXISTS public.sesiones_moviles (
   id UUID PRIMARY KEY,
   comercio_id UUID NOT NULL REFERENCES public.comercios(id),
@@ -100,7 +103,7 @@ CREATE OR REPLACE FUNCTION public.crear_venta_movil(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
   v_venta_existente RECORD;
@@ -282,12 +285,12 @@ BEGIN
 
     INSERT INTO public.movimientos_stock (
       id, comercio_id, producto_id, tipo, cantidad,
-      referencia_tipo, referencia_id, motivo, usuario_id,
-      created_at, updated_at, device_id
+      costo_unitario, referencia_id, motivo, usuario_id,
+      created_at, updated_at, device_id, sync_status
     ) VALUES (
       gen_random_uuid(), p_comercio_id, v_prod.id, 'venta', -ABS(v_cantidad),
-      'venta_movil', p_venta_id::text, 'Venta móvil web', p_usuario_id,
-      v_ahora, v_ahora, p_dispositivo_id
+      v_prod.costo_compra, p_venta_id::text, 'Venta móvil web', p_usuario_id,
+      v_ahora, v_ahora, p_dispositivo_id, 'sincronizado'
     );
 
     -- Respuesta proyectada sin costo_unitario (Regla 20)
@@ -355,7 +358,10 @@ BEGIN
     'descuento', p_descuento_global,
     'total', v_total_venta,
     'canal', 'web',
+    'cajero_nombre', v_usuario.nombre,
     'items', v_items_respuesta
   );
 END;
 $$;
+
+GRANT EXECUTE ON FUNCTION public.crear_venta_movil(UUID, UUID, UUID, TEXT, JSONB, JSONB, BIGINT, UUID, UUID) TO anon, authenticated;

@@ -162,13 +162,22 @@ export function validarCargoCuentaCorrienteCliente(params: {
   exigirEnteroCentavos(params.nuevoCargoCentavos, 'nuevoCargoCentavos');
   exigirEnteroCentavos(params.limiteCreditoCentavos, 'limiteCreditoCentavos');
 
+  if (params.limiteCreditoCentavos < 0) {
+    throw new Error('El límite de crédito no puede ser negativo.');
+  }
+
   const nuevoSaldo = params.saldoActualCentavos + params.nuevoCargoCentavos;
 
-  // Si limite_credito === 0 significa que el cliente no tiene tope restrictivo o se evalúa contra el límite configurado
-  if (
-    params.limiteCreditoCentavos > 0 &&
-    nuevoSaldo > params.limiteCreditoCentavos
-  ) {
+  if (params.limiteCreditoCentavos === 0) {
+    return {
+      permitido: false,
+      nuevoSaldoProyectadoCentavos: nuevoSaldo,
+      excedenteCentavos: nuevoSaldo,
+      motivo: `LIMITE_CREDITO_EXCEDIDO: El cliente no tiene límite de crédito habilitado (${formatearMonedaARS(0)}).`,
+    };
+  }
+
+  if (nuevoSaldo > params.limiteCreditoCentavos) {
     const excedente = nuevoSaldo - params.limiteCreditoCentavos;
     return {
       permitido: false,
@@ -314,6 +323,11 @@ const ESC = 0x1b;
 const GS = 0x1d;
 const LF = 0x0a;
 
+export function sanitizarTextoEscPos(texto: string): string {
+  // eslint-disable-next-line no-control-regex
+  return texto.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+}
+
 /**
  * Genera los bytes de comandos estándar ESC/POS (`ESC @`, `ESC a`, `ESC E`, `GS V`)
  * a partir de un `DatosTicketNoFiscal` ya sanitizado sin costos (Regla 20).
@@ -343,22 +357,24 @@ export function generarComandosEscPosTicket(
   };
 
   const lineasTexto: string[] = [];
-  lineasTexto.push(datos.comercioNombre.toUpperCase());
+  lineasTexto.push(sanitizarTextoEscPos(datos.comercioNombre).toUpperCase());
   if (datos.comercioCuit) {
-    lineasTexto.push(`CUIT: ${datos.comercioCuit}`);
+    lineasTexto.push(`CUIT: ${sanitizarTextoEscPos(datos.comercioCuit)}`);
   }
   if (datos.comercioDomicilio) {
-    lineasTexto.push(datos.comercioDomicilio);
+    lineasTexto.push(sanitizarTextoEscPos(datos.comercioDomicilio));
   }
   lineasTexto.push('DOCUMENTO NO VALIDO COMO FACTURA');
   lineasTexto.push(separador);
   lineasTexto.push(`Fecha: ${formatearFechaHoraAR(datos.fechaIso)}`);
-  lineasTexto.push(`Ticket: #${datos.ventaId.slice(-8).toUpperCase()}`);
-  lineasTexto.push(`Atendio: ${datos.cajeroNombre}`);
+  lineasTexto.push(
+    `Ticket: #${sanitizarTextoEscPos(datos.ventaId).slice(-8).toUpperCase()}`
+  );
+  lineasTexto.push(`Atendio: ${sanitizarTextoEscPos(datos.cajeroNombre)}`);
   lineasTexto.push(separador);
 
   for (const item of datos.items) {
-    lineasTexto.push(item.descripcion.slice(0, cols));
+    lineasTexto.push(sanitizarTextoEscPos(item.descripcion).slice(0, cols));
     const detalleCant = `  ${item.cantidad} x ${formatearMonedaARS(item.precio_unitario)}`;
     const subtotalStr = formatearMonedaARS(item.subtotal);
     lineasTexto.push(alinearExtremos(detalleCant, subtotalStr));
@@ -381,7 +397,7 @@ export function generarComandosEscPosTicket(
   for (const p of datos.pagos) {
     lineasTexto.push(
       alinearExtremos(
-        `Pago (${p.medio.replace(/_/g, ' ')}):`,
+        `Pago (${sanitizarTextoEscPos(p.medio).replace(/_/g, ' ')}):`,
         formatearMonedaARS(p.monto)
       )
     );
@@ -453,6 +469,9 @@ export interface ResultadoParseoCsvCatalogo {
   readonly errores: readonly string[];
 }
 
+export const MAX_BYTES_CSV_IMPORTACION = 5 * 1024 * 1024;
+export const MAX_FILAS_CSV_IMPORTACION = 5000;
+
 /**
  * Parsea un texto CSV (separado por `;` o `,`, con encabezados en la primera línea).
  * Columnas soportadas: `nombre;codigo_interno;codigo_barras;costo_compra;precio_venta;alicuota_iva;stock_inicial;stock_minimo;categoria;marca`
@@ -460,6 +479,16 @@ export interface ResultadoParseoCsvCatalogo {
 export function parsearCsvImportacionCatalogo(
   contenidoCsv: string
 ): ResultadoParseoCsvCatalogo {
+  if (new TextEncoder().encode(contenidoCsv).byteLength > MAX_BYTES_CSV_IMPORTACION) {
+    return {
+      filasValidas: [],
+      filas: [],
+      errores: [
+        `El archivo CSV supera el tamaño máximo permitido de ${MAX_BYTES_CSV_IMPORTACION / (1024 * 1024)} MB.`,
+      ],
+    };
+  }
+
   const lineas = contenidoCsv
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -471,6 +500,16 @@ export function parsearCsvImportacionCatalogo(
       filas: [],
       errores: [
         'El archivo CSV debe incluir una fila de encabezados y al menos una fila de productos.',
+      ],
+    };
+  }
+
+  if (lineas.length - 1 > MAX_FILAS_CSV_IMPORTACION) {
+    return {
+      filasValidas: [],
+      filas: [],
+      errores: [
+        `El archivo CSV supera el máximo de ${MAX_FILAS_CSV_IMPORTACION} filas por importación.`,
       ],
     };
   }
@@ -536,6 +575,12 @@ export function parsearCsvImportacionCatalogo(
 
       const precioVentaCentavos = pesosACentavos(precioRaw);
       const costoCompraCentavos = pesosACentavos(costoRaw);
+      if (precioVentaCentavos < 0 || costoCompraCentavos < 0) {
+        errores.push(
+          `Fila ${numFila} ("${nombre}"): El precio de venta y el costo de compra deben ser >= 0.`
+        );
+        continue;
+      }
 
       let alicuotaIva: AlicuotaIva = 21;
       if (idxIva >= 0 && cols[idxIva]) {
@@ -547,12 +592,24 @@ export function parsearCsvImportacionCatalogo(
 
       const stockInicial =
         idxStockInicial >= 0 && cols[idxStockInicial]
-          ? Number(cols[idxStockInicial]!.replace(',', '.')) || 0
+          ? Number(cols[idxStockInicial]!.replace(',', '.'))
           : 0;
       const stockMinimo =
         idxStockMinimo >= 0 && cols[idxStockMinimo]
-          ? Number(cols[idxStockMinimo]!.replace(',', '.')) || 0
+          ? Number(cols[idxStockMinimo]!.replace(',', '.'))
           : 0;
+
+      if (
+        !Number.isFinite(stockInicial) ||
+        stockInicial < 0 ||
+        !Number.isFinite(stockMinimo) ||
+        stockMinimo < 0
+      ) {
+        errores.push(
+          `Fila ${numFila} ("${nombre}"): stock_inicial y stock_minimo deben ser números finitos >= 0.`
+        );
+        continue;
+      }
 
       const rawCodigoBarras =
         idxCodigoBarras >= 0 && cols[idxCodigoBarras]

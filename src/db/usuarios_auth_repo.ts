@@ -66,6 +66,43 @@ function encolarSyncUsuario(
   ).run(generarUuidV7(), tabla, registroId, operacion, timestamp);
 }
 
+function revocarSesionesMovilesUsuario(
+  db: DatabaseSync,
+  comercioId: string,
+  usuarioId: string,
+  actorUsuarioId: string | null,
+  motivo: string,
+  ahoraIso: string
+): void {
+  try {
+    const activas = db
+      .prepare(
+        `SELECT id FROM sesiones_moviles
+         WHERE comercio_id = ? AND usuario_id = ? AND estado = 'activa' AND deleted_at IS NULL`
+      )
+      .all(comercioId, usuarioId) as unknown as Array<{ id: string }>;
+
+    if (activas.length === 0) return;
+
+    db.prepare(
+      `UPDATE sesiones_moviles
+       SET estado = 'revocada',
+           revocada_at = ?,
+           revocada_por_id = ?,
+           motivo_revocacion = ?,
+           updated_at = ?,
+           sync_status = 'pendiente'
+       WHERE comercio_id = ? AND usuario_id = ? AND estado = 'activa' AND deleted_at IS NULL`
+    ).run(ahoraIso, actorUsuarioId, motivo, ahoraIso, comercioId, usuarioId);
+
+    for (const s of activas) {
+      encolarSyncUsuario(db, 'sesiones_moviles', s.id, 'update', ahoraIso);
+    }
+  } catch {
+    // Si la tabla sesiones_moviles aún no existiera en un test parcial, no romper
+  }
+}
+
 interface FilaUsuarioAuth {
   id: string;
   comercio_id: string;
@@ -137,7 +174,7 @@ export function autenticarUsuarioOffline(
       insertarRegistroAuditoria(db, {
         actor: {
           comercio_id: params.comercioId,
-          usuario_id: '',
+          usuario_id: null,
           usuario_nombre: usuarioLimpio || 'desconocido',
           rol: 'cajero',
           device_id: params.deviceId,
@@ -191,7 +228,10 @@ export function autenticarUsuarioOffline(
     );
   }
 
-  const claveValida = verificarClaveArgon2id(params.clave, fila.clave_hash);
+  const claveValida =
+    typeof fila.clave_hash === 'string' &&
+    fila.clave_hash.startsWith('$argon2id$') &&
+    verificarClaveArgon2id(params.clave, fila.clave_hash);
 
   if (!claveValida) {
     const nuevosIntentos = fila.intentos_fallidos + 1;
@@ -347,6 +387,14 @@ export function cambiarClavePropia(
     ).run(nuevoHash, ahora, actor.device_id, actor.usuario_id, actor.comercio_id);
 
     encolarSyncUsuario(db, 'usuarios', actor.usuario_id, 'update', ahora);
+    revocarSesionesMovilesUsuario(
+      db,
+      actor.comercio_id,
+      actor.usuario_id,
+      actor.usuario_id,
+      'Cambio de contraseña propia',
+      ahora
+    );
 
     insertarRegistroAuditoria(db, {
       actor,
@@ -575,6 +623,14 @@ export function resetearClaveUsuario(
     );
 
     encolarSyncUsuario(db, 'usuarios', params.usuarioObjetivoId, 'update', ahora);
+    revocarSesionesMovilesUsuario(
+      db,
+      actor.comercio_id,
+      params.usuarioObjetivoId,
+      actor.usuario_id,
+      'Reseteo de contraseña por superadmin',
+      ahora
+    );
 
     insertarRegistroAuditoria(db, {
       actor,
@@ -592,6 +648,94 @@ export function resetearClaveUsuario(
   });
 
   return { claveTemporal };
+}
+
+/**
+ * Establece directamente una nueva contraseña para un usuario (por el superadmin desde Gestión de Usuarios
+ * o por el propio usuario al actualizar su clave), marcando debe_cambiar_clave = 0 ("Al día").
+ * Nunca registra la clave ni su hash en la auditoría (Regla 16).
+ */
+export function establecerClaveUsuarioDirecta(
+  db: DatabaseSync,
+  actor: ActorContexto,
+  params: {
+    usuarioObjetivoId: string;
+    claveNueva: string;
+    debeCambiarAlIngresar?: boolean;
+    motivo?: string;
+    opcionesArgon?: OpcionesArgon2id;
+  }
+): void {
+  if (actor.usuario_id !== params.usuarioObjetivoId) {
+    exigirPermiso(actor.rol, 'gestionar_usuarios');
+  }
+
+  validarPoliticaClave(params.claveNueva);
+  const nuevoHash = hashearClaveArgon2id(
+    params.claveNueva,
+    params.opcionesArgon
+  );
+  const flagDebeCambiar = params.debeCambiarAlIngresar ? 1 : 0;
+
+  ejecutarEnTransaccion(db, () => {
+    const ahora = new Date().toISOString();
+    const existe = db
+      .prepare(
+        `SELECT id, usuario, debe_cambiar_clave FROM usuarios
+         WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
+      )
+      .get(params.usuarioObjetivoId, actor.comercio_id) as
+      | { id: string; usuario: string; debe_cambiar_clave: number }
+      | undefined;
+
+    if (!existe) {
+      throw new Error('Usuario no encontrado.');
+    }
+
+    db.prepare(
+      `UPDATE usuarios
+       SET clave_hash = ?,
+           debe_cambiar_clave = ?,
+           intentos_fallidos = 0,
+           bloqueado_hasta = NULL,
+           updated_at = ?,
+           device_id = ?,
+           sync_status = 'pendiente'
+       WHERE id = ? AND comercio_id = ?`
+    ).run(
+      nuevoHash,
+      flagDebeCambiar,
+      ahora,
+      actor.device_id,
+      params.usuarioObjetivoId,
+      actor.comercio_id
+    );
+
+    encolarSyncUsuario(db, 'usuarios', params.usuarioObjetivoId, 'update', ahora);
+    revocarSesionesMovilesUsuario(
+      db,
+      actor.comercio_id,
+      params.usuarioObjetivoId,
+      actor.usuario_id,
+      'Actualización directa de contraseña',
+      ahora
+    );
+
+    insertarRegistroAuditoria(db, {
+      actor,
+      accion: 'usuario_cambiar_clave',
+      entidad: 'usuarios',
+      entidad_id: params.usuarioObjetivoId,
+      valores_antes: { debe_cambiar_clave: existe.debe_cambiar_clave },
+      valores_despues: {
+        usuario: existe.usuario,
+        debe_cambiar_clave: flagDebeCambiar,
+        intentos_fallidos: 0,
+      },
+      motivo: params.motivo ?? 'Actualización de contraseña de acceso',
+      ahoraIso: ahora,
+    });
+  });
 }
 
 /**

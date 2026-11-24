@@ -33,7 +33,7 @@ import {
   type ResumenLibroIva,
 } from '../domain/gestion_fase3.ts';
 import { exigirPermiso } from '../domain/permisos.ts';
-import { desglosarIvaPorItem, type AlicuotaIva } from '../domain/totales.ts';
+import { desglosarIvaPorItem, type AlicuotaIva, type MedioPago } from '../domain/totales.ts';
 import { generarUuidV7 } from '../domain/uuid.ts';
 import { generarLibroXlsx } from '../domain/xlsx.ts';
 import { obtenerDatosTicketDeVentaDb } from './productos_repo.ts';
@@ -86,6 +86,19 @@ export function crearCategoria(
   }
 
   return ejecutarEnTransaccion(db, () => {
+    if (params.padreId) {
+      const padre = db
+        .prepare(
+          `SELECT id FROM categorias
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL
+           LIMIT 1`
+        )
+        .get(params.padreId, actor.comercio_id) as { id: string } | undefined;
+      if (!padre) {
+        throw new Error('La categoría padre indicada no existe en este comercio.');
+      }
+    }
+
     const existente = db
       .prepare(
         `SELECT id FROM categorias
@@ -405,6 +418,7 @@ export function registrarCompraProveedor(
     enCuentaCorriente?: boolean;
     registrarCargoCuentaCorriente?: boolean;
     montoPagadoEnElActoCentavos?: Centavos;
+    sucursalId?: string | null;
     items: readonly ItemCompraInput[];
   }
 ): {
@@ -474,20 +488,50 @@ export function registrarCompraProveedor(
     const ivaCentavos =
       params.ivaCentavos !== undefined ? params.ivaCentavos : ivaCalculado;
     exigirEnteroCentavos(ivaCentavos, 'ivaCentavos');
-    const totalCentavos =
-      params.ivaCentavos !== undefined
-        ? subtotal + ivaCalculado + params.ivaCentavos
-        : subtotal + ivaCentavos;
+    if (ivaCentavos < 0) {
+      throw new Error('El IVA de la compra no puede ser negativo.');
+    }
+    const totalCentavos = subtotal + ivaCentavos;
+
+    const pagadoActoCheck = params.montoPagadoEnElActoCentavos ?? 0;
+    exigirEnteroCentavos(pagadoActoCheck, 'montoPagadoEnElActoCentavos');
+    if (pagadoActoCheck < 0 || pagadoActoCheck > totalCentavos) {
+      throw new Error(
+        'El monto pagado en el acto debe estar entre $ 0,00 y el total de la compra.'
+      );
+    }
+
+    if (params.sucursalId) {
+      const sucValida = db
+        .prepare(
+          `SELECT id FROM sucursales
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL AND activo = 1
+           LIMIT 1`
+        )
+        .get(params.sucursalId, actor.comercio_id) as { id: string } | undefined;
+      if (!sucValida) {
+        throw new Error('La sucursal indicada para la compra no existe o está inactiva.');
+      }
+    }
+
+    const cfgSuc = db
+      .prepare(
+        `SELECT sucursal_activa_id FROM configuracion_sistema WHERE comercio_id = ? LIMIT 1`
+      )
+      .get(actor.comercio_id) as { sucursal_activa_id: string | null } | undefined;
+    const sucursalCompraId =
+      params.sucursalId ?? cfgSuc?.sucursal_activa_id ?? null;
 
     db.prepare(
       `INSERT INTO compras (
-        id, comercio_id, proveedor_id, usuario_id, fecha, comprobante_proveedor,
+        id, comercio_id, sucursal_id, proveedor_id, usuario_id, fecha, comprobante_proveedor,
         subtotal, iva, total, estado,
         created_at, updated_at, deleted_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'registrada', ?, ?, NULL, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'registrada', ?, ?, NULL, ?, 'pendiente')`
     ).run(
       compraId,
       actor.comercio_id,
+      sucursalCompraId,
       provIdEfectivo,
       actor.usuario_id,
       ahora,
@@ -546,14 +590,15 @@ export function registrarCompraProveedor(
       const movStockId = generarUuidV7();
       db.prepare(
         `INSERT INTO movimientos_stock (
-          id, comercio_id, producto_id, tipo, cantidad, costo_unitario,
+          id, comercio_id, producto_id, sucursal_id, tipo, cantidad, costo_unitario,
           referencia_id, motivo, usuario_id,
           created_at, updated_at, deleted_at, device_id, sync_status
-        ) VALUES (?, ?, ?, 'compra', ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+        ) VALUES (?, ?, ?, ?, 'compra', ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
       ).run(
         movStockId,
         actor.comercio_id,
         item.productoId,
+        sucursalCompraId,
         Math.abs(item.cantidad),
         item.costoUnitarioCentavos,
         compraId,
@@ -617,13 +662,14 @@ export function registrarCompraProveedor(
           db.prepare(
             `UPDATE precios
              SET precio_venta = ?, margen_bp = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
-             WHERE id = ?`
+             WHERE id = ? AND comercio_id = ?`
           ).run(
             item.nuevoPrecioVentaCentavos,
             margenBp,
             ahora,
             actor.device_id,
-            precioRow.id
+            precioRow.id,
+            actor.comercio_id
           );
           encolarSync(db, 'precios', precioRow.id, 'update', ahora);
         }
@@ -818,6 +864,12 @@ export function crearCliente(
 
   const limiteCredito = params.limiteCreditoCentavos ?? 0;
   exigirEnteroCentavos(limiteCredito, 'limiteCreditoCentavos');
+  if (limiteCredito < 0) {
+    throw new Error('El límite de crédito no puede ser negativo.');
+  }
+  if (limiteCredito > 0) {
+    exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
+  }
 
   return ejecutarEnTransaccion(db, () => {
     const ahora = new Date().toISOString();
@@ -920,26 +972,25 @@ export function registrarMovimientoCuentaCorriente(
     montoCentavos: Centavos;
     referenciaId?: string | null;
     observaciones?: string | null;
+    medio?: MedioPago;
+    cajaSesionId?: string | null;
   }
 ): {
   movimientoId: string;
   nuevoSaldoCentavos: Centavos;
 } {
   exigirPermiso(actor.rol, 'vender_y_caja');
+  if (params.entidadTipo === 'proveedor') {
+    exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
+  }
   exigirEnteroCentavos(params.montoCentavos, 'montoCentavos');
   if (params.montoCentavos <= 0) {
     throw new Error('El monto del movimiento debe ser mayor a $ 0,00.');
   }
 
   return ejecutarEnTransaccion(db, () => {
-    const saldoActual = obtenerSaldoEntidadCuentaCorriente(
-      db,
-      actor.comercio_id,
-      params.entidadTipo,
-      params.entidadId
-    );
-
-    if (params.entidadTipo === 'cliente' && params.tipo === 'cargo') {
+    let limiteCreditoCliente = 0;
+    if (params.entidadTipo === 'cliente') {
       const cli = db
         .prepare(
           `SELECT id, nombre, limite_credito FROM clientes
@@ -952,16 +1003,42 @@ export function registrarMovimientoCuentaCorriente(
       if (!cli) {
         throw new Error('Cliente no encontrado.');
       }
+      limiteCreditoCliente = cli.limite_credito;
+    } else {
+      const prov = db
+        .prepare(
+          `SELECT id FROM proveedores
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
+        )
+        .get(params.entidadId, actor.comercio_id) as { id: string } | undefined;
+      if (!prov) {
+        throw new Error('Proveedor no encontrado.');
+      }
+    }
 
+    const saldoActual = obtenerSaldoEntidadCuentaCorriente(
+      db,
+      actor.comercio_id,
+      params.entidadTipo,
+      params.entidadId
+    );
+
+    if (params.entidadTipo === 'cliente' && params.tipo === 'cargo') {
       const validacion = validarCargoCuentaCorrienteCliente({
         saldoActualCentavos: saldoActual,
         nuevoCargoCentavos: params.montoCentavos,
-        limiteCreditoCentavos: cli.limite_credito,
+        limiteCreditoCentavos: limiteCreditoCliente,
       });
 
       if (!validacion.permitido) {
         throw new Error(validacion.motivo);
       }
+    }
+
+    if (params.tipo === 'pago' && params.montoCentavos > saldoActual) {
+      throw new Error(
+        'SOBREPAGO_CUENTA_CORRIENTE: El pago supera el saldo pendiente actual.'
+      );
     }
 
     const ahora = new Date().toISOString();
@@ -989,6 +1066,53 @@ export function registrarMovimientoCuentaCorriente(
     );
 
     encolarSync(db, 'cuenta_corriente_movimientos', id, 'insert', ahora);
+
+    if (
+      params.tipo === 'pago' &&
+      params.medio === 'efectivo' &&
+      params.cajaSesionId
+    ) {
+      const sesion = db
+        .prepare(
+          `SELECT id, estado FROM caja_sesiones
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
+        )
+        .get(params.cajaSesionId, actor.comercio_id) as
+        | { id: string; estado: string }
+        | undefined;
+      if (!sesion || sesion.estado !== 'abierta') {
+        throw new Error(
+          'CAJA_CERRADA: La sesión de caja indicada no existe o no está abierta.'
+        );
+      }
+      const cajaMovId = generarUuidV7();
+      const tipoCaja = params.entidadTipo === 'cliente' ? 'ingreso' : 'egreso';
+      const conceptoCaja =
+        params.entidadTipo === 'cliente'
+          ? 'Cobro cuenta corriente cliente'
+          : 'Pago cuenta corriente proveedor';
+      db.prepare(
+        `INSERT INTO caja_movimientos (
+          id, comercio_id, caja_sesion_id, usuario_id, fecha,
+          tipo, concepto, monto, medio, referencia_id,
+          created_at, updated_at, deleted_at, device_id, sync_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'efectivo', ?, ?, ?, NULL, ?, 'pendiente')`
+      ).run(
+        cajaMovId,
+        actor.comercio_id,
+        params.cajaSesionId,
+        actor.usuario_id,
+        ahora,
+        tipoCaja,
+        conceptoCaja,
+        params.montoCentavos,
+        id,
+        ahora,
+        ahora,
+        actor.device_id
+      );
+      encolarSync(db, 'caja_movimientos', cajaMovId, 'insert', ahora);
+    }
     insertarRegistroAuditoria(db, {
       actor,
       accion: `cuenta_corriente_${params.tipo}`,
@@ -1024,6 +1148,19 @@ export function listarMovimientosCuentaCorriente(
   entidadTipo: 'cliente' | 'proveedor',
   entidadId: string
 ): MovimientoCuentaCorrienteFila[] {
+  const tablaEntidad = entidadTipo === 'cliente' ? 'clientes' : 'proveedores';
+  const entidadActiva = db
+    .prepare(
+      `SELECT id FROM ${tablaEntidad}
+       WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL
+       LIMIT 1`
+    )
+    .get(entidadId, comercioId) as { id: string } | undefined;
+
+  if (!entidadActiva) {
+    return [];
+  }
+
   const filas = db
     .prepare(
       `SELECT id, entidad_tipo, entidad_id, tipo, monto, referencia_id, observaciones, created_at
@@ -1078,6 +1215,15 @@ export function aplicarActualizacionMasivaPrecios(
 
   const porcentajeEfectivo =
     params.porcentajeVariacion ?? params.porcentaje ?? 0;
+  if (
+    !Number.isFinite(porcentajeEfectivo) ||
+    porcentajeEfectivo <= -100 ||
+    porcentajeEfectivo > 1000
+  ) {
+    throw new Error(
+      'El porcentaje de actualización masiva debe estar entre -99,99% y +1000%.'
+    );
+  }
   const aplicarACostos =
     Boolean(params.aplicarACostosTambien) ||
     Boolean(params.actualizarCostoCompraTambien);
@@ -1148,15 +1294,22 @@ export function aplicarActualizacionMasivaPrecios(
       db.prepare(
         `UPDATE precios
          SET precio_venta = ?, margen_bp = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
-         WHERE id = ?`
-      ).run(nuevoPrecio, margenBp, ahora, actor.device_id, prod.precio_id);
+         WHERE id = ? AND comercio_id = ?`
+      ).run(
+        nuevoPrecio,
+        margenBp,
+        ahora,
+        actor.device_id,
+        prod.precio_id,
+        actor.comercio_id
+      );
       encolarSync(db, 'precios', prod.precio_id, 'update', ahora);
 
       db.prepare(
         `UPDATE productos
          SET costo_compra = ?, fecha_ultimo_cambio_precio = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
-         WHERE id = ?`
-      ).run(nuevoCosto, ahora, ahora, actor.device_id, prod.id);
+         WHERE id = ? AND comercio_id = ?`
+      ).run(nuevoCosto, ahora, ahora, actor.device_id, prod.id, actor.comercio_id);
       encolarSync(db, 'productos', prod.id, 'update', ahora);
 
       actualizados++;
@@ -1227,95 +1380,108 @@ export function importarProductosDesdeCsv(
   let creados = 0;
   let actualizados = 0;
   const erroresImportacion: string[] = [...parseo.errores];
+  const TAMANO_LOTE_CSV = 250;
 
-  ejecutarEnTransaccion(db, () => {
-    const ahora = new Date().toISOString();
-    const listaDefault = db
-      .prepare(
-        `SELECT id FROM listas_precio
-         WHERE comercio_id = ? AND es_predeterminada = 1 AND deleted_at IS NULL
-         LIMIT 1`
-      )
-      .get(actor.comercio_id) as { id: string } | undefined;
+  const listaDefault = db
+    .prepare(
+      `SELECT id FROM listas_precio
+       WHERE comercio_id = ? AND es_predeterminada = 1 AND deleted_at IS NULL
+       LIMIT 1`
+    )
+    .get(actor.comercio_id) as { id: string } | undefined;
 
-    for (const fila of parseo.filasValidas) {
-      let categoriaId: string | null = null;
-      if (fila.categoriaNombre) {
-        categoriaId = crearCategoria(db, actor, {
-          nombre: fila.categoriaNombre,
-        });
-      }
+  for (
+    let offset = 0;
+    offset < parseo.filasValidas.length;
+    offset += TAMANO_LOTE_CSV
+  ) {
+    const lote = parseo.filasValidas.slice(offset, offset + TAMANO_LOTE_CSV);
+    ejecutarEnTransaccion(db, () => {
+      const ahora = new Date().toISOString();
 
-      let marcaId: string | null = null;
-      if (fila.marcaNombre) {
-        marcaId = crearMarca(db, actor, { nombre: fila.marcaNombre });
-      }
+      for (const fila of lote) {
+        let categoriaId: string | null = null;
+        if (fila.categoriaNombre) {
+          categoriaId = crearCategoria(db, actor, {
+            nombre: fila.categoriaNombre,
+          });
+        }
 
-      const codigoInternoLimpio = fila.codigoInterno?.trim() || undefined;
-      const codigoBarrasLimpio = fila.codigoBarras?.trim() || undefined;
+        let marcaId: string | null = null;
+        if (fila.marcaNombre) {
+          marcaId = crearMarca(db, actor, { nombre: fila.marcaNombre });
+        }
 
-      // 1. Buscar producto existente por codigo_interno (activo o borrado lógicamente)
-      let productoExistente = codigoInternoLimpio
-        ? (db
-            .prepare(
-              `SELECT id, codigo_interno, nombre, deleted_at FROM productos
-               WHERE comercio_id = ? AND lower(codigo_interno) = lower(?)
-               ORDER BY deleted_at IS NOT NULL ASC
-               LIMIT 1`
-            )
-            .get(actor.comercio_id, codigoInternoLimpio) as
-            | {
-                id: string;
-                codigo_interno: string | null;
-                nombre: string;
-                deleted_at: string | null;
-              }
-            | undefined)
-        : undefined;
+        const codigoInternoLimpio = fila.codigoInterno?.trim() || undefined;
+        const codigoBarrasLimpio = fila.codigoBarras?.trim() || undefined;
 
-      // 2. Verificar si el código de barras ya existe en codigos_barras para este comercio
-      const barraExistente = codigoBarrasLimpio
-        ? (db
-            .prepare(
-              `SELECT cb.id AS cb_id, cb.producto_id, cb.deleted_at AS cb_deleted_at,
-                      p.codigo_interno AS prod_codigo_interno, p.nombre AS prod_nombre
-               FROM codigos_barras cb
-               INNER JOIN productos p ON p.id = cb.producto_id
-               WHERE cb.comercio_id = ? AND cb.codigo = ?
-               ORDER BY cb.deleted_at IS NOT NULL ASC
-               LIMIT 1`
-            )
-            .get(actor.comercio_id, codigoBarrasLimpio) as
-            | {
-                cb_id: string;
-                producto_id: string;
-                cb_deleted_at: string | null;
-                prod_codigo_interno: string | null;
-                prod_nombre: string;
-              }
-            | undefined)
-        : undefined;
+        // 1. Buscar producto existente por codigo_interno (activo o borrado lógicamente)
+        let productoExistente = codigoInternoLimpio
+          ? (db
+              .prepare(
+                `SELECT id, codigo_interno, nombre, deleted_at FROM productos
+                 WHERE comercio_id = ? AND lower(codigo_interno) = lower(?)
+                 ORDER BY deleted_at IS NOT NULL ASC
+                 LIMIT 1`
+              )
+              .get(actor.comercio_id, codigoInternoLimpio) as
+              | {
+                  id: string;
+                  codigo_interno: string | null;
+                  nombre: string;
+                  deleted_at: string | null;
+                }
+              | undefined)
+          : undefined;
 
-      // Si no se encontró por codigo_interno pero el código de barras ya pertenece a un producto
-      // (y la fila no trae un codigo_interno distinto al de ese producto), tratarlo como el mismo producto
-      if (
-        !productoExistente &&
-        barraExistente &&
-        (!codigoInternoLimpio ||
-          !barraExistente.prod_codigo_interno ||
-          barraExistente.prod_codigo_interno.toLowerCase() ===
-            codigoInternoLimpio.toLowerCase())
-      ) {
-        productoExistente = {
-          id: barraExistente.producto_id,
-          codigo_interno: barraExistente.prod_codigo_interno,
-          nombre: barraExistente.prod_nombre,
-          deleted_at: null,
-        };
-      }
+        // 2. Verificar si el código de barras ya existe en codigos_barras para este comercio
+        const barraExistente = codigoBarrasLimpio
+          ? (db
+              .prepare(
+                `SELECT cb.id AS cb_id, cb.producto_id, cb.deleted_at AS cb_deleted_at,
+                        p.codigo_interno AS prod_codigo_interno, p.nombre AS prod_nombre, p.deleted_at AS prod_deleted_at
+                 FROM codigos_barras cb
+                 INNER JOIN productos p ON p.id = cb.producto_id
+                 WHERE cb.comercio_id = ? AND cb.codigo = ?
+                 ORDER BY cb.deleted_at IS NOT NULL ASC
+                 LIMIT 1`
+              )
+              .get(actor.comercio_id, codigoBarrasLimpio) as
+              | {
+                  cb_id: string;
+                  producto_id: string;
+                  cb_deleted_at: string | null;
+                  prod_codigo_interno: string | null;
+                  prod_nombre: string;
+                  prod_deleted_at: string | null;
+                }
+              | undefined)
+          : undefined;
 
-      if (productoExistente && listaDefault) {
-        if (actualizarExistentes || productoExistente.deleted_at !== null) {
+        if (
+          !productoExistente &&
+          barraExistente &&
+          (!codigoInternoLimpio ||
+            !barraExistente.prod_codigo_interno ||
+            barraExistente.prod_codigo_interno.toLowerCase() ===
+              codigoInternoLimpio.toLowerCase())
+        ) {
+          productoExistente = {
+            id: barraExistente.producto_id,
+            codigo_interno: barraExistente.prod_codigo_interno,
+            nombre: barraExistente.prod_nombre,
+            deleted_at: barraExistente.prod_deleted_at,
+          };
+        }
+
+        if (productoExistente && listaDefault) {
+          if (productoExistente.deleted_at !== null && !actualizarExistentes) {
+            erroresImportacion.push(
+              `Fila ${fila.filaNumero} ("${fila.nombre}"): el producto ya existe dado de baja; activá "Actualizar existentes" para reactivarlo.`
+            );
+            continue;
+          }
+          if (actualizarExistentes) {
           db.prepare(
             `UPDATE productos
              SET nombre = ?,
@@ -1463,7 +1629,10 @@ export function importarProductosDesdeCsv(
         creados++;
       }
     }
+    });
+  }
 
+  ejecutarEnTransaccion(db, () => {
     insertarRegistroAuditoria(db, {
       actor,
       accion: 'catalogo_importar_csv',
@@ -1474,7 +1643,7 @@ export function importarProductosDesdeCsv(
         productos_actualizados: actualizados,
         errores_count: erroresImportacion.length,
       },
-      ahoraIso: ahora,
+      ahoraIso: new Date().toISOString(),
     });
   });
 

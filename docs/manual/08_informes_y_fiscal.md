@@ -13,9 +13,10 @@ El módulo de Informes proporciona al dueño del negocio y al encargado una visi
 > Tablero superior de métricas con Total Facturado, Ganancia Bruta Real, Margen Porcentual, Ticket Promedio y selector de fechas.
 
 ### Métricas clave del panel:
+- **Filtro por Sucursal (`🏢 Sucursal`):** Permite analizar las métricas, cobranzas y el stock valorizado de **Todas las sucursales (Consolidado)** o filtrar por una sucursal o depósito específico.
 - **Total de Ventas ($):** Ingreso bruto total del período seleccionado.
 - **Ganancia Bruta ($):** Calculada de manera exacta utilizando el **costo histórico** guardado al momento de cada venta. Esto garantiza que si un producto aumentó de costo hoy, no altere la ganancia calculada de las ventas del mes pasado.
-- **Margen de Rentabilidad (%):** Porcentaje de ganancia sobre el costo.
+- **Margen de Rentabilidad (%):** Porcentaje de ganancia sobre el costo y sobre facturación.
 - **Cantidad de Operaciones y Ticket Promedio:** Cantidad de clientes atendidos y promedio de gasto por ticket.
 
 ---
@@ -30,6 +31,7 @@ El módulo de Informes proporciona al dueño del negocio y al encargado una visi
 
 - **Distribución de Cobranza:** Permite conciliar lo que ingresó físicamente por caja contra las acreditaciones de Mercado Pago y terminales bancarias de tarjeta.
 - **Ranking de Productos Más Vendidos:** Identifica cuáles son tus productos estrella en cantidad de unidades despachadas y en volumen de facturación.
+- **Control de Operaciones por Usuario / Cajero:** Muestra en una tabla comparativa a **todos los vendedores y cajeros registrados del comercio** (incluso aquellos que aún tengan 0 ventas en el período filtrado), detallando cantidad de ventas cobradas, cantidad de anulaciones, descuentos otorgados y total neto facturado por cada operador (atribuido según quién inició sesión en el sistema).
 
 ---
 

@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /productos/{comercioId}/{archivo} {
+      allow read: if request.auth != null
+        && request.auth.token.comercio_id == comercioId;
+      allow write: if request.auth != null
+        && request.auth.token.comercio_id == comercioId
+        && request.auth.token.rol in ['superadmin', 'encargado']
+        && request.resource.size <= 204800
+        && request.resource.contentType == 'image/webp'
+        && archivo.matches('^[0-9a-f-]{36}(_thumb)?\\.webp$');
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

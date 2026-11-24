@@ -33,18 +33,18 @@ $$\text{Stock Actual} = \sum \text{Entradas (Compras/Ajustes)} - \sum \text{Sali
 > *Ruta sugerida:* `docs/manual/imagenes/04_ajuste_stock.png`
 > *Qué mostrar en la imagen:* Formulario de movimiento manual de stock seleccionando un producto, el tipo de ajuste (Positivo / Negativo / Merma) y el motivo del cambio.
 
-### Para corregir o ajustar el stock:
-1. Dirigite a la sección **Ajuste de Stock**.
-2. Buscá el producto en la lista.
+### Para corregir o ajustar el stock (con buscador rápido de artículos):
+1. Dirigite a la sección **Movimiento de Stock (Suma de Movimientos — Regla 4)**.
+2. Usá el **buscador en vivo (`🔍 Buscar artículo por nombre, código interno o código de barras...`)** ubicado encima del selector para filtrar y autoseleccionar el producto al instante sin tener que recorrer toda la lista.
 3. Indicá el tipo de movimiento:
-   - **Ajuste Positivo:** Si encontraste mercadería no registrada.
+   - **Ajuste Positivo / Compra / Devolución:** Si ingresó mercadería o encontraste unidades no registradas.
    - **Ajuste Negativo / Merma:** Por vencimiento, rotura o pérdida.
-4. Escribí el **Motivo** (ej. *Rotura en depósito* o *Recuento de inventario trimestral*).
-5. Hacé clic en **Registrar Movimiento**.
+4. Escribí el **Motivo** obligatorio (ej. *Rotura en depósito* o *Recuento de inventario trimestral*).
+5. Hacé clic en **Registrar movimiento**.
 
 ---
 
-## 3. Combos y Promociones
+## 3. Combos y Promociones (Buscador de Componentes, Stock Inteligente y Descuento Automático)
 
 Permite crear paquetes de productos (ej. *Promo Fernet Branca 750ml + 2 Coca-Cola 1.5L*):
 
@@ -52,10 +52,29 @@ Permite crear paquetes de productos (ej. *Promo Fernet Branca 750ml + 2 Coca-Col
   <img src="imagenes/04_combos_promociones.png" alt="Descripción" style="border: 3px solid #ccc; padding: 5px; background-color: white; max-width: 100%;">
 </div>
 
-> Panel de armado de combo con sus componentes, cantidades requeridas y precio especial de venta.
+> Panel de armado de combo con buscador de productos componentes, cantidades requeridas y precio especial de venta.
 
-- Cada vez que se vende el combo, el sistema descuenta automáticamente del inventario la cantidad correspondiente de cada uno de sus componentes individuales.
+- **Buscador de Componentes integrado:** En la sección **Componentes y cantidades requeridas por cada combo**, contás con un cuadro de búsqueda en vivo (`🔍 Filtrar producto por nombre, código interno o código de barras...`) encima de cada selector de **Producto componente**, facilitando armar combos incluso en catálogos de miles de artículos.
+- **Disponibilidad en Escritorio y Cajero Móvil (`/web-pos`):** Una vez creado el combo, aparece inmediatamente tanto en los botones rápidos como en el buscador de **Venta (POS)** de la PC y en el catálogo/buscador del **Cajero Móvil (`/web-pos`)**.
+- Cada vez que se vende el combo, el sistema cobra exactamente el **precio promocional del combo** y descuenta automáticamente del inventario la cantidad correspondiente de cada uno de sus componentes individuales.
 - El stock disponible del combo se calcula de manera inteligente en base al componente que tenga menor existencia en el local.
+- En el panel de armado podés ver en vivo el **Precio normal sumado**, el **Ahorro real para el cliente ($ y %)** y el **Factor limitante de stock** antes de guardar el combo.
+
+---
+
+## 3b. Administración de Sucursales, Ubicación de Stock y Migración entre Locales
+
+Si el comercio cuenta con más de un local de atención o con un depósito separado, el sistema gestiona múltiples sucursales de forma óptima sin romper la regla de stock por movimientos:
+
+1. **Sucursal Principal ("Casa Central") y Selector Rápido:**
+   - Todo comercio nace con su sucursal principal (`Casa Central / SUC-01`).
+   - En la barra superior del sistema (y dentro de **Productos y Stock**), podés seleccionar en qué **📍 Sucursal** está operando la terminal actual.
+2. **Ubicación Exacta de los Productos:**
+   - En la tabla principal de productos, debajo del stock total, se muestra el desglose exacto por ubicación (ej. `📍 Casa Central: 18 · Sucursal Norte: 12`).
+3. **Migración / Transferencia de Productos entre Sucursales (con Buscador de Productos):**
+   - Seleccioná la **Sucursal Origen** (de donde sale la mercadería) y la **Sucursal Destino** (adonde ingresa).
+   - En cada fila de **Producto a migrar**, utilizá el **buscador rápido (`🔍 Filtrar producto por nombre, código interno o código de barras...`)** para localizar el artículo en segundos, o presioná **"Cargar todo el stock de origen"** para migrar todo el inventario disponible de un local a otro en un solo paso.
+   - Al confirmar la migración con su motivo/remito interno, el sistema registra en una única transacción atómica y auditada la salida en el origen y el ingreso en el destino.
 
 ---
 

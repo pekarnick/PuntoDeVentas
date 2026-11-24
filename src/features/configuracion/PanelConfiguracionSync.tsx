@@ -176,6 +176,19 @@ export function PanelConfiguracionSync({
   const [firebaseApiKey, setFirebaseApiKey] = useState(
     configuracionInicial?.firebase_api_key ?? ''
   );
+  const [nubeAuthEmail, setNubeAuthEmail] = useState('');
+  const [nubeAuthClave, setNubeAuthClave] = useState('');
+  const [estadoSesionNube, setEstadoSesionNube] = useState<{
+    supabaseAutenticado: boolean;
+    supabaseEmail: string | null;
+    firebaseAutenticado: boolean;
+    firebaseEmail: string | null;
+  }>({
+    supabaseAutenticado: false,
+    supabaseEmail: null,
+    firebaseAutenticado: false,
+    firebaseEmail: null,
+  });
   const [syncAuto, setSyncAuto] = useState(
     configuracionInicial?.sync_automatico_habilitado ?? true
   );
@@ -698,31 +711,54 @@ export function PanelConfiguracionSync({
     try {
       const { svg, urlValidada } = generarQrSvgUrlPublica(ventaMovilUrl, 320);
       if (typeof window !== 'undefined') {
-        const win = window.open('', '_blank', 'width=540,height=680');
+        const win = window.open(
+          '',
+          '_blank',
+          'width=540,height=680,noopener,noreferrer'
+        );
         if (win) {
-          win.document.write(`<!doctype html>
-<html lang="es-AR">
-<head>
-  <meta charset="utf-8" />
-  <title>Imprimir QR Venta Móvil</title>
-  <style>
-    body { font-family: system-ui, sans-serif; text-align: center; padding: 32px; color: #0f172a; }
-    .box { border: 2px solid #0f172a; border-radius: 16px; padding: 24px; max-width: 380px; margin: 0 auto; }
-    h1 { font-size: 20px; margin: 0 0 8px; }
-    p { font-size: 13px; color: #475569; word-break: break-all; }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h1>${configMovil?.comercio_nombre ?? 'Punto de Venta'} — Venta Móvil</h1>
-    <p>Escaneá el código con la cámara del celular e ingresá con tu usuario y clave:</p>
-    <div style="margin: 16px 0;">${svg}</div>
-    <p><strong>${urlValidada}</strong></p>
-  </div>
-  <script>window.onload = () => { window.print(); };</script>
-</body>
-</html>`);
-          win.document.close();
+          const doc = win.document;
+          doc.title = 'Imprimir QR Venta Móvil';
+
+          const style = doc.createElement('style');
+          style.textContent =
+            'body { font-family: system-ui, sans-serif; text-align: center; padding: 32px; color: #0f172a; } ' +
+            '.box { border: 2px solid #0f172a; border-radius: 16px; padding: 24px; max-width: 380px; margin: 0 auto; } ' +
+            'h1 { font-size: 20px; margin: 0 0 8px; } ' +
+            'p { font-size: 13px; color: #475569; word-break: break-all; }';
+          doc.head.appendChild(style);
+
+          const box = doc.createElement('div');
+          box.className = 'box';
+
+          const h1 = doc.createElement('h1');
+          h1.textContent = `${configMovil?.comercio_nombre ?? 'Punto de Venta'} — Venta Móvil`;
+          box.appendChild(h1);
+
+          const pDesc = doc.createElement('p');
+          pDesc.textContent =
+            'Escaneá el código con la cámara del celular e ingresá con tu usuario y clave:';
+          box.appendChild(pDesc);
+
+          const qrWrap = doc.createElement('div');
+          qrWrap.style.margin = '16px 0';
+          const parsedSvg = new DOMParser().parseFromString(svg, 'image/svg+xml');
+          const svgNode = parsedSvg.documentElement;
+          if (svgNode && svgNode.nodeName.toLowerCase() === 'svg') {
+            qrWrap.appendChild(doc.importNode(svgNode, true));
+          }
+          box.appendChild(qrWrap);
+
+          const pUrl = doc.createElement('p');
+          const strongUrl = doc.createElement('strong');
+          strongUrl.textContent = urlValidada;
+          pUrl.appendChild(strongUrl);
+          box.appendChild(pUrl);
+
+          doc.body.appendChild(box);
+          window.setTimeout(() => {
+            win.print();
+          }, 150);
         }
       }
     } catch (err) {
@@ -872,6 +908,69 @@ export function PanelConfiguracionSync({
           ? err.message
           : 'No se pudo copiar el script de actualización.'
       );
+    }
+  }
+
+  async function cargarEstadoSesionNube() {
+    if (!puedeConfigurar) return;
+    try {
+      const res = await invocarPosApi<{
+        supabaseAutenticado: boolean;
+        supabaseEmail: string | null;
+        firebaseAutenticado: boolean;
+        firebaseEmail: string | null;
+      }>('obtener_estado_sesion_nube', {});
+      setEstadoSesionNube(res);
+    } catch {
+      // Ignorar en tests aislados
+    }
+  }
+
+  useEffect(() => {
+    void cargarEstadoSesionNube();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [puedeConfigurar]);
+
+  async function manejarLoginNube(proveedor: 'supabase' | 'firebase') {
+    setMensajeError(null);
+    setMensajeExito(null);
+    if (!nubeAuthEmail.trim() || !nubeAuthClave) {
+      setMensajeError('Ingresá tu email y contraseña de la cuenta en la nube.');
+      return;
+    }
+    setProcesando(true);
+    try {
+      const accion =
+        proveedor === 'supabase'
+          ? 'autenticar_nube_supabase'
+          : 'autenticar_nube_firebase';
+      await invocarPosApi(accion, {
+        email: nubeAuthEmail.trim(),
+        password: nubeAuthClave,
+      });
+      setNubeAuthClave('');
+      await cargarEstadoSesionNube();
+      setMensajeExito(
+        `Sesión iniciada en ${proveedor === 'supabase' ? 'Supabase Auth' : 'Firebase Auth'} para sincronizar con RLS.`
+      );
+    } catch (err) {
+      setMensajeError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo autenticar con el proveedor en la nube.'
+      );
+    } finally {
+      setProcesando(false);
+    }
+  }
+
+  async function manejarLogoutNube(proveedor: 'supabase' | 'firebase') {
+    setProcesando(true);
+    try {
+      await invocarPosApi('cerrar_sesion_nube', { proveedor });
+      await cargarEstadoSesionNube();
+    } finally {
+      setProcesando(false);
     }
   }
 
@@ -1078,6 +1177,105 @@ export function PanelConfiguracionSync({
                 <code>configuracion_sistema</code>). Nunca ingreses la clave{' '}
                 <code>service_role</code> ni <code>sb_secret_</code>.
               </small>
+            </div>
+
+            <div
+              className="subcard-box"
+              style={{
+                padding: '0.85rem',
+                borderRadius: '0.5rem',
+                marginBottom: '0.85rem',
+              }}
+            >
+              <h3 style={{ margin: '0 0 0.45rem 0', fontSize: '0.95rem' }}>
+                🔐 Sesión en la Nube (Supabase Auth / Firebase Auth)
+              </h3>
+              <p className="text-muted" style={{ marginTop: 0, fontSize: '0.85rem' }}>
+                La contraseña nunca se guarda en disco; solo se mantiene el token JWT
+                en memoria mientras la terminal está abierta.
+              </p>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.5rem', fontSize: '0.85rem' }}>
+                <span>
+                  Supabase:{' '}
+                  <strong>
+                    {estadoSesionNube.supabaseAutenticado
+                      ? `🟢 Conectado (${estadoSesionNube.supabaseEmail ?? 'autenticado'})`
+                      : '⚪ Sin sesión'}
+                  </strong>
+                </span>
+                <span>
+                  · Firebase:{' '}
+                  <strong>
+                    {estadoSesionNube.firebaseAutenticado
+                      ? `🟢 Conectado (${estadoSesionNube.firebaseEmail ?? 'autenticado'})`
+                      : '⚪ Sin sesión'}
+                  </strong>
+                </span>
+              </div>
+              <div className="form-row-2">
+                <div className="form-group">
+                  <label htmlFor="cfg-nube-email">Email de cuenta nube</label>
+                  <input
+                    id="cfg-nube-email"
+                    type="email"
+                    placeholder="usuario@comercio.com"
+                    value={nubeAuthEmail}
+                    onChange={(e) => setNubeAuthEmail(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="cfg-nube-clave">Contraseña nube</label>
+                  <input
+                    id="cfg-nube-clave"
+                    type="password"
+                    placeholder="Tu contraseña en Supabase / Firebase"
+                    value={nubeAuthClave}
+                    onChange={(e) => setNubeAuthClave(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={procesando}
+                  onClick={() => void manejarLoginNube('supabase')}
+                >
+                  🔐 Iniciar sesión Supabase
+                </button>
+                {estadoSesionNube.supabaseAutenticado && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={procesando}
+                    onClick={() => void manejarLogoutNube('supabase')}
+                  >
+                    Salir Supabase
+                  </button>
+                )}
+                {(proveedorNube === 'firebase' || proveedorNube === 'ambos') && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={procesando}
+                      onClick={() => void manejarLoginNube('firebase')}
+                    >
+                      🔥 Iniciar sesión Firebase
+                    </button>
+                    {estadoSesionNube.firebaseAutenticado && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={procesando}
+                        onClick={() => void manejarLogoutNube('firebase')}
+                      >
+                        Salir Firebase
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
 
             {(proveedorNube === 'firebase' || proveedorNube === 'ambos') && (

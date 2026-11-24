@@ -58,8 +58,9 @@ Notas:
 
 Todas las tablas incluyen `id`, `comercio_id`, `created_at`, `updated_at`, `deleted_at`, `device_id`.
 
-**Configuración y usuarios**
+**Configuración, usuarios y sucursales**
 - `comercios`: nombre, razón social, CUIT, condición IVA, domicilio, rubro, moneda, `venta_movil_habilitada` (default falso), `arca_habilitada` (default falso).
+- `sucursales`: nombre (ej. "Casa Central", "Sucursal Norte"), código (`SUC-01`, `SUC-02`), dirección, teléfono, `es_principal` (siempre existe al menos una sucursal principal por comercio), `activo`.
 - `usuarios`: nombre, usuario (único por comercio), hash de clave (Argon2id), rol (`superadmin`, `encargado`, `cajero`), `puede_vender_movil` (habilita el acceso a la venta móvil web), `activo`, `debe_cambiar_clave`, `intentos_fallidos`, `bloqueado_hasta`, `ultimo_ingreso`, `creado_por`.
 - `dispositivos`: id de terminal, nombre, última sincronización.
 - `auditoria` (**append-only**, ver §6.1): fecha_hora (UTC), usuario_id, usuario_nombre (copia), rol, device_id, accion, entidad, entidad_id, valores_antes (JSON), valores_despues (JSON), motivo, hash_prev, hash.
@@ -73,17 +74,19 @@ Todas las tablas incluyen `id`, `comercio_id`, `created_at`, `updated_at`, `dele
 - `listas_precio`: nombre (ej. Mostrador, Mayorista).
 - `precios`: producto_id, lista_precio_id, `precio_venta` (centavos; lo que paga el cliente), margen opcional.
 - `variantes` (opcional, Fase 4): talle/color/etc.
+- `combos` y `combos_items`: armado de combos/promociones con precio especial de venta y componentes requeridos. El stock disponible del combo se calcula dinámicamente en base al componente con menor existencia (`min(floor(stock_actual_i / cantidad_requerida_i))`), y al vender un combo se descuenta automáticamente la cantidad correspondiente de cada componente individual.
 
-**Stock**
-- `movimientos_stock`: producto_id, tipo (`compra`, `venta`, `anulacion_venta`, `ajuste`, `devolucion`, `merma`), cantidad (positiva/negativa), costo_unitario, referencia (id de venta/compra/ajuste), motivo, usuario_id.
+**Stock y migración entre sucursales**
+- `movimientos_stock`: producto_id, `sucursal_id` (ubicación del movimiento), tipo (`compra`, `venta`, `anulacion_venta`, `ajuste`, `devolucion`, `merma`), cantidad (positiva/negativa), costo_unitario, referencia (id de venta/compra/ajuste/transferencia), motivo, usuario_id.
+- `transferencias_sucursales` (**append-only**): `sucursal_origen_id`, `sucursal_destino_id`, `usuario_id`, `motivo`, `items_json`. Cada transferencia genera en la misma transacción atómica los movimientos de egreso en la sucursal de origen y de ingreso en la sucursal de destino.
 
 **Ventas**
-- `ventas`: fecha, usuario_id, cliente_id (opcional), subtotal, descuento, total, estado (`completada`, `anulada`), caja_sesion_id, tipo_comprobante, punto_venta, numero, CAE y vencimiento CAE (nulos si ARCA no está habilitada), `canal` (`escritorio` o `web`), `dispositivo_id`, `estado_facturacion` (`no_aplica`, `pendiente`, `emitida`, `error`).
+- `ventas`: fecha, usuario_id, `sucursal_id`, cliente_id (opcional), subtotal, descuento, total, estado (`completada`, `anulada`), caja_sesion_id, tipo_comprobante, punto_venta, numero, CAE y vencimiento CAE (nulos si ARCA no está habilitada), `canal` (`escritorio` o `web`), `dispositivo_id`, `estado_facturacion` (`no_aplica`, `pendiente`, `emitida`, `error`).
 - `ventas_items`: venta_id, producto_id, descripcion (copia del nombre al momento), cantidad, precio_unitario, costo_unitario (**copia del costo al momento de la venta**, para calcular ganancia histórica), descuento, alicuota_iva.
 - `ventas_pagos`: venta_id, medio (`efectivo`, `transferencia`, `mercado_pago`, `qr`, `debito`, `credito`, `cuenta_corriente`, `otro`), monto.
 
 **Compras**
-- `compras`: proveedor_id, fecha, comprobante del proveedor, subtotal, IVA, total, estado.
+- `compras`: proveedor_id, `sucursal_id`, fecha, comprobante del proveedor, subtotal, IVA, total, estado.
 - `compras_items`: compra_id, producto_id, cantidad, costo_unitario.
 
 **Clientes y cuenta corriente**
@@ -91,7 +94,7 @@ Todas las tablas incluyen `id`, `comercio_id`, `created_at`, `updated_at`, `dele
 - `cuenta_corriente_movimientos`: entidad (cliente/proveedor), tipo (`cargo`, `pago`), monto, referencia.
 
 **Caja**
-- `caja_sesiones`: apertura (usuario, fecha, monto inicial), cierre (fecha, efectivo contado, diferencia).
+- `caja_sesiones`: apertura (usuario, `sucursal_id`, fecha, monto inicial), cierre (fecha, efectivo contado, diferencia).
 - `caja_movimientos`: tipo (`ingreso`, `egreso`), concepto, monto, medio.
 
 **Sincronización (solo local)**
@@ -107,8 +110,8 @@ Todas las tablas incluyen `id`, `comercio_id`, `created_at`, `updated_at`, `dele
 - **Bajada (pull):** pide a Supabase los registros con `updated_at` posterior a la última sincronización y los aplica localmente.
 
 ### Resolución de conflictos
-- `ventas`, `ventas_items`, `ventas_pagos`, `movimientos_stock`, `caja_*`, `auditoria`: **append-only → no hay conflictos**. Los usuarios (`usuarios`) sincronizan como datos maestros, pero **los cambios de rol, desactivación y reseteo de clave tienen prioridad sobre ediciones concurrentes** (en caso de conflicto, gana el cambio más restrictivo).
-- `productos`, `precios`, `clientes`, `proveedores`, etc.: **last-write-wins por `updated_at`** (si empatan, gana el `device_id` menor, de forma determinística).
+- `ventas`, `ventas_items`, `ventas_pagos`, `movimientos_stock`, `transferencias_sucursales`, `caja_*`, `auditoria`: **append-only → no hay conflictos**. Los usuarios (`usuarios`) sincronizan como datos maestros, pero **los cambios de rol, desactivación y reseteo de clave tienen prioridad sobre ediciones concurrentes** (en caso de conflicto, gana el cambio más restrictivo).
+- `sucursales`, `productos`, `precios`, `combos`, `combos_items`, `clientes`, `proveedores`, etc.: **last-write-wins por `updated_at`** (si empatan, gana el `device_id` menor, de forma determinística).
 - Ante cualquier conflicto resuelto, guardar un log para auditoría.
 
 ### Disparadores
@@ -160,16 +163,17 @@ Todas las tablas incluyen `id`, `comercio_id`, `created_at`, `updated_at`, `dele
 
 ## 6. Módulos
 
-1. **Venta (pantalla de caja):** campo de entrada siempre enfocado para el lector; búsqueda por nombre/código; carrito con cantidades (decimales si corresponde); descuento por ítem y global; pagos mixtos; cliente opcional; ticket; anulación de venta. Atajos de teclado para todo.
-2. **Productos y stock:** ABM; importación desde Excel/CSV; ajustes de stock con motivo; **actualización masiva de precios** (+X% o monto fijo por categoría, proveedor o selección), con vista previa.
-3. **Compras:** ingreso de mercadería por proveedor; actualiza costo y stock.
-4. **Clientes y proveedores:** ABM, cuenta corriente, validación de CUIT.
-5. **Caja:** apertura, cierre con arqueo, ingresos/egresos manuales.
-6. **Informes** (sección 7).
-7. **Usuarios, roles y auditoría** (detalle en §6.1).
-8. **Configuración:** datos del comercio, rubro, impresora, sincronización, backups.
-9. **Venta móvil web** (opcional, detalle en §6.2): muestra la dirección y el QR de acceso.
+1. **Venta (pantalla de caja):** campo de entrada siempre enfocado para el lector; búsqueda en vivo por nombre/código que incluye tanto productos individuales como **combos y promociones**; carrito con cantidades (decimales si corresponde); combos/promociones con descuento automático de componentes y barra con botón **`✕ Quitar combo`**; descuento por ítem y global; pagos mixtos; **buscador de clientes** en el cobro que inicia por defecto en `"Consumidor Final"`; ticket; anulación de venta; bloqueo de cobros cuando la caja está cerrada con formulario rápido de apertura en el acto. Atajos de teclado para todo.
+2. **Caja (ubicada junto a Venta en el menú con indicador en vivo `🟢 Abierta` / `🔴 Cerrada`):** apertura obligatoria de turno, ingresos/egresos manuales y cierre con arqueo por medio de pago (las operaciones manuales y el arqueo permanecen bloqueados mientras la caja está cerrada).
+3. **Productos, sucursales y stock:** ABM; administración de sucursales/depósitos, visualización de dónde se encuentra el stock de cada artículo por sucursal y **migración/transferencia atómica de productos entre sucursales** (con buscador de productos integrado); **panel de armado de combos** con buscador de componentes y stock inteligente basado en el componente de menor existencia; importación desde Excel/CSV; ajustes de stock con buscador de artículos y motivo; **actualización masiva de precios** (+X% o monto fijo por categoría, proveedor o selección), con vista previa.
+4. **Compras y pedidos de reposición:** ingreso de mercadería por proveedor con buscador rápido de productos (actualiza costo y stock); **generación automática de listas de pedido de productos con stock bajo** agrupadas por **Proveedor**, **Marca** y **Categoría**, con exportación automática a **Excel (.xlsx)** y **PDF** y carga en 1 clic al formulario de compra.
+5. **Clientes y proveedores:** ABM con buscador instantáneo en el padrón de clientes y cuentas corrientes, límites de crédito y validación de CUIT.
+6. **Informes** (sección 7): filtrables por sucursal o consolidados (tablero de métricas con ganancia bruta real histórica, medios de pago, top productos, control de operaciones de todos los vendedores registrados, stock valorizado con ganancia proyectada y Libro IVA Ventas/Compras exportable a `.xlsx`).
+7. **Usuarios, roles, login obligatorio y auditoría** (detalle en §6.1): pantalla de inicio de sesión obligatoria validada con Argon2id, cambio directo de contraseña desde el listado de usuarios (`🔑 Cambiar clave`), y selector de prueba de roles en el encabezado visible **únicamente para `superadmin`**.
+8. **Configuración:** datos del comercio, rubro, impresora, sincronización con Supabase (script SQL unificado `supabase/esquema_completo_unificado.sql`) y Firebase Firestore (con copia completa idempotente sin duplicados), backups locales y actualizaciones mediante instalador Tauri desde **GitHub Releases** preservando la base de datos local.
+9. **Venta móvil web** (opcional, detalle en §6.2): muestra la dirección y el QR de acceso; en `/web-pos` incluye catálogo y buscador de productos y **combos promocionales** (cobrando exactamente el precio del combo sin exponer costos), barra flotante rápida del carrito, instalación como WebAPK en Android y ventana modal automática de comprobante al confirmar cada venta.
 10. **Facturación ARCA** (opcional, detalle en §6.3).
+11. **Ayuda y Manual integrado (`📖 Ayuda y Manual`):** guía paso a paso integrada en la aplicación pensada para usuarios no técnicos (uso 100% local en PC con Tauri, cómo actualizar desde GitHub Releases sin perder datos, uso en celular Android y scripts listos para copiar de Supabase y Firebase).
 
 ### 6.1 Usuarios, roles y auditoría
 

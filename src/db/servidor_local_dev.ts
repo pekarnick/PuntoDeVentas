@@ -3,11 +3,17 @@
  * Conecta la interfaz React con los repositorios transaccionales reales de /src/db.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { hashearClaveArgon2id } from '../domain/claves.ts';
-import type { RolUsuario } from '../domain/permisos.ts';
+import {
+  generarClaveTemporal,
+  hashearClaveArgon2id,
+  validarPoliticaClave,
+} from '../domain/claves.ts';
+import { exigirPermiso, type RolUsuario } from '../domain/permisos.ts';
+import { generarUuidV7 } from '../domain/uuid.ts';
 import type { TipoMovimientoStock } from '../domain/stock.ts';
 import type { AlicuotaIva, MedioPago } from '../domain/totales.ts';
 import {
@@ -21,8 +27,19 @@ import {
   exportarAuditoriaAXlsx,
   exportarInformeGestionFase1AXlsx,
   exportarPedidoReposicionBajoStockAPdf,
+  exportarPedidoReposicionBajoStockAXlsx,
   obtenerInformeGestionFase1,
 } from './informes_repo.ts';
+import {
+  actualizarSucursalComercio,
+  crearSucursalComercio,
+  listarSucursalesComercio,
+  listarTransferenciasSucursales,
+  obtenerMapaStockPorSucursalDb,
+  obtenerSucursalActivaTerminal,
+  seleccionarSucursalActivaTerminal,
+  transferirProductosEntreSucursales,
+} from './sucursales_repo.ts';
 import type { CriterioAgrupacionPedido } from '../domain/pedidos_reposicion.ts';
 import { aplicarMigraciones, crearBaseDatos } from './migrator.ts';
 import {
@@ -42,16 +59,22 @@ import {
   type ActorContexto,
 } from './repositorios.ts';
 import {
+  autenticarUsuarioOffline,
+  cambiarClavePropia,
   consultarRegistrosAuditoria,
+  establecerClaveUsuarioDirecta,
   listarUsuariosComercio,
+  registrarLogoutUsuario,
   resetearClaveUsuario,
+  verificarAutorizadorEnVivo,
 } from './usuarios_auth_repo.ts';
 import {
   AdaptadorFirebaseFirestoreHttp,
   AdaptadorNubeMultiProveedor,
   AdaptadorSupabaseHttp,
-  COMERCIO_ID_RESPALDO_CONOCIDO,
   NubeSinConfigurar,
+  autenticarSupabaseEmailClave,
+  copiarBaseCompletaAFirebaseSinDuplicados,
   ejecutarCicloSincronizacionCompleto,
   ejecutarPullDatos,
   ejecutarPushDatos,
@@ -59,10 +82,12 @@ import {
   guardarIdentidadComercioPersistida,
   leerIdentidadComercioPersistida,
   obtenerConfiguracionSistema,
+  obtenerODefinirDeviceIdTerminal,
   obtenerResumenEstadoSyncDb,
   type AdaptadorNubeSupabase,
   type ProveedorNubeSync,
 } from '../sync/motor_sync.ts';
+import { autenticarFirebaseEmailClave } from '../sync/adaptador_firebase.ts';
 import {
   calcularEspacioImagenesLocal,
   procesarColaSincronizacionImagenes,
@@ -122,6 +147,7 @@ import {
 } from '../sync/desplegador_netlify.ts';
 import {
   AdaptadorArcaHomologacionLocal,
+  AdaptadorEdgeFunctionArcaHttp,
   anularVentaConNotaCreditoArca,
   asignarPrecioProductoEnLista,
   crearComboPromocion,
@@ -139,6 +165,7 @@ import {
   reintentarComprobantesArcaPendientes,
   resolverEscaneoBalanzaEnCatalogo,
   venderComboPromocion,
+  type AdaptadorServicioArca,
 } from './arca_fase4_repo.ts';
 import type {
   AmbienteArca,
@@ -158,6 +185,64 @@ export const RUTA_DB_POR_DEFECTO = path.resolve(
 let instanciaDb: DatabaseSync | null = null;
 let rutaActivaDb: string = RUTA_DB_POR_DEFECTO;
 const nubeSinConfigurar = new NubeSinConfigurar();
+
+interface SesionOperadorLocal {
+  readonly token: string;
+  readonly comercioId: string;
+  readonly usuarioId: string;
+  readonly expiraAtMs: number;
+}
+
+const DURACION_SESION_LOCAL_MS = 8 * 60 * 60 * 1000;
+const sesionesOperadoresLocales = new Map<string, SesionOperadorLocal>();
+
+const sesionesNubeMemoria: {
+  supabaseAccessToken: string | null;
+  supabaseEmail: string | null;
+  firebaseIdToken: string | null;
+  firebaseEmail: string | null;
+} = {
+  supabaseAccessToken: null,
+  supabaseEmail: null,
+  firebaseIdToken: null,
+  firebaseEmail: null,
+};
+
+export function validarTokenSesionLocal(
+  token: string | undefined | null
+): SesionOperadorLocal | null {
+  if (!token || !token.trim()) return null;
+  const s = sesionesOperadoresLocales.get(token.trim());
+  if (!s) return null;
+  if (Date.now() > s.expiraAtMs) {
+    sesionesOperadoresLocales.delete(s.token);
+    return null;
+  }
+  return s;
+}
+
+export function limpiarSesionesLocalesParaTest(): void {
+  sesionesOperadoresLocales.clear();
+  sesionesNubeMemoria.supabaseAccessToken = null;
+  sesionesNubeMemoria.supabaseEmail = null;
+  sesionesNubeMemoria.firebaseIdToken = null;
+  sesionesNubeMemoria.firebaseEmail = null;
+}
+
+function crearSesionOperadorLocal(
+  comercioId: string,
+  usuarioId: string
+): SesionOperadorLocal {
+  const token = crypto.randomBytes(32).toString('hex');
+  const sesion: SesionOperadorLocal = {
+    token,
+    comercioId,
+    usuarioId,
+    expiraAtMs: Date.now() + DURACION_SESION_LOCAL_MS,
+  };
+  sesionesOperadoresLocales.set(token, sesion);
+  return sesion;
+}
 
 function sincronizarWalADisco(db: DatabaseSync): void {
   try {
@@ -179,15 +264,16 @@ function resolverAdaptadorSync(
     ? new AdaptadorSupabaseHttp({
         supabaseUrl: cfg.supabase_url!,
         supabaseAnonKey: cfg.supabase_anon_key!,
+        accessToken: sesionesNubeMemoria.supabaseAccessToken ?? undefined,
         comercioId,
-        rolUsuario: 'superadmin',
       })
     : null;
 
   const adaptadorFirebase = tieneFirebase
     ? new AdaptadorFirebaseFirestoreHttp(
         cfg.firebase_project_id!,
-        cfg.firebase_api_key!
+        cfg.firebase_api_key!,
+        sesionesNubeMemoria.firebaseIdToken ?? undefined
       )
     : null;
 
@@ -204,6 +290,37 @@ function resolverAdaptadorSync(
     return adaptadorSupabase ?? adaptadorFirebase ?? nubeSinConfigurar;
   }
   return adaptadorSupabase ?? adaptadorFirebase ?? nubeSinConfigurar;
+}
+
+function resolverAdaptadorArca(
+  db: DatabaseSync,
+  comercioId: string,
+  sinConexion: boolean
+): AdaptadorServicioArca {
+  const cfgArca = obtenerConfiguracionArca(db, comercioId);
+  if (cfgArca.arca_ambiente === 'produccion') {
+    const cfgSync = obtenerConfiguracionSistema(db, comercioId);
+    if (!cfgSync.supabase_url || !cfgSync.supabase_anon_key) {
+      throw new Error(
+        'ARCA_CONFIG_INCOMPLETA: Para emitir en producción configurá la URL y Anon Key de Supabase e iniciá sesión en la nube.'
+      );
+    }
+    if (!sesionesNubeMemoria.supabaseAccessToken) {
+      throw new Error(
+        'ARCA_SESION_NUBE_REQUERIDA: Para emitir comprobantes ARCA en producción debés iniciar sesión en Supabase Auth desde Configuración.'
+      );
+    }
+    return new AdaptadorEdgeFunctionArcaHttp({
+      supabaseUrl: cfgSync.supabase_url,
+      supabaseAnonKey: cfgSync.supabase_anon_key,
+      accessToken: sesionesNubeMemoria.supabaseAccessToken,
+    });
+  }
+  const adaptadorLocal = new AdaptadorArcaHomologacionLocal();
+  if (sinConexion) {
+    adaptadorLocal.fijarConectado(false);
+  }
+  return adaptadorLocal;
 }
 
 export function obtenerConexionLocalDisco(
@@ -264,98 +381,76 @@ function limpiarProductosDemoResiduales(db: DatabaseSync): void {
 }
 
 function asegurarDatosInicialesSiVacia(
-  db: DatabaseSync,
-  directorioBaseDatos: string = path.dirname(RUTA_DB_POR_DEFECTO)
+  _db: DatabaseSync,
+  _directorioBaseDatos: string = path.dirname(RUTA_DB_POR_DEFECTO)
 ): void {
-  const comercioExistente = db
-    .prepare('SELECT id FROM comercios WHERE deleted_at IS NULL LIMIT 1')
-    .get() as { id: string } | undefined;
-
-  if (comercioExistente) {
-    return;
-  }
-
-  const persistida = leerIdentidadComercioPersistida(directorioBaseDatos);
-  const optsArgon = { m: 4096, t: 2, p: 1 } as const;
-  const creado = inicializarComercioYSuperadmin(db, {
-    comercioId: persistida?.comercio_id ?? COMERCIO_ID_RESPALDO_CONOCIDO,
-    superadminId:
-      persistida?.superadmin_id ?? '01a15523-8a7c-72f8-b204-e9024dcdecd1',
-    listaPrecioId:
-      persistida?.lista_precio_id ?? '01a15523-8a7c-72f9-bee7-fffea53d4571',
-    nombreComercio: 'Comercio Local POS',
-    cuit: '20-12345678-6',
-    condicionIva: 'monotributo',
-    nombreAdmin: 'María Superadmin',
-    usuarioAdmin: 'maria',
-    claveHashAdmin: hashearClaveArgon2id('Admin1234', optsArgon),
-    deviceId: 'terminal-local-1',
-  });
-
-  if (persistida?.supabase_url && persistida?.supabase_anon_key) {
-    const ahora = new Date().toISOString();
-    db.prepare(
-      `INSERT INTO configuracion_sistema (
-        comercio_id, supabase_url, supabase_anon_key,
-        sync_automatico_habilitado, sync_intervalo_minutos,
-        carpeta_backups, backup_diario_habilitado,
-        ultimo_backup_at, ultimo_backup_archivo, updated_at
-      ) VALUES (?, ?, ?, 1, 5, 'backups', 1, NULL, NULL, ?)
-      ON CONFLICT(comercio_id) DO UPDATE SET
-        supabase_url = excluded.supabase_url,
-        supabase_anon_key = excluded.supabase_anon_key,
-        updated_at = excluded.updated_at`
-    ).run(
-      creado.comercioId,
-      persistida.supabase_url,
-      persistida.supabase_anon_key,
-      ahora
-    );
-  }
+  // No se crean usuarios ni contraseñas por defecto hardcodeadas (Auditoría P0).
+  // El primer superadmin se crea mediante el Asistente de Primer Uso (`inicializar_primer_superadmin`).
 }
 
-function obtenerActorPorRol(db: DatabaseSync, rol: RolUsuario): ActorContexto {
+function obtenerComercioActivoId(db: DatabaseSync): string | null {
   const comercio = db
     .prepare('SELECT id FROM comercios WHERE deleted_at IS NULL LIMIT 1')
     .get() as { id: string } | undefined;
-  if (!comercio) {
-    throw new Error('Comercio no inicializado.');
-  }
+  return comercio?.id ?? null;
+}
 
+function tieneSuperadminActivo(db: DatabaseSync): boolean {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total
+       FROM usuarios
+       WHERE rol = 'superadmin' AND activo = 1 AND deleted_at IS NULL`
+    )
+    .get() as { total: number } | undefined;
+  return Number(row?.total ?? 0) > 0;
+}
+
+function resolverActorDesdeSesion(
+  db: DatabaseSync,
+  sesion: SesionOperadorLocal,
+  rolDemoSolicitado?: RolUsuario
+): { actor: ActorContexto; rolReal: RolUsuario } {
   const usuario = db
     .prepare(
-      `SELECT id, nombre, rol FROM usuarios
-       WHERE comercio_id = ? AND rol = ? AND activo = 1 AND deleted_at IS NULL
+      `SELECT id, comercio_id, nombre, rol, activo
+       FROM usuarios
+       WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL
        LIMIT 1`
     )
-    .get(comercio.id, rol) as
-    | { id: string; nombre: string; rol: RolUsuario }
+    .get(sesion.usuarioId, sesion.comercioId) as
+    | {
+        id: string;
+        comercio_id: string;
+        nombre: string;
+        rol: RolUsuario;
+        activo: number;
+      }
     | undefined;
 
-  if (!usuario) {
-    const fallback = db
-      .prepare(
-        `SELECT id, nombre, rol FROM usuarios
-         WHERE comercio_id = ? AND activo = 1 AND deleted_at IS NULL
-         LIMIT 1`
-      )
-      .get(comercio.id) as { id: string; nombre: string; rol: RolUsuario };
-
-    return {
-      comercio_id: comercio.id,
-      usuario_id: fallback.id,
-      usuario_nombre: fallback.nombre,
-      rol,
-      device_id: 'terminal-local-1',
-    };
+  if (!usuario || usuario.activo !== 1) {
+    sesionesOperadoresLocales.delete(sesion.token);
+    throw new Error(
+      'SESION_NO_AUTENTICADA: La cuenta fue desactivada o ya no existe.'
+    );
   }
 
+  // Solo un superadmin real puede previsualizar un rol inferior (encargado/cajero)
+  const rolEfectivo: RolUsuario =
+    usuario.rol === 'superadmin' &&
+    (rolDemoSolicitado === 'encargado' || rolDemoSolicitado === 'cajero')
+      ? rolDemoSolicitado
+      : usuario.rol;
+
   return {
-    comercio_id: comercio.id,
-    usuario_id: usuario.id,
-    usuario_nombre: usuario.nombre,
-    rol: usuario.rol,
-    device_id: 'terminal-local-1',
+    rolReal: usuario.rol,
+    actor: {
+      comercio_id: usuario.comercio_id,
+      usuario_id: usuario.id,
+      usuario_nombre: usuario.nombre,
+      rol: rolEfectivo,
+      device_id: obtenerODefinirDeviceIdTerminal(path.dirname(rutaActivaDb)),
+    },
   };
 }
 
@@ -437,6 +532,18 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
     mapaCodigos.set(r.producto_id, arr);
   }
 
+  // Mapa de stock detallado por sucursal (Regla 4)
+  const { mapaPorProducto } = obtenerMapaStockPorSucursalDb(
+    db,
+    actor.comercio_id,
+    actor.device_id
+  );
+  const sucursalActiva = obtenerSucursalActivaTerminal(
+    db,
+    actor.comercio_id,
+    actor.device_id
+  );
+
   // Catálogo para pantalla de venta: NUNCA incluye costo_compra (Regla 20)
   const catalogoVenta = filas.map((f) => ({
     id: f.id,
@@ -455,27 +562,33 @@ function obtenerCatalogoCompleto(db: DatabaseSync, actor: ActorContexto) {
   }));
 
   // Catálogo de administración: incluye costo_compra solo si el rol tiene permiso
-  const catalogoAdmin = filas.map((f) => ({
-    id: f.id,
-    nombre: f.nombre,
-    codigo_interno: f.codigo_interno ?? '',
-    categoria_id: f.categoria_id,
-    marca_id: f.marca_id,
-    proveedor_id: f.proveedor_id,
-    categoria_nombre: f.categoria_nombre,
-    marca_nombre: f.marca_nombre,
-    proveedor_nombre: f.proveedor_nombre,
-    codigos_barras: mapaCodigos.get(f.id) ?? [],
-    unidad: f.unidad,
-    permite_decimales: f.permite_decimales === 1,
-    ...(incluirCostos ? { costo_compra: f.costo_compra } : {}),
-    precio_venta: f.precio_venta,
-    stock_minimo: f.stock_minimo,
-    stock_actual: f.stock_actual,
-    boton_rapido: f.boton_rapido === 1,
-    imagen_path: f.imagen_path,
-    imagen_hash: f.imagen_hash,
-  }));
+  const catalogoAdmin = filas.map((f) => {
+    const resSuc = mapaPorProducto.get(f.id);
+    return {
+      id: f.id,
+      nombre: f.nombre,
+      codigo_interno: f.codigo_interno ?? '',
+      categoria_id: f.categoria_id,
+      marca_id: f.marca_id,
+      proveedor_id: f.proveedor_id,
+      categoria_nombre: f.categoria_nombre,
+      marca_nombre: f.marca_nombre,
+      proveedor_nombre: f.proveedor_nombre,
+      codigos_barras: mapaCodigos.get(f.id) ?? [],
+      unidad: f.unidad,
+      permite_decimales: f.permite_decimales === 1,
+      ...(incluirCostos ? { costo_compra: f.costo_compra } : {}),
+      precio_venta: f.precio_venta,
+      stock_minimo: f.stock_minimo,
+      stock_actual: f.stock_actual,
+      stock_por_sucursal: resSuc?.por_sucursal ?? {},
+      stock_sucursal_activa:
+        resSuc?.por_sucursal[sucursalActiva.id] ?? f.stock_actual,
+      boton_rapido: f.boton_rapido === 1,
+      imagen_path: f.imagen_path,
+      imagen_hash: f.imagen_hash,
+    };
+  });
 
   return { catalogoVenta, catalogoAdmin };
 }
@@ -485,30 +598,164 @@ function extraerBufferDesdeBase64(imagenBase64: string): Buffer {
   return Buffer.from(limpio, 'base64');
 }
 
+export interface ContextoHttpLocal {
+  readonly sessionToken?: string;
+}
+
+const ACCIONES_PUBLICAS_SIN_SESION_ESCRITORIO = new Set([
+  'obtener_estado_arranque',
+  'inicializar_primer_superadmin',
+  'iniciar_sesion_operador',
+  'login_movil',
+  'obtener_catalogo_movil',
+  'crear_venta_movil',
+  'estado_caja_movil',
+  'abrir_caja_movil',
+  'cerrar_caja_movil',
+  'listar_ventas_movil_dia',
+]);
+
 /**
  * Ejecuta una acción RPC solicitada por el frontend contra la base SQLite local en disco.
  */
 export function ejecutarAccionPosLocal(
   accion: string,
   payload: Record<string, unknown> = {},
-  rutaDb: string = RUTA_DB_POR_DEFECTO
+  rutaDb: string = RUTA_DB_POR_DEFECTO,
+  contextoHttp?: ContextoHttpLocal
 ): unknown {
   const db = obtenerConexionLocalDisco(rutaDb);
-  const rol = (payload.rolActivo as RolUsuario | undefined) ?? 'superadmin';
-  const actor = obtenerActorPorRol(db, rol);
+
+  if (accion === 'obtener_estado_arranque') {
+    const comercio = db
+      .prepare('SELECT id, nombre FROM comercios WHERE deleted_at IS NULL LIMIT 1')
+      .get() as { id: string; nombre: string } | undefined;
+    return {
+      requiereConfiguracionInicial: !comercio || !tieneSuperadminActivo(db),
+      rutaBaseDatos: rutaActivaDb,
+      comercioNombre: comercio?.nombre ?? null,
+    };
+  }
+
+  if (accion === 'inicializar_primer_superadmin') {
+    if (tieneSuperadminActivo(db)) {
+      throw new Error(
+        'SISTEMA_YA_INICIALIZADO: Ya existe un administrador activo en la base de datos.'
+      );
+    }
+
+    const nombreComercio = String(payload.nombreComercio ?? '').trim();
+    const cuit = String(payload.cuit ?? '').trim() || null;
+    const condicionIvaRaw = String(payload.condicionIva ?? 'monotributo');
+    const condicionIva: 'monotributo' | 'responsable_inscripto' | 'exento' =
+      condicionIvaRaw === 'responsable_inscripto' || condicionIvaRaw === 'exento'
+        ? condicionIvaRaw
+        : 'monotributo';
+    const nombreAdmin = String(payload.nombreAdmin ?? '').trim();
+    const usuarioAdmin = String(payload.usuarioAdmin ?? '').trim();
+    const claveAdmin = String(payload.claveAdmin ?? '');
+
+    if (!nombreComercio || !nombreAdmin || !usuarioAdmin) {
+      throw new Error(
+        'Completá el nombre del comercio, tu nombre y el usuario administrador.'
+      );
+    }
+    validarPoliticaClave(claveAdmin);
+
+    const dirBase = path.dirname(rutaActivaDb);
+    const persistida = leerIdentidadComercioPersistida(dirBase);
+    const comercioExistente = obtenerComercioActivoId(db);
+    const claveHash = hashearClaveArgon2id(claveAdmin);
+
+    let comercioIdFinal: string;
+    let superadminIdFinal: string;
+
+    if (comercioExistente) {
+      comercioIdFinal = comercioExistente;
+      superadminIdFinal = generarUuidV7();
+      const ahoraIso = new Date().toISOString();
+      const deviceIdTerminal = obtenerODefinirDeviceIdTerminal(
+        path.dirname(rutaActivaDb)
+      );
+      db.prepare(
+        `INSERT INTO usuarios (
+          id, comercio_id, nombre, usuario, clave_hash, rol,
+          puede_vender_movil, activo, debe_cambiar_clave,
+          created_at, updated_at, device_id, sync_status
+        ) VALUES (?, ?, ?, ?, ?, 'superadmin', 1, 1, 0, ?, ?, ?, 'pendiente')`
+      ).run(
+        superadminIdFinal,
+        comercioIdFinal,
+        nombreAdmin,
+        usuarioAdmin,
+        claveHash,
+        ahoraIso,
+        ahoraIso,
+        deviceIdTerminal
+      );
+    } else {
+      const creado = inicializarComercioYSuperadmin(db, {
+        comercioId: persistida?.comercio_id ?? generarUuidV7(),
+        superadminId: generarUuidV7(),
+        listaPrecioId: persistida?.lista_precio_id ?? generarUuidV7(),
+        nombreComercio,
+        cuit: cuit ?? undefined,
+        condicionIva,
+        nombreAdmin,
+        usuarioAdmin,
+        claveHashAdmin: claveHash,
+        deviceId: obtenerODefinirDeviceIdTerminal(path.dirname(rutaActivaDb)),
+      });
+      comercioIdFinal = creado.comercioId;
+      superadminIdFinal = creado.superadminId;
+      db.prepare(
+        `UPDATE usuarios SET debe_cambiar_clave = 0 WHERE id = ? AND comercio_id = ?`
+      ).run(superadminIdFinal, comercioIdFinal);
+    }
+
+    sincronizarWalADisco(db);
+    const sesion = crearSesionOperadorLocal(comercioIdFinal, superadminIdFinal);
+    return {
+      sessionToken: sesion.token,
+      operadorActual: {
+        id: superadminIdFinal,
+        nombre: nombreAdmin,
+        usuario: usuarioAdmin,
+        rol: 'superadmin' as RolUsuario,
+        debe_cambiar_clave: false,
+      },
+    };
+  }
+
+  let actor!: ActorContexto;
+  let rolReal: RolUsuario = 'cajero';
+
+  if (!ACCIONES_PUBLICAS_SIN_SESION_ESCRITORIO.has(accion)) {
+    const sesion = validarTokenSesionLocal(contextoHttp?.sessionToken);
+    if (!sesion) {
+      throw new Error(
+        'SESION_NO_AUTENTICADA: Debés iniciar sesión para realizar esta operación.'
+      );
+    }
+    const rolDemo = payload.rolDemo as RolUsuario | undefined;
+    const resuelto = resolverActorDesdeSesion(db, sesion, rolDemo);
+    actor = resuelto.actor;
+    rolReal = resuelto.rolReal;
+  }
 
   switch (accion) {
     case 'obtener_estado_inicial': {
       const dirBase = path.dirname(rutaActivaDb);
-      const actorSuperadmin = obtenerActorPorRol(db, 'superadmin');
-      try {
-        ejecutarBackupDiarioAutomaticoSiCorresponde(
-          db,
-          actorSuperadmin,
-          dirBase
-        );
-      } catch {
-        // Un fallo de permisos en la carpeta de backups no debe bloquear nunca la caja
+      if (actor.rol === 'superadmin') {
+        try {
+          ejecutarBackupDiarioAutomaticoSiCorresponde(
+            db,
+            actor,
+            dirBase
+          );
+        } catch {
+          // Un fallo de permisos en la carpeta de backups no debe bloquear nunca la caja
+        }
       }
 
       const { catalogoVenta, catalogoAdmin } = obtenerCatalogoCompleto(db, actor);
@@ -578,6 +825,20 @@ export function ejecutarAccionPosLocal(
       const esEncargadoOSuper =
         actor.rol === 'superadmin' || actor.rol === 'encargado';
 
+      const usuariosOperadores = db
+        .prepare(
+          `SELECT id, nombre, usuario, rol
+           FROM usuarios
+           WHERE comercio_id = ? AND activo = 1 AND deleted_at IS NULL
+           ORDER BY CASE rol WHEN 'superadmin' THEN 1 WHEN 'encargado' THEN 2 ELSE 3 END, nombre ASC`
+        )
+        .all(actor.comercio_id) as unknown as Array<{
+        id: string;
+        nombre: string;
+        usuario: string;
+        rol: RolUsuario;
+      }>;
+
       return {
         rutaBaseDatos: rutaActivaDb,
         comercioId: actor.comercio_id,
@@ -586,6 +847,7 @@ export function ejecutarAccionPosLocal(
           nombre: actor.usuario_nombre,
           rol: actor.rol,
         },
+        usuariosOperadores,
         cambiosPendientesSync: estadoSync.totalPendientes,
         estadoSync,
         configuracionSistema:
@@ -609,6 +871,20 @@ export function ejecutarAccionPosLocal(
         catalogoAdmin,
         ventasRecientes,
         estadoCaja,
+        sucursales: listarSucursalesComercio(
+          db,
+          actor.comercio_id,
+          actor.device_id
+        ),
+        sucursalActiva: obtenerSucursalActivaTerminal(
+          db,
+          actor.comercio_id,
+          actor.device_id
+        ),
+        transferenciasSucursales: listarTransferenciasSucursales(
+          db,
+          actor.comercio_id
+        ),
         categorias: listarCategorias(db, actor.comercio_id),
         marcas: listarMarcas(db, actor.comercio_id),
         proveedores: esEncargadoOSuper
@@ -805,10 +1081,11 @@ export function ejecutarAccionPosLocal(
           : undefined,
       });
 
-      const adaptadorArca = new AdaptadorArcaHomologacionLocal();
-      if (payload.sinConexion) {
-        adaptadorArca.fijarConectado(false);
-      }
+      const adaptadorArca = resolverAdaptadorArca(
+        db,
+        actor.comercio_id,
+        Boolean(payload.sinConexion)
+      );
       if (resultado.estadoFacturacion === 'pendiente' && !payload.diferirEmisionArca) {
         void emitirComprobanteArcaVenta(
           db,
@@ -837,26 +1114,24 @@ export function ejecutarAccionPosLocal(
 
       if (actor.rol === 'cajero') {
         const autUsuario = String(payload.autorizadorUsuario ?? '').trim();
-        const filaAut = db
-          .prepare(
-            `SELECT id, nombre, rol FROM usuarios
-             WHERE comercio_id = ? AND lower(usuario) = lower(?) AND activo = 1 AND deleted_at IS NULL
-             LIMIT 1`
-          )
-          .get(actor.comercio_id, autUsuario) as
-          | { id: string; nombre: string; rol: RolUsuario }
-          | undefined;
-
-        if (!filaAut || filaAut.rol === 'cajero') {
+        const autClave = String(payload.autorizadorClave ?? '');
+        if (!autUsuario || !autClave) {
           throw new Error(
-            'AUTORIZACION_INVALIDA: Ingresá un usuario válido con rol encargado o superadmin.'
+            'AUTORIZACION_INVALIDA: Para anular una venta como cajero debés ingresar el usuario y la clave de un encargado o superadmin.'
           );
         }
-        autorizador = {
-          usuario_id: filaAut.id,
-          usuario_nombre: filaAut.nombre,
-          rol: filaAut.rol,
-        };
+        const verificado = verificarAutorizadorEnVivo(db, {
+          comercioId: actor.comercio_id,
+          usuarioAutorizador: autUsuario,
+          claveAutorizador: autClave,
+          deviceId: actor.device_id,
+        });
+        if (verificado.usuario_id === actor.usuario_id) {
+          throw new Error(
+            'AUTORIZACION_INVALIDA: Un cajero no puede auto-autorizarse una anulación.'
+          );
+        }
+        autorizador = verificado;
       }
 
       void anularVentaConNotaCreditoArca(db, actor, {
@@ -913,18 +1188,26 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'crear_usuario': {
-      const claveTemporal = hashearClaveArgon2id('Temporal2026!', {
-        m: 2048,
-        t: 1,
-        p: 1,
-      });
+      const clavePersonalizada =
+        typeof payload.claveNueva === 'string' && payload.claveNueva.trim().length > 0
+          ? payload.claveNueva.trim()
+          : null;
+      const claveAHashear = clavePersonalizada ?? generarClaveTemporal();
+      validarPoliticaClave(claveAHashear);
+      const claveHash = hashearClaveArgon2id(claveAHashear);
       const id = crearUsuario(db, actor, {
         nombre: String(payload.nombre ?? ''),
         usuario: String(payload.usuario ?? ''),
-        claveHash: claveTemporal,
+        claveHash,
         rol: payload.rol as RolUsuario,
       });
-      return { id };
+      if (clavePersonalizada) {
+        db.prepare(
+          `UPDATE usuarios SET debe_cambiar_clave = 0 WHERE id = ? AND comercio_id = ?`
+        ).run(id, actor.comercio_id);
+      }
+      sincronizarWalADisco(db);
+      return { id, claveAsignada: claveAHashear, esTemporal: !clavePersonalizada };
     }
 
     case 'actualizar_usuario': {
@@ -934,14 +1217,42 @@ export function ejecutarAccionPosLocal(
         nuevoActivo: Boolean(payload.nuevoActivo),
         motivo: payload.motivo ? String(payload.motivo) : undefined,
       });
+      sincronizarWalADisco(db);
+      return { ok: true };
+    }
+
+    case 'cambiar_clave_usuario': {
+      const usuarioObjetivoId = String(payload.usuarioObjetivoId ?? '').trim();
+      const claveNueva = String(payload.claveNueva ?? '');
+      if (usuarioObjetivoId === actor.usuario_id) {
+        const claveActual = String(payload.claveActual ?? '');
+        if (!claveActual) {
+          throw new Error(
+            'CLAVE_ACTUAL_REQUERIDA: Debés ingresar tu contraseña actual para cambiarla.'
+          );
+        }
+        cambiarClavePropia(db, actor, {
+          claveActual,
+          claveNueva,
+        });
+      } else {
+        establecerClaveUsuarioDirecta(db, actor, {
+          usuarioObjetivoId,
+          claveNueva,
+          debeCambiarAlIngresar: Boolean(payload.debeCambiarAlIngresar ?? false),
+          motivo: payload.motivo ? String(payload.motivo) : undefined,
+        });
+      }
+      sincronizarWalADisco(db);
       return { ok: true };
     }
 
     case 'resetear_clave_usuario': {
-      return resetearClaveUsuario(db, actor, {
+      const res = resetearClaveUsuario(db, actor, {
         usuarioObjetivoId: String(payload.usuarioObjetivoId),
-        opcionesArgon: { m: 2048, t: 1, p: 1 },
       });
+      sincronizarWalADisco(db);
+      return res;
     }
 
     case 'consultar_auditoria': {
@@ -953,6 +1264,7 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'verificar_integridad_auditoria': {
+      exigirPermiso(actor.rol, 'ver_exportar_auditoria');
       return verificarIntegridadAuditoriaDb(db, actor.comercio_id);
     }
 
@@ -964,6 +1276,7 @@ export function ejecutarAccionPosLocal(
         fechaHastaIso: payload.fechaHastaIso
           ? String(payload.fechaHastaIso)
           : undefined,
+        sucursalId: payload.sucursalId ? String(payload.sucursalId) : undefined,
       });
     }
 
@@ -978,6 +1291,9 @@ export function ejecutarAccionPosLocal(
           fechaHastaIso: payload.fechaHastaIso
             ? String(payload.fechaHastaIso)
             : undefined,
+          sucursalId: payload.sucursalId
+            ? String(payload.sucursalId)
+            : undefined,
         }
       );
       return {
@@ -985,6 +1301,63 @@ export function ejecutarAccionPosLocal(
         bytesLength: xlsxBytes.byteLength,
         informe,
       };
+    }
+
+    case 'crear_sucursal': {
+      const id = crearSucursalComercio(db, actor, {
+        nombre: String(payload.nombre ?? ''),
+        codigo: payload.codigo ? String(payload.codigo) : null,
+        direccion: payload.direccion ? String(payload.direccion) : null,
+        telefono: payload.telefono ? String(payload.telefono) : null,
+        esPrincipal: Boolean(payload.esPrincipal),
+      });
+      sincronizarWalADisco(db);
+      return { id };
+    }
+
+    case 'actualizar_sucursal': {
+      actualizarSucursalComercio(db, actor, {
+        sucursalId: String(payload.sucursalId ?? ''),
+        nombre: String(payload.nombre ?? ''),
+        codigo: payload.codigo ? String(payload.codigo) : null,
+        direccion: payload.direccion ? String(payload.direccion) : null,
+        telefono: payload.telefono ? String(payload.telefono) : null,
+        activo:
+          payload.activo !== undefined ? Boolean(payload.activo) : undefined,
+      });
+      sincronizarWalADisco(db);
+      return { ok: true };
+    }
+
+    case 'seleccionar_sucursal_activa': {
+      exigirPermiso(actor.rol, 'vender_y_caja');
+      const sucursalActiva = seleccionarSucursalActivaTerminal(
+        db,
+        actor,
+        String(payload.sucursalId ?? '')
+      );
+      sincronizarWalADisco(db);
+      return { sucursalActiva };
+    }
+
+    case 'transferir_stock_sucursales': {
+      const items = (
+        (payload.items as Array<{
+          productoId: string;
+          cantidad: number;
+        }>) ?? []
+      ).map((it) => ({
+        productoId: String(it.productoId ?? ''),
+        cantidad: Number(it.cantidad ?? 0),
+      }));
+      const res = transferirProductosEntreSucursales(db, actor, {
+        sucursalOrigenId: String(payload.sucursalOrigenId ?? ''),
+        sucursalDestinoId: String(payload.sucursalDestinoId ?? ''),
+        motivo: String(payload.motivo ?? ''),
+        items,
+      });
+      sincronizarWalADisco(db);
+      return res;
     }
 
     case 'exportar_auditoria_xlsx': {
@@ -1019,6 +1392,34 @@ export function ejecutarAccionPosLocal(
       return {
         pdfBase64: Buffer.from(pdfBytes).toString('base64'),
         bytesLength: pdfBytes.byteLength,
+        resumen,
+      };
+    }
+
+    case 'exportar_pedido_reposicion_xlsx': {
+      const criterio =
+        (payload.criterio as CriterioAgrupacionPedido | undefined) ??
+        'proveedor';
+      const filtroGrupoId = payload.filtroGrupoId
+        ? String(payload.filtroGrupoId)
+        : null;
+      const cantidadesPersonalizadas =
+        (payload.cantidadesPersonalizadasPorProducto as
+          | Record<string, number>
+          | undefined) ?? undefined;
+      const { xlsxBytes, resumen } = exportarPedidoReposicionBajoStockAXlsx(
+        db,
+        actor,
+        {
+          criterio,
+          filtroGrupoId,
+          cantidadesPersonalizadasPorProducto: cantidadesPersonalizadas,
+        }
+      );
+      sincronizarWalADisco(db);
+      return {
+        xlsxBase64: Buffer.from(xlsxBytes).toString('base64'),
+        bytesLength: xlsxBytes.byteLength,
         resumen,
       };
     }
@@ -1208,20 +1609,213 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'obtener_sql_migracion_supabase': {
+      exigirPermiso(actor.rol, 'configuracion_sensible');
+      const rutaUnificado = path.resolve(
+        process.cwd(),
+        'supabase',
+        'esquema_completo_unificado.sql'
+      );
+      if (fs.existsSync(rutaUnificado)) {
+        return {
+          sql: fs.readFileSync(rutaUnificado, 'utf-8').trim(),
+          esUnificado: true,
+          migracionesIncluidas: ['001', '002', '003', '004', '005'],
+        };
+      }
+
       const dirMig = path.resolve(process.cwd(), 'supabase', 'migrations');
-      const m002 = fs.existsSync(path.join(dirMig, '002_venta_movil_rpc.sql'))
-        ? fs.readFileSync(path.join(dirMig, '002_venta_movil_rpc.sql'), 'utf-8')
-        : '';
-      const m003 = fs.existsSync(
-        path.join(dirMig, '003_arca_y_extras_fase4.sql')
-      )
-        ? fs.readFileSync(
-            path.join(dirMig, '003_arca_y_extras_fase4.sql'),
-            'utf-8'
-          )
-        : '';
+      const leerMig = (nombre: string) =>
+        fs.existsSync(path.join(dirMig, nombre))
+          ? fs.readFileSync(path.join(dirMig, nombre), 'utf-8')
+          : '';
+      const m001 = leerMig('001_esquema_supabase_rls.sql');
+      const m002 = leerMig('002_venta_movil_rpc.sql');
+      const m003 = leerMig('003_arca_y_extras_fase4.sql');
+      const m004 = leerMig('004_sucursales_y_transferencias.sql');
+      const m005 = leerMig('005_endurecimiento_seguridad_rls.sql');
       return {
-        sql: `${m002}\n\n${m003}`.trim(),
+        sql: `${m001}\n\n${m002}\n\n${m003}\n\n${m004}\n\n${m005}`.trim(),
+        esUnificado: true,
+        migracionesIncluidas: ['001', '002', '003', '004', '005'],
+      };
+    }
+
+    case 'obtener_estado_sesion_nube': {
+      exigirPermiso(actor.rol, 'configuracion_sensible');
+      return {
+        supabaseAutenticado: Boolean(sesionesNubeMemoria.supabaseAccessToken),
+        supabaseEmail: sesionesNubeMemoria.supabaseEmail,
+        firebaseAutenticado: Boolean(sesionesNubeMemoria.firebaseIdToken),
+        firebaseEmail: sesionesNubeMemoria.firebaseEmail,
+      };
+    }
+
+    case 'autenticar_nube_supabase': {
+      exigirPermiso(actor.rol, 'configuracion_sensible');
+      const cfg = obtenerConfiguracionSistema(db, actor.comercio_id);
+      if (!cfg.supabase_url || !cfg.supabase_anon_key) {
+        throw new Error(
+          'Primero guardá la URL y Anon Key de Supabase en Configuración.'
+        );
+      }
+      const email = String(payload.email ?? '').trim();
+      const password = String(payload.password ?? '');
+      if (!email || !password) {
+        throw new Error('Ingresá tu email y contraseña de Supabase Auth.');
+      }
+      return autenticarSupabaseEmailClave({
+        supabaseUrl: cfg.supabase_url,
+        supabaseAnonKey: cfg.supabase_anon_key,
+        email,
+        password,
+      }).then((sesion) => {
+        sesionesNubeMemoria.supabaseAccessToken = sesion.accessToken;
+        sesionesNubeMemoria.supabaseEmail = sesion.email;
+        return {
+          supabaseAutenticado: true,
+          supabaseEmail: sesion.email,
+        };
+      });
+    }
+
+    case 'autenticar_nube_firebase': {
+      exigirPermiso(actor.rol, 'configuracion_sensible');
+      const cfg = obtenerConfiguracionSistema(db, actor.comercio_id);
+      if (!cfg.firebase_api_key) {
+        throw new Error(
+          'Primero guardá la Web API Key de Firebase en Configuración.'
+        );
+      }
+      const email = String(payload.email ?? '').trim();
+      const password = String(payload.password ?? '');
+      if (!email || !password) {
+        throw new Error('Ingresá tu email y contraseña de Firebase Auth.');
+      }
+      return autenticarFirebaseEmailClave({
+        apiKey: cfg.firebase_api_key,
+        email,
+        password,
+      }).then((sesion) => {
+        sesionesNubeMemoria.firebaseIdToken = sesion.idToken;
+        sesionesNubeMemoria.firebaseEmail = sesion.email;
+        return {
+          firebaseAutenticado: true,
+          firebaseEmail: sesion.email,
+        };
+      });
+    }
+
+    case 'cerrar_sesion_nube': {
+      exigirPermiso(actor.rol, 'configuracion_sensible');
+      const proveedor = String(payload.proveedor ?? 'ambos');
+      if (proveedor === 'supabase' || proveedor === 'ambos') {
+        sesionesNubeMemoria.supabaseAccessToken = null;
+        sesionesNubeMemoria.supabaseEmail = null;
+      }
+      if (proveedor === 'firebase' || proveedor === 'ambos') {
+        sesionesNubeMemoria.firebaseIdToken = null;
+        sesionesNubeMemoria.firebaseEmail = null;
+      }
+      return { ok: true };
+    }
+
+    case 'copiar_todo_firebase': {
+      exigirPermiso(actor.rol, 'configuracion_sensible');
+      const adaptadorFb = resolverAdaptadorSync(db, actor.comercio_id);
+      return (async () => {
+        const res = await copiarBaseCompletaAFirebaseSinDuplicados(
+          db,
+          actor,
+          adaptadorFb instanceof AdaptadorFirebaseFirestoreHttp
+            ? adaptadorFb
+            : undefined
+        );
+        sincronizarWalADisco(db);
+        return res;
+      })();
+    }
+
+    case 'iniciar_sesion_operador': {
+      const comercioId = obtenerComercioActivoId(db);
+      if (!comercioId || !tieneSuperadminActivo(db)) {
+        throw new Error(
+          'CONFIGURACION_INICIAL_REQUERIDA: Primero creá el comercio y el administrador inicial.'
+        );
+      }
+      const usuarioInput =
+        typeof payload.usuario === 'string' ? payload.usuario.trim() : '';
+      const claveInput =
+        typeof payload.clave === 'string' ? payload.clave : '';
+
+      if (!usuarioInput || !claveInput) {
+        throw new Error('Ingresá tu usuario y contraseña para iniciar sesión.');
+      }
+
+      const resAuth = autenticarUsuarioOffline(db, {
+        comercioId,
+        usuario: usuarioInput,
+        clave: claveInput,
+        deviceId: obtenerODefinirDeviceIdTerminal(path.dirname(rutaActivaDb)),
+      });
+      const sesion = crearSesionOperadorLocal(
+        resAuth.actor.comercio_id,
+        resAuth.usuario.id
+      );
+      sincronizarWalADisco(db);
+      return {
+        sessionToken: sesion.token,
+        operadorActual: {
+          id: resAuth.usuario.id,
+          nombre: resAuth.usuario.nombre,
+          usuario: resAuth.usuario.usuario,
+          rol: resAuth.usuario.rol,
+          debe_cambiar_clave: resAuth.usuario.debe_cambiar_clave,
+        },
+      };
+    }
+
+    case 'cerrar_sesion_operador': {
+      if (contextoHttp?.sessionToken) {
+        sesionesOperadoresLocales.delete(contextoHttp.sessionToken);
+      }
+      registrarLogoutUsuario(db, actor);
+      sincronizarWalADisco(db);
+      return { ok: true, rolReal };
+    }
+
+    case 'obtener_estado_actualizaciones': {
+      const migracionesAplicadas = db
+        .prepare(
+          `SELECT id, nombre, aplicada_en FROM _migraciones ORDER BY id ASC`
+        )
+        .all() as unknown as Array<{
+        id: number;
+        nombre: string;
+        aplicada_en: string;
+      }>;
+      const cfg = obtenerConfiguracionSistema(db, actor.comercio_id);
+      const resumenSync = obtenerResumenEstadoSyncDb(
+        db,
+        actor.comercio_id,
+        false
+      );
+      let tamanoDbBytes = 0;
+      try {
+        if (rutaActivaDb !== ':memory:' && fs.existsSync(rutaActivaDb)) {
+          tamanoDbBytes = fs.statSync(rutaActivaDb).size;
+        }
+      } catch {
+        tamanoDbBytes = 0;
+      }
+      return {
+        versionApp: '0.1.0',
+        rutaBaseDatos: rutaActivaDb,
+        tamanoDbBytes,
+        migracionesAplicadas,
+        ultimoBackupAt: cfg.ultimo_backup_at,
+        ultimoBackupArchivo: cfg.ultimo_backup_archivo,
+        pendientesSync: resumenSync.totalPendientes,
+        proveedorNube: cfg.proveedor_nube,
       };
     }
 
@@ -1319,11 +1913,15 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'listar_movimientos_cc': {
+      const entidadTipo = payload.entidadTipo as 'cliente' | 'proveedor';
+      if (entidadTipo === 'proveedor') {
+        exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
+      }
       return {
         movimientos: listarMovimientosCuentaCorriente(
           db,
           actor.comercio_id,
-          payload.entidadTipo as 'cliente' | 'proveedor',
+          entidadTipo,
           String(payload.entidadId ?? '')
         ),
       };
@@ -1394,19 +1992,23 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'obtener_config_venta_movil': {
+      exigirPermiso(actor.rol, 'configurar_venta_movil_y_arca');
       return obtenerConfigVentaMovil(db, actor.comercio_id);
     }
 
     case 'obtener_configuracion_netlify': {
+      exigirPermiso(actor.rol, 'configurar_venta_movil_y_arca');
       return obtenerConfiguracionNetlify(db, actor.comercio_id);
     }
 
     case 'verificar_token_netlify': {
+      exigirPermiso(actor.rol, 'configurar_venta_movil_y_arca');
       const token = String(payload.token ?? '');
       return verificarTokenNetlifyApi(token);
     }
 
     case 'guardar_configuracion_netlify': {
+      exigirPermiso(actor.rol, 'configurar_venta_movil_y_arca');
       const res = guardarConfiguracionNetlify(db, {
         actor,
         netlifyToken:
@@ -1423,6 +2025,7 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'desplegar_cajero_movil_netlify': {
+      exigirPermiso(actor.rol, 'configurar_venta_movil_y_arca');
       return (async () => {
         const configSistema = obtenerConfiguracionSistema(db, actor.comercio_id);
         const configNetlify = obtenerConfiguracionNetlify(db, actor.comercio_id);
@@ -1434,6 +2037,23 @@ export function ejecutarAccionPosLocal(
         const comercio = db
           .prepare('SELECT nombre FROM comercios WHERE id = ?')
           .get(actor.comercio_id) as { nombre: string } | undefined;
+
+        const matchSubdominioUrl = configNetlify.venta_movil_url
+          ? configNetlify.venta_movil_url.match(
+              /https?:\/\/([a-z0-9\-]+)\.netlify\.app/i
+            )
+          : null;
+        const nombreSitioEfectivo = payload.siteName
+          ? String(payload.siteName)
+          : configNetlify.netlify_site_name ||
+            (matchSubdominioUrl ? matchSubdominioUrl[1] : null);
+
+        guardarConfiguracionNetlify(db, {
+          actor,
+          netlifyToken: token,
+          netlifySiteName: nombreSitioEfectivo ?? undefined,
+        });
+        sincronizarWalADisco(db);
 
         const zipBuffer = prepararPaqueteVentaMovilNetlify({
           supabaseUrl: configSistema.supabase_url,
@@ -1448,9 +2068,7 @@ export function ejecutarAccionPosLocal(
           siteId: payload.siteId
             ? String(payload.siteId)
             : configNetlify.netlify_site_id,
-          siteName: payload.siteName
-            ? String(payload.siteName)
-            : configNetlify.netlify_site_name,
+          siteName: nombreSitioEfectivo,
         });
 
         if (!resDeploy.ok) {
@@ -1507,10 +2125,15 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'login_movil': {
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      if (!comercioIdMovil) {
+        throw new Error('Comercio no inicializado.');
+      }
       const res = iniciarSesionMovil(db, {
-        comercioId: payload.comercioId
-          ? String(payload.comercioId)
-          : actor.comercio_id,
+        comercioId: comercioIdMovil,
         usuario: String(payload.usuario ?? ''),
         clave: String(payload.clave ?? ''),
         dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
@@ -1524,17 +2147,21 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'obtener_catalogo_movil': {
-      const comercioId = payload.comercioId
-        ? String(payload.comercioId)
-        : actor.comercio_id;
-      if (payload.sesionMovilId) {
-        validarYRenovarSesionMovil(db, {
-          sesionId: String(payload.sesionMovilId),
-          comercioId,
-        });
+      const sesionMovilId = String(payload.sesionMovilId ?? '').trim();
+      if (!sesionMovilId) {
+        throw new Error('SESION_INVALIDA: Se requiere una sesión móvil activa.');
       }
-      const productos = obtenerCatalogoVentaMovil(db, comercioId);
-      const clientes = listarClientesConSaldo(db, comercioId).map((c) => ({
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      validarYRenovarSesionMovil(db, {
+        sesionId: sesionMovilId,
+        comercioId: comercioIdMovil,
+      });
+      const productos = obtenerCatalogoVentaMovil(db, comercioIdMovil);
+      const combos = listarCombosComercio(db, comercioIdMovil);
+      const clientes = listarClientesConSaldo(db, comercioIdMovil).map((c) => ({
         id: c.id,
         nombre: c.nombre,
         cuit_dni: c.cuit_dni,
@@ -1543,24 +2170,32 @@ export function ejecutarAccionPosLocal(
         saldo_pendiente: c.saldo_pendiente_centavos,
       }));
       return {
-        comercioId,
+        comercioId: comercioIdMovil,
         productos,
+        combos,
         clientes,
       };
     }
 
     case 'crear_venta_movil': {
-      const comercioId = payload.comercioId
-        ? String(payload.comercioId)
-        : actor.comercio_id;
+      const sesionMovilId = String(payload.sesionMovilId ?? '').trim();
+      if (!sesionMovilId) {
+        throw new Error('SESION_INVALIDA: Se requiere una sesión móvil activa.');
+      }
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      const sesionMovil = validarYRenovarSesionMovil(db, {
+        sesionId: sesionMovilId,
+        comercioId: comercioIdMovil,
+      });
       const res = crearVentaMovilServidor(db, {
         ventaId: String(payload.ventaId ?? ''),
-        comercioId,
-        usuarioId: String(payload.usuarioId ?? actor.usuario_id),
-        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
-        sesionMovilId: payload.sesionMovilId
-          ? String(payload.sesionMovilId)
-          : undefined,
+        comercioId: comercioIdMovil,
+        usuarioId: sesionMovil.usuario_id,
+        dispositivoId: String(payload.dispositivoId || sesionMovil.dispositivo_id || 'movil-web-1'),
+        sesionMovilId,
         items: (payload.items as ItemPedidoMovilInput[]) ?? [],
         pagos: (payload.pagos as PagoVentaInput[]) ?? [],
         descuentoGlobal: Number(payload.descuentoGlobal ?? 0),
@@ -1572,34 +2207,42 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'estado_caja_movil': {
-      const comercioId = payload.comercioId
-        ? String(payload.comercioId)
-        : actor.comercio_id;
-      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
-      if (payload.sesionMovilId) {
-        validarYRenovarSesionMovil(db, {
-          sesionId: String(payload.sesionMovilId),
-          comercioId,
-        });
+      const sesionMovilId = String(payload.sesionMovilId ?? '').trim();
+      if (!sesionMovilId) {
+        throw new Error('SESION_INVALIDA: Se requiere una sesión móvil activa.');
       }
-      return obtenerEstadoCajaMovilUsuario(db, comercioId, usuarioId);
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      const sesionMovil = validarYRenovarSesionMovil(db, {
+        sesionId: sesionMovilId,
+        comercioId: comercioIdMovil,
+      });
+      return obtenerEstadoCajaMovilUsuario(
+        db,
+        comercioIdMovil,
+        sesionMovil.usuario_id
+      );
     }
 
     case 'abrir_caja_movil': {
-      const comercioId = payload.comercioId
-        ? String(payload.comercioId)
-        : actor.comercio_id;
-      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
-      if (payload.sesionMovilId) {
-        validarYRenovarSesionMovil(db, {
-          sesionId: String(payload.sesionMovilId),
-          comercioId,
-        });
+      const sesionMovilId = String(payload.sesionMovilId ?? '').trim();
+      if (!sesionMovilId) {
+        throw new Error('SESION_INVALIDA: Se requiere una sesión móvil activa.');
       }
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      const sesionMovil = validarYRenovarSesionMovil(db, {
+        sesionId: sesionMovilId,
+        comercioId: comercioIdMovil,
+      });
       const res = abrirCajaMovilUsuario(db, {
-        comercioId,
-        usuarioId,
-        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
+        comercioId: comercioIdMovil,
+        usuarioId: sesionMovil.usuario_id,
+        dispositivoId: String(payload.dispositivoId || sesionMovil.dispositivo_id || 'movil-web-1'),
         montoInicialCentavos: Number(payload.montoInicialCentavos ?? 0),
         observaciones: payload.observaciones
           ? String(payload.observaciones)
@@ -1610,20 +2253,22 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'cerrar_caja_movil': {
-      const comercioId = payload.comercioId
-        ? String(payload.comercioId)
-        : actor.comercio_id;
-      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
-      if (payload.sesionMovilId) {
-        validarYRenovarSesionMovil(db, {
-          sesionId: String(payload.sesionMovilId),
-          comercioId,
-        });
+      const sesionMovilId = String(payload.sesionMovilId ?? '').trim();
+      if (!sesionMovilId) {
+        throw new Error('SESION_INVALIDA: Se requiere una sesión móvil activa.');
       }
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      const sesionMovil = validarYRenovarSesionMovil(db, {
+        sesionId: sesionMovilId,
+        comercioId: comercioIdMovil,
+      });
       const res = cerrarCajaMovilUsuario(db, {
-        comercioId,
-        usuarioId,
-        dispositivoId: String(payload.dispositivoId || 'movil-web-1'),
+        comercioId: comercioIdMovil,
+        usuarioId: sesionMovil.usuario_id,
+        dispositivoId: String(payload.dispositivoId || sesionMovil.dispositivo_id || 'movil-web-1'),
         efectivoContadoCentavos: Number(payload.efectivoContadoCentavos ?? 0),
         observaciones: payload.observaciones
           ? String(payload.observaciones)
@@ -1634,18 +2279,24 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'listar_ventas_movil_dia': {
-      const comercioId = payload.comercioId
-        ? String(payload.comercioId)
-        : actor.comercio_id;
-      const usuarioId = String(payload.usuarioId ?? actor.usuario_id);
-      if (payload.sesionMovilId) {
-        validarYRenovarSesionMovil(db, {
-          sesionId: String(payload.sesionMovilId),
-          comercioId,
-        });
+      const sesionMovilId = String(payload.sesionMovilId ?? '').trim();
+      if (!sesionMovilId) {
+        throw new Error('SESION_INVALIDA: Se requiere una sesión móvil activa.');
       }
+      const comercioIdMovil =
+        (payload.comercioId ? String(payload.comercioId).trim() : '') ||
+        obtenerComercioActivoId(db) ||
+        '';
+      const sesionMovil = validarYRenovarSesionMovil(db, {
+        sesionId: sesionMovilId,
+        comercioId: comercioIdMovil,
+      });
       return {
-        ventas: listarVentasPropiasDelDiaMovil(db, comercioId, usuarioId),
+        ventas: listarVentasPropiasDelDiaMovil(
+          db,
+          comercioIdMovil,
+          sesionMovil.usuario_id
+        ),
       };
     }
 
@@ -1686,10 +2337,12 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'emitir_comprobante_arca_venta': {
-      const adaptador = new AdaptadorArcaHomologacionLocal();
-      if (payload.sinConexion) {
-        adaptador.fijarConectado(false);
-      }
+      exigirPermiso(actor.rol, 'vender_y_caja');
+      const adaptador = resolverAdaptadorArca(
+        db,
+        actor.comercio_id,
+        Boolean(payload.sinConexion)
+      );
       return emitirComprobanteArcaVenta(
         db,
         actor,
@@ -1702,16 +2355,18 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'reintentar_pendientes_arca': {
-      const adaptador = new AdaptadorArcaHomologacionLocal();
-      if (payload.sinConexion) {
-        adaptador.fijarConectado(false);
-      }
-      return reintentarComprobantesArcaPendientes(db, actor, adaptador).then(
-        (r) => {
-          sincronizarWalADisco(db);
-          return r;
-        }
+      exigirPermiso(actor.rol, 'vender_y_caja');
+      const adaptador = resolverAdaptadorArca(
+        db,
+        actor.comercio_id,
+        Boolean(payload.sinConexion)
       );
+      return reintentarComprobantesArcaPendientes(db, actor, adaptador, {
+        respetarBackoff: true,
+      }).then((r) => {
+        sincronizarWalADisco(db);
+        return r;
+      });
     }
 
     case 'obtener_comprobante_fiscal_imprimible': {
@@ -1723,6 +2378,7 @@ export function ejecutarAccionPosLocal(
     }
 
     case 'obtener_informe_comprobantes_arca': {
+      exigirPermiso(actor.rol, 'ver_informes_gestion');
       return obtenerInformeComprobantesArca(db, actor.comercio_id, {
         estadoFacturacion: payload.estadoFacturacion as
           | EstadoFacturacionArca

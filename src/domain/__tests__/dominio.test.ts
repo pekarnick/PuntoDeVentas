@@ -28,6 +28,11 @@ import {
   verificarCadenaAuditoria,
   paginarListado,
   TAMANIO_PAGINA_POR_DEFECTO,
+  agregarProductoAlCarrito,
+  actualizarCantidadEnCarrito,
+  calcularResumenCarritoPOS,
+  quitarComponentesDeCarrito,
+  type ProductoCatalogoVenta,
 } from '../index.ts';
 
 describe('Dominio — Reglas inviolables y cálculos puros', () => {
@@ -331,5 +336,63 @@ describe('Dominio — Reglas inviolables y cálculos puros', () => {
     expect(vacia.totalPaginas).toBe(1);
     expect(vacia.desdeRegistro).toBe(0);
     expect(vacia.hastaRegistro).toBe(0);
+  });
+
+  it('permite quitar un combo o ítem del carrito sin bloquear la pantalla aunque exista un descuento global o bonificación previa', () => {
+    const prodA: ProductoCatalogoVenta = {
+      id: 'prod-a',
+      nombre: 'Gaseosa 2.25L',
+      codigo_interno: 'GAS-01',
+      codigos_barras: ['7790001'],
+      unidad: 'unidad',
+      permite_decimales: false,
+      precio_venta: 250000,
+      alicuota_iva: 21,
+      exento_iva: false,
+    };
+    const prodB: ProductoCatalogoVenta = {
+      id: 'prod-b',
+      nombre: 'Papas Fritas 150g',
+      codigo_interno: 'PAP-01',
+      codigos_barras: ['7790002'],
+      unidad: 'unidad',
+      permite_decimales: false,
+      precio_venta: 180000,
+      alicuota_iva: 21,
+      exento_iva: false,
+    };
+
+    // Agregar componentes de un combo con ahorro de $ 200.000 centavos ($ 2.000,00)
+    let carrito = agregarProductoAlCarrito([], prodA, 1);
+    carrito = agregarProductoAlCarrito(carrito, prodB, 1);
+    const ahorroCombo = 200000;
+
+    const resumenConCombo = calcularResumenCarritoPOS(carrito, ahorroCombo);
+    expect(resumenConCombo.subtotal).toBe(430000);
+    expect(resumenConCombo.descuento_global).toBe(200000);
+    expect(resumenConCombo.total).toBe(230000);
+
+    // Si el cajero quita el producto más caro (queda solo prodB de $ 1.800,00 < ahorro $ 2.000,00),
+    // calcularResumenCarritoPOS NO debe lanzar excepción y debe acotar el descuento al subtotal disponible
+    const carritoSinProdA = actualizarCantidadEnCarrito(carrito, 'prod-a', 0);
+    const resumenParcial = calcularResumenCarritoPOS(
+      carritoSinProdA,
+      ahorroCombo
+    );
+    expect(resumenParcial.subtotal).toBe(180000);
+    expect(resumenParcial.descuento_global).toBe(180000);
+    expect(resumenParcial.total).toBe(0);
+
+    // Y quitarComponentesDeCarrito resta las unidades exactas del combo
+    const carritoDespuesDeQuitarCombo = quitarComponentesDeCarrito(carrito, [
+      { producto_id: 'prod-a', cantidad: 1 },
+      { producto_id: 'prod-b', cantidad: 1 },
+    ]);
+    expect(carritoDespuesDeQuitarCombo).toHaveLength(0);
+    const resumenVacio = calcularResumenCarritoPOS(
+      carritoDespuesDeQuitarCombo,
+      ahorroCombo
+    );
+    expect(resumenVacio.total).toBe(0);
   });
 });

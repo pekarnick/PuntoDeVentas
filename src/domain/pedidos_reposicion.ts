@@ -13,6 +13,7 @@ import {
 } from './dinero.ts';
 import { generarDocumentoPdf, type SeccionTablaPdf } from './pdf.ts';
 import { estaBajoStockMinimo } from './stock.ts';
+import { generarLibroXlsx, type HojaXlsxInput } from './xlsx.ts';
 
 export type CriterioAgrupacionPedido = 'proveedor' | 'marca' | 'categoria';
 
@@ -342,4 +343,146 @@ export function generarPdfPedidoReposicion(params: {
     secciones,
     pieDocumento: `TOTAL GENERAL ESTIMADO DE REPOSICIÓN: ${formatearMonedaARS(params.resumen.costo_total_general_centavos)} (${params.resumen.total_unidades_general} unidades en ${params.resumen.total_productos_bajo_stock} productos)`,
   });
+}
+
+/**
+ * Genera el archivo Excel (.xlsx — ECMA-376 OpenXML) listo para enviar al proveedor o abrir en planilla,
+ * organizado según el criterio elegido (`proveedor`, `marca` o `categoria`).
+ */
+export function generarXlsxPedidoReposicion(params: {
+  readonly resumen: ResumenPedidosReposicion;
+  readonly comercioNombre?: string;
+  readonly fechaIso?: string;
+}): Uint8Array {
+  const etiquetaSingular: Record<CriterioAgrupacionPedido, string> = {
+    proveedor: 'Proveedor',
+    marca: 'Marca',
+    categoria: 'Categoría',
+  };
+
+  const etiquetaPlural: Record<CriterioAgrupacionPedido, string> = {
+    proveedor: 'Proveedores',
+    marca: 'Marcas',
+    categoria: 'Categorías',
+  };
+
+  const criterio = params.resumen.criterio;
+  const colAgrupacion = etiquetaSingular[criterio];
+
+  // Hoja 1: Detalle completo de todos los ítems agrupados por el criterio elegido
+  const filasDetalle: Array<ReadonlyArray<string | number>> = [];
+  for (const grupo of params.resumen.grupos) {
+    for (const it of grupo.items) {
+      filasDetalle.push([
+        grupo.grupo_nombre,
+        it.codigo_mostrar,
+        it.nombre,
+        it.proveedor_nombre,
+        it.marca_nombre,
+        it.categoria_nombre,
+        it.unidad,
+        it.stock_actual,
+        it.stock_minimo,
+        it.faltante_stock,
+        it.cantidad_a_pedir,
+        Number((it.costo_unitario_centavos / 100).toFixed(2)),
+        Number((it.subtotal_costo_estimado_centavos / 100).toFixed(2)),
+        formatearMonedaARS(it.costo_unitario_centavos),
+        formatearMonedaARS(it.subtotal_costo_estimado_centavos),
+      ]);
+    }
+  }
+
+  // Hoja 2: Resumen consolidado por grupo (Proveedor / Marca / Categoría)
+  const filasResumenGrupos: Array<ReadonlyArray<string | number>> =
+    params.resumen.grupos.map((g) => [
+      g.grupo_nombre,
+      g.cantidad_productos,
+      g.total_unidades_a_pedir,
+      Number((g.costo_total_estimado_centavos / 100).toFixed(2)),
+      formatearMonedaARS(g.costo_total_estimado_centavos),
+    ]);
+
+  filasResumenGrupos.push([
+    'TOTAL GENERAL',
+    params.resumen.total_productos_bajo_stock,
+    params.resumen.total_unidades_general,
+    Number((params.resumen.costo_total_general_centavos / 100).toFixed(2)),
+    formatearMonedaARS(params.resumen.costo_total_general_centavos),
+  ]);
+
+  const hojas: HojaXlsxInput[] = [
+    {
+      nombre: `Pedido por ${colAgrupacion}`,
+      encabezados: [
+        colAgrupacion,
+        'Código',
+        'Producto',
+        'Proveedor',
+        'Marca',
+        'Categoría',
+        'Unidad',
+        'Stock Actual',
+        'Stock Mínimo',
+        'Faltante',
+        'Cantidad a Pedir',
+        'Costo Unitario ($)',
+        'Subtotal Estimado ($)',
+        'Costo Unitario (ARS)',
+        'Subtotal Estimado (ARS)',
+      ],
+      filas: filasDetalle,
+    },
+    {
+      nombre: `Resumen ${etiquetaPlural[criterio]}`,
+      encabezados: [
+        colAgrupacion,
+        'Artículos Bajo Stock',
+        'Total Unidades a Pedir',
+        'Costo Total Estimado ($)',
+        'Costo Total Estimado (ARS)',
+      ],
+      filas: filasResumenGrupos,
+    },
+  ];
+
+  // Si hay múltiples grupos (hasta 12), agregar también una pestaña individual por cada grupo
+  if (params.resumen.grupos.length > 1) {
+    for (const grupo of params.resumen.grupos.slice(0, 12)) {
+      hojas.push({
+        nombre: `${colAgrupacion.slice(0, 4)} - ${grupo.grupo_nombre}`.slice(
+          0,
+          31
+        ),
+        encabezados: [
+          'Código',
+          'Producto',
+          'Proveedor',
+          'Marca',
+          'Categoría',
+          'Unidad',
+          'Stock Actual',
+          'Stock Mínimo',
+          'Cantidad a Pedir',
+          'Costo Unitario ($)',
+          'Subtotal Estimado ($)',
+        ],
+        filas: grupo.items.map((it) => [
+          it.codigo_mostrar,
+          it.nombre,
+          it.proveedor_nombre,
+          it.marca_nombre,
+          it.categoria_nombre,
+          it.unidad,
+          it.stock_actual,
+          it.stock_minimo,
+          it.cantidad_a_pedir,
+          Number((it.costo_unitario_centavos / 100).toFixed(2)),
+          Number((it.subtotal_costo_estimado_centavos / 100).toFixed(2)),
+        ]),
+      });
+    }
+  }
+
+  return generarLibroXlsx(hojas);
 }

@@ -18,6 +18,7 @@ import {
   crearBaseDatos,
   crearProducto,
   crearUsuario,
+  establecerClaveUsuarioDirecta,
   inicializarComercioYSuperadmin,
   listarUsuariosComercio,
   obtenerSesionCajaAbierta,
@@ -267,6 +268,22 @@ describe('Tarea 2 — Usuarios, Autenticación Argon2id, Auditoría y Caja (PLAN
       deviceId: 'caja-principal',
     });
     expect(loginConTemporal.usuario.debe_cambiar_clave).toBe(true);
+
+    // 4b. Cambiar la contraseña directamente deja debe_cambiar_clave = false ("Al día") y permite ingresar con la nueva clave
+    establecerClaveUsuarioDirecta(db, actorSuperadmin, {
+      usuarioObjetivoId: cajeroId,
+      claveNueva: 'NuevaClaveLucas2026',
+      debeCambiarAlIngresar: false,
+      opcionesArgon: ARGON_TEST_OPTS,
+    });
+
+    const loginConDirecta = autenticarUsuarioOffline(db, {
+      comercioId,
+      usuario: 'lucas',
+      clave: 'NuevaClaveLucas2026',
+      deviceId: 'caja-principal',
+    });
+    expect(loginConDirecta.usuario.debe_cambiar_clave).toBe(false);
 
     registrarLogoutUsuario(db, actorCajero);
 

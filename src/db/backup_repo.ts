@@ -3,6 +3,7 @@
  * y Exportación completa a Excel (.xlsx) (PLAN.md §5 y §6.1 — Fase 2).
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -23,9 +24,20 @@ import { obtenerConfiguracionSistema } from '../sync/motor_sync.ts';
 
 const requireNode = createRequire(import.meta.url);
 
-function abrirSqliteArchivo(rutaArchivo: string): DatabaseSync {
+function abrirSqliteArchivo(
+  rutaArchivo: string,
+  soloLectura = false
+): DatabaseSync {
   const sqlite = requireNode('node:sqlite') as typeof import('node:sqlite');
-  return new sqlite.DatabaseSync(rutaArchivo);
+  return new sqlite.DatabaseSync(rutaArchivo, { readOnly: soloLectura });
+}
+
+function asegurarSinSymlink(ruta: string, mensaje: string): void {
+  if (!fs.existsSync(ruta)) return;
+  const st = fs.lstatSync(ruta);
+  if (st.isSymbolicLink()) {
+    throw new Error(mensaje);
+  }
 }
 
 export interface RegistroHistorialBackup {
@@ -70,6 +82,10 @@ export function crearBackupBaseDatosLocal(
     config.carpeta_backups
   );
   fs.mkdirSync(carpetaDestino, { recursive: true });
+  asegurarSinSymlink(
+    carpetaDestino,
+    'BACKUP_RECHAZADO: La carpeta destino de backups no puede ser un enlace simbólico.'
+  );
 
   const ahora = new Date();
   const ahoraIso = ahora.toISOString();
@@ -79,14 +95,46 @@ export function crearBackupBaseDatosLocal(
   const nombreArchivo =
     params.nombreArchivoPersonalizado ?? `pos_backup_${tipo}_${stamp}.db`;
   const rutaCompleta = path.join(carpetaDestino, nombreArchivo);
+  asegurarSinSymlink(
+    rutaCompleta,
+    'BACKUP_RECHAZADO: El archivo destino de backup no puede ser un enlace simbólico.'
+  );
+
+  const rutaTemporal = path.join(
+    carpetaDestino,
+    `pos_backup_tmp_${crypto.randomBytes(8).toString('hex')}.db`
+  );
+
+  // VACUUM INTO genera un archivo SQLite completo, consistente y atómico en ruta temporal
+  const rutaEscapadaSql = rutaTemporal.replace(/'/g, "''");
+  db.exec(`VACUUM INTO '${rutaEscapadaSql}';`);
+
+  // Sanitizar secretos y sesiones efímeras dentro del archivo de backup antes de publicarlo
+  const dbBackupSanitizar = abrirSqliteArchivo(rutaTemporal, false);
+  try {
+    try {
+      dbBackupSanitizar.exec('UPDATE configuracion_sistema SET netlify_token = NULL;');
+    } catch {
+      // Ignorar si la tabla aún no existe en una migración antigua
+    }
+    try {
+      dbBackupSanitizar.exec('DELETE FROM sesiones_moviles;');
+    } catch {
+      // Ignorar si la tabla aún no existe
+    }
+    try {
+      dbBackupSanitizar.exec('UPDATE usuarios SET pin_hash = NULL;');
+    } catch {
+      // Ignorar si la columna no existe
+    }
+  } finally {
+    dbBackupSanitizar.close();
+  }
 
   if (fs.existsSync(rutaCompleta)) {
     fs.unlinkSync(rutaCompleta);
   }
-
-  // VACUUM INTO genera un archivo SQLite completo, consistente y atómico sin bloquear lecturas
-  const rutaEscapadaSql = rutaCompleta.replace(/'/g, "''");
-  db.exec(`VACUUM INTO '${rutaEscapadaSql}';`);
+  fs.renameSync(rutaTemporal, rutaCompleta);
 
   const stat = fs.statSync(rutaCompleta);
   const backupId = generarUuidV7();
@@ -238,6 +286,12 @@ export function restaurarDesdeBackupLocal(
   if (!fs.existsSync(rutaBackup)) {
     throw new Error(`No se encontró el archivo de backup en: ${rutaBackup}`);
   }
+  const statBackup = fs.lstatSync(rutaBackup);
+  if (statBackup.isSymbolicLink() || !statBackup.isFile()) {
+    throw new Error(
+      'BACKUP_RECHAZADO: El archivo de backup debe ser un archivo regular (no un enlace simbólico).'
+    );
+  }
 
   // Verificar encabezado binario SQLite format 3
   const fd = fs.openSync(rutaBackup, 'r');
@@ -250,11 +304,14 @@ export function restaurarDesdeBackupLocal(
     );
   }
 
-  // Validar integridad estructural y de auditoría del backup antes de tocar la base activa
-  const dbOrigen = abrirSqliteArchivo(rutaBackup);
+  // Validar integridad estructural, aislamiento de tenant y auditoría del backup en solo lectura
+  const dbOrigen = abrirSqliteArchivo(rutaBackup, true);
   let registrosRestaurados = 0;
 
   try {
+    dbOrigen.exec('PRAGMA trusted_schema = OFF;');
+    dbOrigen.exec('PRAGMA query_only = ON;');
+
     const check = dbOrigen.prepare('PRAGMA integrity_check;').get() as {
       integrity_check: string;
     };
@@ -264,11 +321,36 @@ export function restaurarDesdeBackupLocal(
       );
     }
 
+    const tablasExistentes = dbOrigen
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('comercios', 'usuarios', 'auditoria', 'productos')`
+      )
+      .all() as unknown as Array<{ name: string }>;
+    if (tablasExistentes.length < 4) {
+      throw new Error(
+        'BACKUP_INVALIDO: El archivo de backup no contiene la estructura de tablas esperada.'
+      );
+    }
+
     const comercioBackup = dbOrigen
       .prepare('SELECT id FROM comercios LIMIT 1')
       .get() as { id: string } | undefined;
     if (!comercioBackup) {
       throw new Error('El backup no contiene datos de comercio válidos.');
+    }
+    if (comercioBackup.id !== actor.comercio_id) {
+      throw new Error(
+        'BACKUP_OTRO_COMERCIO: El archivo de backup pertenece a otro comercio.'
+      );
+    }
+
+    const cantAuditoria = dbOrigen
+      .prepare('SELECT COUNT(*) AS total FROM auditoria WHERE comercio_id = ?')
+      .get(comercioBackup.id) as { total: number } | undefined;
+    if (!cantAuditoria || Number(cantAuditoria.total) === 0) {
+      throw new Error(
+        'BACKUP_SIN_AUDITORIA: El archivo de backup no contiene registros de auditoría verificables.'
+      );
     }
 
     const verificacionAuditoria = verificarIntegridadAuditoriaDb(
@@ -337,6 +419,27 @@ export function restaurarDesdeBackupLocal(
         // Volver a instalar todos los triggers de seguridad e inmutabilidad
         for (const trg of triggersActuales) {
           db.exec(trg.sql);
+        }
+
+        // Exigir al menos un superadmin activo tras la restauración
+        const superadminsSobrevivientes = db
+          .prepare(
+            `SELECT COUNT(*) AS total FROM usuarios
+             WHERE comercio_id = ? AND rol = 'superadmin' AND activo = 1 AND deleted_at IS NULL`
+          )
+          .get(actor.comercio_id) as { total: number } | undefined;
+        if (!superadminsSobrevivientes || Number(superadminsSobrevivientes.total) === 0) {
+          throw new Error(
+            'ULTIMO_SUPERADMIN: El backup no contiene ningún superadmin activo.'
+          );
+        }
+
+        // Validar integridad referencial antes de confirmar la transacción
+        const fkErrors = db.prepare('PRAGMA foreign_key_check;').all() as unknown[];
+        if (fkErrors.length > 0) {
+          throw new Error(
+            `BACKUP_FK_INVALIDA: El backup contiene ${fkErrors.length} inconsistencia(s) de clave foránea.`
+          );
         }
 
         // Registrar la restauración en la auditoría encadenada (PLAN.md §6.1)
@@ -542,6 +645,8 @@ export function resetearBaseDatosAFabrica(
   };
 }
 
+export const MAX_FILAS_HOJA_EXCEL = 10_000;
+
 /**
  * Botón "Exportar todo a Excel" (PLAN.md §5):
  * Exporta todas las tablas de gestión del comercio a un único libro `.xlsx`
@@ -561,9 +666,10 @@ export function exportarTodoAExcel(
        LEFT JOIN listas_precio lp ON lp.comercio_id = p.comercio_id AND lp.es_predeterminada = 1
        LEFT JOIN precios pr ON pr.producto_id = p.id AND pr.lista_precio_id = lp.id AND pr.deleted_at IS NULL
        WHERE p.comercio_id = ? AND p.deleted_at IS NULL
-       ORDER BY p.nombre ASC`
+       ORDER BY p.nombre ASC
+       LIMIT ?`
     )
-    .all(actor.comercio_id) as unknown as {
+    .all(actor.comercio_id, MAX_FILAS_HOJA_EXCEL) as unknown as {
     id: string;
     codigo_interno: string | null;
     nombre: string;
@@ -580,9 +686,10 @@ export function exportarTodoAExcel(
       `SELECT producto_id, nombre, stock_minimo, stock_actual
        FROM vista_stock_actual
        WHERE comercio_id = ?
-       ORDER BY nombre ASC`
+       ORDER BY nombre ASC
+       LIMIT ?`
     )
-    .all(actor.comercio_id) as unknown as {
+    .all(actor.comercio_id, MAX_FILAS_HOJA_EXCEL) as unknown as {
     producto_id: string;
     nombre: string;
     stock_minimo: number;
@@ -594,9 +701,10 @@ export function exportarTodoAExcel(
       `SELECT id, fecha, subtotal, descuento, total, estado, canal, tipo_comprobante
        FROM ventas
        WHERE comercio_id = ?
-       ORDER BY fecha DESC`
+       ORDER BY fecha DESC
+       LIMIT ?`
     )
-    .all(actor.comercio_id) as unknown as {
+    .all(actor.comercio_id, MAX_FILAS_HOJA_EXCEL) as unknown as {
     id: string;
     fecha: string;
     subtotal: Centavos;
@@ -612,9 +720,10 @@ export function exportarTodoAExcel(
       `SELECT id, fecha_apertura, monto_inicial, fecha_cierre, efectivo_esperado, efectivo_contado, diferencia, estado
        FROM caja_sesiones
        WHERE comercio_id = ?
-       ORDER BY fecha_apertura DESC`
+       ORDER BY fecha_apertura DESC
+       LIMIT ?`
     )
-    .all(actor.comercio_id) as unknown as {
+    .all(actor.comercio_id, MAX_FILAS_HOJA_EXCEL) as unknown as {
     id: string;
     fecha_apertura: string;
     monto_inicial: Centavos;

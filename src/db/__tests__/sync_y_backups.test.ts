@@ -22,13 +22,16 @@ import {
 import {
   AdaptadorNubeMultiProveedor,
   NubeSimuladaEnMemoria,
+  copiarBaseCompletaAFirebaseSinDuplicados,
   ejecutarCicloSincronizacionCompleto,
   ejecutarPullDatos,
   ejecutarPushDatos,
   guardarConfiguracionSistema,
   obtenerResumenEstadoSyncDb,
+  serializarRegistroParaPostgres,
   validarConfiguracionFirebaseCliente,
 } from '../../sync/motor_sync.ts';
+import { ejecutarAccionPosLocal } from '../servidor_local_dev.ts';
 import {
   deserializarFirestoreDocumentARegistro,
   serializarRegistroAFirestoreFields,
@@ -553,13 +556,13 @@ describe('Fase 2: Sincronización multi-terminal, cola de imágenes, resolución
         device_id: 'terminal-local-1',
       };
 
-      // Ejecutar Pull con forzarBajadaCompleta: debe descubrir y adoptar initOrigen.comercioId y descargar LS001
+      // Ejecutar Pull con forzarBajadaCompleta y permitirAdopcionRemota: debe descubrir y adoptar initOrigen.comercioId y descargar LS001
       const resPull = await ejecutarPullDatos(
         dbNueva,
         adaptadorMulti,
         actorNueva,
         tmpDirNueva,
-        { forzarBajadaCompleta: true }
+        { forzarBajadaCompleta: true, permitirAdopcionRemota: true }
       );
       expect(resPull.errores).toHaveLength(0);
       expect(resPull.registrosBajados).toBeGreaterThan(0);
@@ -630,6 +633,227 @@ describe('Fase 2: Sincronización multi-terminal, cola de imágenes, resolución
       dbNueva.close();
       fs.rmSync(tmpDirOrigen, { recursive: true, force: true });
       fs.rmSync(tmpDirNueva, { recursive: true, force: true });
+    }
+  });
+
+  it('copia toda la base a Firebase sin duplicados (idempotente por UUID), entrega SQL unificado 001–004 y registra ventas por cada operador/cajero', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-fb-ops-'));
+    const rutaDb = path.join(tmpDir, 'pos.db');
+    const db = crearBaseDatos(rutaDb);
+
+    try {
+      const init = inicializarComercioYSuperadmin(db, {
+        nombreComercio: 'Ferretería San Martín',
+        nombreAdmin: 'María Superadmin',
+        usuarioAdmin: 'maria',
+        claveHashAdmin: 'argon2id$secreto',
+        deviceId: 'terminal-1',
+      });
+
+      const actor: ActorContexto = {
+        comercio_id: init.comercioId,
+        usuario_id: init.superadminId,
+        usuario_nombre: 'María Superadmin',
+        rol: 'superadmin',
+        device_id: 'terminal-1',
+      };
+
+      crearProducto(db, actor, {
+        nombre: 'Martillo Galponero',
+        codigoInterno: 'MAR-01',
+        costoCompraCentavos: 400000,
+        precioVentaCentavos: 750000,
+        stockMinimo: 3,
+        stockInicial: 15,
+      });
+
+      const nubeFirebase = new NubeSimuladaEnMemoria();
+
+      // Ejecutar copia completa a Firebase 2 veces seguidas: no debe duplicar ningún registro
+      const copia1 = await copiarBaseCompletaAFirebaseSinDuplicados(
+        db,
+        actor,
+        nubeFirebase
+      );
+      expect(copia1.errores).toHaveLength(0);
+      expect(copia1.registrosCopiados).toBeGreaterThan(0);
+
+      const productosFb1 = await nubeFirebase.bajarRegistrosTabla(
+        'productos',
+        init.comercioId,
+        null
+      );
+      expect(productosFb1).toHaveLength(1);
+
+      const copia2 = await copiarBaseCompletaAFirebaseSinDuplicados(
+        db,
+        actor,
+        nubeFirebase
+      );
+      expect(copia2.errores).toHaveLength(0);
+
+      const productosFb2 = await nubeFirebase.bajarRegistrosTabla(
+        'productos',
+        init.comercioId,
+        null
+      );
+      expect(productosFb2).toHaveLength(1);
+
+      const usuariosFb = await nubeFirebase.bajarRegistrosTabla(
+        'usuarios',
+        init.comercioId,
+        null
+      );
+      expect(usuariosFb[0]?.clave_hash).toBeUndefined();
+      expect(
+        serializarRegistroAFirestoreFields(usuariosFb[0]!)
+      ).not.toHaveProperty('clave_hash');
+
+      // Inicializar superadmin en :memory: y crear operadores para pruebas de servidor local
+      const initLocal = ejecutarAccionPosLocal(
+        'inicializar_primer_superadmin',
+        {
+          nombreComercio: 'Comercio Test Sync',
+          cuit: '20-12345678-6',
+          condicionIva: 'monotributo',
+          nombreAdmin: 'María Superadmin',
+          usuarioAdmin: 'maria',
+          claveAdmin: 'ClaveTestSync2026!',
+        },
+        ':memory:'
+      ) as { sessionToken: string };
+      const ctxAdmin = { sessionToken: initLocal.sessionToken };
+
+      ejecutarAccionPosLocal(
+        'crear_usuario',
+        {
+          nombre: 'Carlos Encargado',
+          usuario: 'carlos',
+          claveNueva: 'ClaveEncargado2026!',
+          rol: 'encargado',
+        },
+        ':memory:',
+        ctxAdmin
+      );
+      ejecutarAccionPosLocal(
+        'crear_usuario',
+        {
+          nombre: 'Lucas Cajero',
+          usuario: 'lucas',
+          claveNueva: 'ClaveCajero2026!',
+          rol: 'cajero',
+        },
+        ':memory:',
+        ctxAdmin
+      );
+
+      // Verificar que obtener_sql_migracion_supabase devuelve el script unificado 001..005
+      const sqlRes = ejecutarAccionPosLocal(
+        'obtener_sql_migracion_supabase',
+        {},
+        ':memory:',
+        ctxAdmin
+      ) as {
+        sql: string;
+        esUnificado: boolean;
+        migracionesIncluidas: string[];
+      };
+      expect(sqlRes.esUnificado).toBe(true);
+      expect(sqlRes.migracionesIncluidas).toEqual(['001', '002', '003', '004', '005']);
+      expect(sqlRes.sql).toContain('CREATE TABLE IF NOT EXISTS public.comercios');
+      expect(sqlRes.sql).toContain('CREATE OR REPLACE FUNCTION public.crear_venta_movil');
+      expect(sqlRes.sql).toContain('CREATE TABLE IF NOT EXISTS public.combos');
+      expect(sqlRes.sql).toContain('CREATE TABLE IF NOT EXISTS public.sucursales');
+
+      const loginCajero = ejecutarAccionPosLocal(
+        'iniciar_sesion_operador',
+        { usuario: 'lucas', clave: 'ClaveCajero2026!' },
+        ':memory:'
+      ) as { sessionToken: string };
+
+      const estadoInicial = ejecutarAccionPosLocal(
+        'obtener_estado_inicial',
+        {},
+        ':memory:',
+        { sessionToken: loginCajero.sessionToken }
+      ) as {
+        operadorActual: { id: string; nombre: string; rol: string };
+        usuariosOperadores: Array<{ id: string; nombre: string; rol: string }>;
+      };
+      expect(estadoInicial.operadorActual.nombre).toBe('Lucas Cajero');
+      expect(estadoInicial.usuariosOperadores.length).toBeGreaterThanOrEqual(3);
+
+      const informe = ejecutarAccionPosLocal(
+        'obtener_informes_fase1',
+        {},
+        ':memory:',
+        ctxAdmin
+      ) as {
+        ventasPorUsuario: Array<{
+          usuario_id: string;
+          usuario_nombre: string;
+          ventas_completadas: number;
+        }>;
+      };
+      const nombresEnInforme = informe.ventasPorUsuario.map(
+        (u) => u.usuario_nombre
+      );
+      expect(nombresEnInforme).toContain('María Superadmin');
+      expect(nombresEnInforme).toContain('Carlos Encargado');
+      expect(nombresEnInforme).toContain('Lucas Cajero');
+
+      // Verificar que serializarRegistroParaPostgres convierte usuario_id: "" en null en auditoria (evitando error Postgres 22P02)
+      // y preserva campos TEXT terminados en _id como dispositivo_id y device_id (evitando error Postgres 23502 en ventas / sesiones_moviles)
+      const auditSerializado = serializarRegistroParaPostgres('auditoria', {
+        id: '01955555-0000-7000-8000-000000000001',
+        comercio_id: init.comercioId,
+        usuario_id: '',
+        autorizado_por_id: '',
+        entidad_id: '',
+        device_id: 'terminal-1',
+        created_at: '2026-11-09T17:00:00.000Z',
+        updated_at: '2026-11-09T17:00:00.000Z',
+        deleted_at: null,
+      });
+      expect(auditSerializado.usuario_id).toBeNull();
+      expect(auditSerializado.autorizado_por_id).toBeNull();
+      expect(auditSerializado.entidad_id).toBeNull();
+      expect(auditSerializado.device_id).toBe('terminal-1');
+
+      const ventaSerializada = serializarRegistroParaPostgres('ventas', {
+        id: '01955555-0000-7000-8000-000000000002',
+        comercio_id: init.comercioId,
+        usuario_id: init.superadminId,
+        cliente_id: '',
+        dispositivo_id: 'terminal-local-1',
+        device_id: 'terminal-local-1',
+        created_at: '2026-11-09T17:00:00.000Z',
+        updated_at: '2026-11-09T17:00:00.000Z',
+        deleted_at: null,
+      });
+      expect(ventaSerializada.dispositivo_id).toBe('terminal-local-1');
+      expect(ventaSerializada.device_id).toBe('terminal-local-1');
+      expect(ventaSerializada.cliente_id).toBeNull();
+
+      const sesionMovilSerializada = serializarRegistroParaPostgres(
+        'sesiones_moviles',
+        {
+          id: '01955555-0000-7000-8000-000000000003',
+          comercio_id: init.comercioId,
+          usuario_id: init.superadminId,
+          dispositivo_id: 'celular-c0c6617e',
+          revocada_por_id: '',
+          device_id: 'terminal-local-1',
+          created_at: '2026-11-09T17:00:00.000Z',
+          updated_at: '2026-11-09T17:00:00.000Z',
+          deleted_at: null,
+        }
+      );
+      expect(sesionMovilSerializada.dispositivo_id).toBe('celular-c0c6617e');
+      expect(sesionMovilSerializada.revocada_por_id).toBeNull();
+    } finally {
+      db.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

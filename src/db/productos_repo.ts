@@ -60,9 +60,15 @@ export function actualizarProductoYPrecio(
 
   if (params.costoCompraCentavos !== undefined) {
     asegurarCentavos(params.costoCompraCentavos, 'costoCompraCentavos');
+    if (params.costoCompraCentavos < 0) {
+      throw new Error('El costo de compra no puede ser negativo.');
+    }
   }
   if (params.precioVentaCentavos !== undefined) {
     asegurarCentavos(params.precioVentaCentavos, 'precioVentaCentavos');
+    if (params.precioVentaCentavos < 0) {
+      throw new Error('El precio de venta no puede ser negativo.');
+    }
   }
 
   ejecutarEnTransaccion(db, () => {
@@ -182,6 +188,36 @@ export function actualizarProductoYPrecio(
         actor.comercio_id
       );
       encolarSyncProducto(db, 'precios', actual.precio_id, 'update', ahora);
+    } else if (!actual.precio_id && params.precioVentaCentavos !== undefined) {
+      const listaDefault = db
+        .prepare(
+          `SELECT id FROM listas_precio
+           WHERE comercio_id = ? AND es_predeterminada = 1 AND deleted_at IS NULL
+           LIMIT 1`
+        )
+        .get(actor.comercio_id) as { id: string } | undefined;
+      if (!listaDefault) {
+        throw new Error(
+          'No existe una lista de precios predeterminada para guardar el precio.'
+        );
+      }
+      const nuevoPrecioId = generarUuidV7();
+      db.prepare(
+        `INSERT INTO precios (
+          id, comercio_id, producto_id, lista_precio_id, precio_venta,
+          created_at, updated_at, deleted_at, device_id, sync_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+      ).run(
+        nuevoPrecioId,
+        actor.comercio_id,
+        params.productoId,
+        listaDefault.id,
+        nuevoPrecio,
+        ahora,
+        ahora,
+        actor.device_id
+      );
+      encolarSyncProducto(db, 'precios', nuevoPrecioId, 'insert', ahora);
     }
 
     insertarRegistroAuditoria(db, {
@@ -225,6 +261,17 @@ export function agregarCodigoBarrasProducto(
   }
 
   return ejecutarEnTransaccion(db, () => {
+    const prod = db
+      .prepare(
+        `SELECT id FROM productos
+         WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL
+         LIMIT 1`
+      )
+      .get(params.productoId, actor.comercio_id);
+    if (!prod) {
+      throw new Error('Producto no encontrado o dado de baja.');
+    }
+
     const ahora = new Date().toISOString();
     const cbId = generarUuidV7();
 
@@ -313,6 +360,51 @@ export function eliminarProductoLogico(
       'delete_logico',
       ahora
     );
+
+    const preciosActivos = db
+      .prepare(
+        `SELECT id FROM precios
+         WHERE producto_id = ? AND comercio_id = ? AND deleted_at IS NULL`
+      )
+      .all(params.productoId, actor.comercio_id) as unknown as { id: string }[];
+    for (const pr of preciosActivos) {
+      db.prepare(
+        `UPDATE precios
+         SET deleted_at = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+         WHERE id = ? AND comercio_id = ?`
+      ).run(ahora, ahora, actor.device_id, pr.id, actor.comercio_id);
+      encolarSyncProducto(db, 'precios', pr.id, 'delete_logico', ahora);
+    }
+
+    const codigosActivos = db
+      .prepare(
+        `SELECT id FROM codigos_barras
+         WHERE producto_id = ? AND comercio_id = ? AND deleted_at IS NULL`
+      )
+      .all(params.productoId, actor.comercio_id) as unknown as { id: string }[];
+    for (const cb of codigosActivos) {
+      db.prepare(
+        `UPDATE codigos_barras
+         SET deleted_at = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+         WHERE id = ? AND comercio_id = ?`
+      ).run(ahora, ahora, actor.device_id, cb.id, actor.comercio_id);
+      encolarSyncProducto(db, 'codigos_barras', cb.id, 'delete_logico', ahora);
+    }
+
+    const variantesActivas = db
+      .prepare(
+        `SELECT id FROM variantes
+         WHERE producto_id = ? AND comercio_id = ? AND deleted_at IS NULL`
+      )
+      .all(params.productoId, actor.comercio_id) as unknown as { id: string }[];
+    for (const v of variantesActivas) {
+      db.prepare(
+        `UPDATE variantes
+         SET activo = 0, deleted_at = ?, updated_at = ?, device_id = ?, sync_status = 'pendiente'
+         WHERE id = ? AND comercio_id = ?`
+      ).run(ahora, ahora, actor.device_id, v.id, actor.comercio_id);
+      encolarSyncProducto(db, 'variantes', v.id, 'delete_logico', ahora);
+    }
 
     insertarRegistroAuditoria(db, {
       actor,

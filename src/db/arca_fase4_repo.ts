@@ -521,6 +521,21 @@ export async function emitirComprobanteArcaVenta(
     topeConsumidorFinalCentavos: configArca.arca_tope_consumidor_final,
   });
 
+  if (!valRec.valido) {
+    const errReceptor = valRec.motivo ?? 'Datos fiscales del receptor inválidos para ARCA.';
+    return {
+      venta_id: venta.id,
+      estado_facturacion: 'error',
+      tipo_comprobante: venta.tipo_comprobante,
+      punto_venta: venta.punto_venta,
+      numero_comprobante: null,
+      cae: null,
+      cae_vencimiento: null,
+      qr_url: null,
+      error_detalle: errReceptor,
+    };
+  }
+
   const puntoVenta = venta.punto_venta ?? configArca.arca_punto_venta;
   const maxNroRow = db
     .prepare(
@@ -682,25 +697,46 @@ export async function emitirComprobanteArcaVenta(
       err instanceof Error
         ? err.message
         : 'Sin conexión con el servicio de facturación ARCA.';
-    const ahoraPend = new Date().toISOString();
+    const ahoraDate = new Date();
+    const ahoraPend = ahoraDate.toISOString();
+    const filaIntentos = db
+      .prepare('SELECT arca_intentos FROM ventas WHERE id = ? AND comercio_id = ?')
+      .get(venta.id, actor.comercio_id) as { arca_intentos: number } | undefined;
+    const intentosPrevios = Number(filaIntentos?.arca_intentos ?? 0);
+    const nuevosIntentos = intentosPrevios + 1;
+    const minutosBackoff = Math.min(60, 2 ** Math.min(nuevosIntentos, 6));
+    const proximoReintentoIso = new Date(
+      ahoraDate.getTime() + minutosBackoff * 60_000
+    ).toISOString();
+    const nuevoEstado = nuevosIntentos >= MAX_REINTENTOS_ARCA ? 'error' : 'pendiente';
 
     ejecutarEnTransaccion(db, () => {
       db.prepare(
         `UPDATE ventas
-         SET estado_facturacion = 'pendiente',
+         SET estado_facturacion = ?,
              arca_ultimo_error = ?,
-             arca_intentos = arca_intentos + 1,
+             arca_intentos = ?,
+             arca_proximo_reintento_at = ?,
              updated_at = ?,
              device_id = ?,
              sync_status = 'pendiente'
          WHERE id = ? AND comercio_id = ?`
-      ).run(msg, ahoraPend, actor.device_id, venta.id, actor.comercio_id);
+      ).run(
+        nuevoEstado,
+        msg,
+        nuevosIntentos,
+        proximoReintentoIso,
+        ahoraPend,
+        actor.device_id,
+        venta.id,
+        actor.comercio_id
+      );
       encolarSync(db, 'ventas', venta.id, 'update', ahoraPend);
     });
 
     return {
       venta_id: venta.id,
-      estado_facturacion: 'pendiente',
+      estado_facturacion: nuevoEstado,
       tipo_comprobante: venta.tipo_comprobante,
       punto_venta: puntoVenta,
       numero_comprobante: null,
@@ -712,20 +748,37 @@ export async function emitirComprobanteArcaVenta(
   }
 }
 
+export const MAX_REINTENTOS_ARCA = 5;
+
 /**
  * Reintenta automáticamente todas las ventas con `estado_facturacion IN ('pendiente', 'error')`
- * cuando vuelve la conexión a internet o cuando el operador lo solicita (PLAN.md §6.3 y §14).
+ * respetando un tope máximo de reintentos y backoff exponencial opcional (PLAN.md §6.3 y §14).
  */
 export async function reintentarComprobantesArcaPendientes(
   db: DatabaseSync,
   actor: ActorContexto,
-  adaptador: AdaptadorServicioArca = new AdaptadorArcaHomologacionLocal()
+  adaptador: AdaptadorServicioArca = new AdaptadorArcaHomologacionLocal(),
+  opciones: {
+    readonly maxReintentos?: number;
+    readonly respetarBackoff?: boolean;
+    readonly ahoraIso?: string;
+  } = {}
 ): Promise<{
   readonly procesados: number;
   readonly emitidos: number;
   readonly siguenPendientes: number;
   readonly conError: number;
 }> {
+  const maxReintentos = opciones.maxReintentos ?? MAX_REINTENTOS_ARCA;
+  const ahoraIso = opciones.ahoraIso ?? new Date().toISOString();
+  const filtroBackoff = opciones.respetarBackoff
+    ? `AND (arca_proximo_reintento_at IS NULL OR arca_proximo_reintento_at <= ?)`
+    : '';
+  const paramsSql: Array<string | number> = [actor.comercio_id, maxReintentos];
+  if (opciones.respetarBackoff) {
+    paramsSql.push(ahoraIso);
+  }
+
   const pendientes = db
     .prepare(
       `SELECT id
@@ -733,9 +786,11 @@ export async function reintentarComprobantesArcaPendientes(
        WHERE comercio_id = ?
          AND deleted_at IS NULL
          AND estado_facturacion IN ('pendiente', 'error')
+         AND arca_intentos < ?
+         ${filtroBackoff}
        ORDER BY fecha ASC`
     )
-    .all(actor.comercio_id) as unknown as { id: string }[];
+    .all(...paramsSql) as unknown as { id: string }[];
 
   let emitidos = 0;
   let siguenPendientes = 0;
@@ -1300,6 +1355,15 @@ export function crearListaPrecio(
 
     // Si se indica porcentajeSobreMostrador, copiar precios de la lista predeterminada aplicando el ajuste
     if (params.porcentajeSobreMostrador !== undefined) {
+      if (
+        !Number.isFinite(params.porcentajeSobreMostrador) ||
+        params.porcentajeSobreMostrador <= -100 ||
+        params.porcentajeSobreMostrador > 1000
+      ) {
+        throw new Error(
+          'El porcentaje sobre mostrador debe estar entre -99,99% y +1000%.'
+        );
+      }
       const factorBp = 10000 + Math.round(params.porcentajeSobreMostrador * 100);
       const baseRows = db
         .prepare(
@@ -1369,8 +1433,28 @@ export function asignarPrecioProductoEnLista(
 ): void {
   exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
   asegurarCentavos(params.precioVentaCentavos, 'precioVentaCentavos');
+  if (params.precioVentaCentavos <= 0) {
+    throw new Error('El precio de venta en lista debe ser mayor a $ 0,00.');
+  }
 
   ejecutarEnTransaccion(db, () => {
+    const prod = db
+      .prepare(
+        `SELECT id FROM productos WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+      )
+      .get(params.productoId, actor.comercio_id);
+    if (!prod) {
+      throw new Error('Producto no encontrado en este comercio.');
+    }
+    const lista = db
+      .prepare(
+        `SELECT id FROM listas_precio WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+      )
+      .get(params.listaPrecioId, actor.comercio_id);
+    if (!lista) {
+      throw new Error('Lista de precios no encontrada en este comercio.');
+    }
+
     const ahora = new Date().toISOString();
     const existente = db
       .prepare(
@@ -1466,8 +1550,23 @@ export function crearVarianteProducto(
   exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
   const precioAdicional = params.precioAdicionalCentavos ?? 0;
   asegurarCentavos(precioAdicional, 'precioAdicionalCentavos');
+  if (precioAdicional < 0) {
+    throw new Error('El precio adicional de la variante no puede ser negativo.');
+  }
+  if (!params.nombre || params.nombre.trim().length === 0) {
+    throw new Error('El nombre de la variante es obligatorio.');
+  }
 
   return ejecutarEnTransaccion(db, () => {
+    const prod = db
+      .prepare(
+        `SELECT id FROM productos WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+      )
+      .get(params.productoId, actor.comercio_id);
+    if (!prod) {
+      throw new Error('Producto no encontrado en este comercio.');
+    }
+
     const ahora = new Date().toISOString();
     const id = generarUuidV7();
 
@@ -1594,11 +1693,35 @@ export function crearComboPromocion(
 ): string {
   exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
   asegurarCentavos(params.precioVentaCentavos, 'precioVentaCentavos');
+  if (params.precioVentaCentavos <= 0) {
+    throw new Error('El precio de venta del combo debe ser mayor a $ 0,00.');
+  }
+  if (!params.nombre || params.nombre.trim().length === 0) {
+    throw new Error('El nombre del combo es obligatorio.');
+  }
   if (params.componentes.length === 0) {
     throw new Error('Un combo debe incluir al menos un producto componente.');
   }
 
   return ejecutarEnTransaccion(db, () => {
+    for (const comp of params.componentes) {
+      if (comp.cantidad <= 0) {
+        throw new Error('La cantidad de cada componente del combo debe ser > 0.');
+      }
+      const prod = db
+        .prepare(
+          `SELECT id FROM productos
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL AND activo = 1
+           LIMIT 1`
+        )
+        .get(comp.productoId, actor.comercio_id);
+      if (!prod) {
+        throw new Error(
+          `Componente de combo no encontrado o inactivo: ${comp.productoId}`
+        );
+      }
+    }
+
     const ahora = new Date().toISOString();
     const comboId = generarUuidV7();
 
@@ -1929,11 +2052,10 @@ export function resolverEscaneoBalanzaEnCatalogo(
   let cantidadDetectada = 1;
   if (balanza.modo === 'peso' && balanza.cantidadKg) {
     cantidadDetectada = balanza.cantidadKg;
-  } else if (
-    balanza.modo === 'importe' &&
-    balanza.importeCentavos &&
-    fila.precio_venta > 0
-  ) {
+  } else if (balanza.modo === 'importe') {
+    if (!balanza.importeCentavos || fila.precio_venta <= 0) {
+      return { encontrado: false, esBalanza: true };
+    }
     cantidadDetectada = Number(
       (balanza.importeCentavos / fila.precio_venta).toFixed(3)
     );

@@ -99,32 +99,103 @@ export async function procesarSolicitudEmisionArcaEdge(
     };
   }
 
-  // En producción, las credenciales viven únicamente en los secretos del entorno de la Edge Function
-  const apiTokenSecreto = envGetter('ARCA_PROVIDER_API_TOKEN');
-  const certPemSecreto = envGetter('ARCA_CERT_PEM');
-  const keyPemSecreto = envGetter('ARCA_KEY_PEM');
+  // En producción, nunca devolver CAE simulado ni permitir simulador_homologacion
+  if (body.ambiente === 'produccion') {
+    if (body.proveedor === 'simulador_homologacion') {
+      return {
+        ok: false,
+        venta_id: body.venta_id,
+        ambiente: body.ambiente,
+        tipo_comprobante: body.tipo_comprobante,
+        punto_venta: body.punto_venta,
+        numero_comprobante: body.numero_comprobante,
+        cae: '',
+        cae_vencimiento: '',
+        error:
+          'ARCA_PROVEEDOR_INVALIDO: El simulador de homologación está prohibido en ambiente de producción.',
+      };
+    }
 
-  if (
-    body.ambiente === 'produccion' &&
-    body.proveedor !== 'simulador_homologacion' &&
-    !apiTokenSecreto &&
-    (!certPemSecreto || !keyPemSecreto)
-  ) {
-    return {
-      ok: false,
-      venta_id: body.venta_id,
-      ambiente: body.ambiente,
-      tipo_comprobante: body.tipo_comprobante,
-      punto_venta: body.punto_venta,
-      numero_comprobante: body.numero_comprobante,
-      cae: '',
-      cae_vencimiento: '',
-      error:
-        'ARCA_SECRETOS_FALTANTES: Los secretos ARCA_PROVIDER_API_TOKEN / ARCA_CERT_PEM no están configurados en la Edge Function de Supabase para el ambiente de producción.',
-    };
+    const apiTokenSecreto = envGetter('ARCA_PROVIDER_API_TOKEN');
+    const certPemSecreto = envGetter('ARCA_CERT_PEM');
+    const keyPemSecreto = envGetter('ARCA_KEY_PEM');
+    const providerEndpoint = envGetter('ARCA_PROVIDER_ENDPOINT');
+
+    if (
+      (!apiTokenSecreto && (!certPemSecreto || !keyPemSecreto)) ||
+      !providerEndpoint
+    ) {
+      return {
+        ok: false,
+        venta_id: body.venta_id,
+        ambiente: body.ambiente,
+        tipo_comprobante: body.tipo_comprobante,
+        punto_venta: body.punto_venta,
+        numero_comprobante: body.numero_comprobante,
+        cae: '',
+        cae_vencimiento: '',
+        error:
+          'ARCA_SECRETOS_FALTANTES: Los secretos de producción (ARCA_PROVIDER_ENDPOINT y ARCA_PROVIDER_API_TOKEN / ARCA_CERT_PEM + ARCA_KEY_PEM) no están configurados en la Edge Function.',
+      };
+    }
+
+    try {
+      const respProveedor = await fetch(providerEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiTokenSecreto
+            ? { Authorization: `Bearer ${apiTokenSecreto}` }
+            : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      const dataProv = (await respProveedor.json()) as Partial<RespuestaEmisionArcaEdge>;
+      if (!respProveedor.ok || !dataProv.ok || !dataProv.cae) {
+        return {
+          ok: false,
+          venta_id: body.venta_id,
+          ambiente: body.ambiente,
+          tipo_comprobante: body.tipo_comprobante,
+          punto_venta: body.punto_venta,
+          numero_comprobante: body.numero_comprobante,
+          cae: '',
+          cae_vencimiento: '',
+          error:
+            dataProv.error ||
+            `ARCA_PROVEEDOR_ERROR: El proveedor devolvió HTTP ${respProveedor.status}.`,
+        };
+      }
+      return {
+        ok: true,
+        venta_id: body.venta_id,
+        ambiente: body.ambiente,
+        tipo_comprobante: body.tipo_comprobante,
+        punto_venta: dataProv.punto_venta ?? body.punto_venta,
+        numero_comprobante: dataProv.numero_comprobante ?? body.numero_comprobante,
+        cae: dataProv.cae,
+        cae_vencimiento:
+          dataProv.cae_vencimiento ?? calcularVencimientoCaeDiezDias(),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        venta_id: body.venta_id,
+        ambiente: body.ambiente,
+        tipo_comprobante: body.tipo_comprobante,
+        punto_venta: body.punto_venta,
+        numero_comprobante: body.numero_comprobante,
+        cae: '',
+        cae_vencimiento: '',
+        error:
+          err instanceof Error
+            ? `ARCA_RED_ERROR: ${err.message}`
+            : 'ARCA_RED_ERROR: No se pudo contactar al proveedor fiscal de producción.',
+      };
+    }
   }
 
-  // En homologación (o con credenciales configuradas), otorgar CAE de 14 dígitos y vencimiento a +10 días
+  // Solo en ambiente de homologación se permite CAE determinístico de pruebas
   const cae = calcularCaeDeterministicoHomologacion(
     body.venta_id,
     body.punto_venta,
@@ -142,6 +213,57 @@ export async function procesarSolicitudEmisionArcaEdge(
     cae,
     cae_vencimiento: caeVencimiento,
   };
+}
+
+async function verificarUsuarioJwtSupabase(
+  authHeader: string,
+  comercioId: string
+): Promise<{ ok: boolean; error?: string }> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')?.replace(/\/+$/, '');
+  const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return {
+      ok: false,
+      error: 'Configuración incompleta de SUPABASE_URL / SUPABASE_ANON_KEY en Edge Function.',
+    };
+  }
+
+  const respUser = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    method: 'GET',
+    headers: {
+      apikey: supabaseAnonKey,
+      Authorization: authHeader,
+    },
+  });
+  if (!respUser.ok) {
+    return { ok: false, error: 'JWT inválido o expirado en Supabase Auth.' };
+  }
+  const userJson = (await respUser.json()) as { id?: string };
+  if (!userJson.id) {
+    return { ok: false, error: 'Usuario autenticado sin identificador.' };
+  }
+
+  const respPerfil = await fetch(
+    `${supabaseUrl}/rest/v1/usuarios?comercio_id=eq.${encodeURIComponent(comercioId)}&or=(id.eq.${encodeURIComponent(userJson.id)},auth_user_id.eq.${encodeURIComponent(userJson.id)})&activo=eq.true&deleted_at=is.null&select=id,rol&limit=1`,
+    {
+      method: 'GET',
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: authHeader,
+      },
+    }
+  );
+  if (!respPerfil.ok) {
+    return { ok: false, error: 'No se pudo verificar la pertenencia al comercio.' };
+  }
+  const filas = (await respPerfil.json()) as Array<{ id: string; rol: string }>;
+  if (!Array.isArray(filas) || filas.length === 0) {
+    return {
+      ok: false,
+      error: 'ACCESO_DENEGADO: El usuario no pertenece al comercio indicado o está inactivo.',
+    };
+  }
+  return { ok: true };
 }
 
 if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
@@ -163,6 +285,13 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
 
     try {
       const payload = (await req.json()) as SolicitudEmisionArcaEdge;
+      const verif = await verificarUsuarioJwtSupabase(authHeader, payload.comercio_id);
+      if (!verif.ok) {
+        return new Response(
+          JSON.stringify({ ok: false, error: verif.error ?? 'No autorizado.' }),
+          { status: 403, headers: CABECERAS_CORS }
+        );
+      }
       const resultado = await procesarSolicitudEmisionArcaEdge(payload);
       return new Response(JSON.stringify(resultado), {
         status: resultado.ok ? 200 : 422,

@@ -1522,6 +1522,8 @@ export function listarVentasPropiasDelDiaMovil(
   }));
 }
 
+const tokensNetlifyMemoria = new Map<string, string>();
+
 export interface ConfiguracionNetlifyDTO {
   readonly netlify_token: string | null;
   readonly netlify_site_id: string | null;
@@ -1542,14 +1544,13 @@ export function obtenerConfiguracionNetlify(
 
   const config = db
     .prepare(
-      `SELECT netlify_token, netlify_site_id, netlify_site_name, netlify_site_url,
+      `SELECT netlify_site_id, netlify_site_name, netlify_site_url,
               netlify_ultimo_despliegue_at, venta_movil_url
        FROM configuracion_sistema
        WHERE comercio_id = ?`
     )
     .get(comercioId) as
     | {
-        netlify_token: string | null;
         netlify_site_id: string | null;
         netlify_site_name: string | null;
         netlify_site_url: string | null;
@@ -1559,7 +1560,7 @@ export function obtenerConfiguracionNetlify(
     | undefined;
 
   return {
-    netlify_token: config?.netlify_token ?? null,
+    netlify_token: tokensNetlifyMemoria.get(comercioId) ?? null,
     netlify_site_id: config?.netlify_site_id ?? null,
     netlify_site_name: config?.netlify_site_name ?? null,
     netlify_site_url: config?.netlify_site_url ?? null,
@@ -1580,6 +1581,15 @@ export function guardarConfiguracionNetlify(
   exigirPermiso(params.actor.rol, 'configurar_venta_movil_y_arca');
   const ahora = new Date().toISOString();
 
+  if (params.netlifyToken !== undefined) {
+    const limpio = params.netlifyToken?.trim();
+    if (limpio) {
+      tokensNetlifyMemoria.set(params.actor.comercio_id, limpio);
+    } else {
+      tokensNetlifyMemoria.delete(params.actor.comercio_id);
+    }
+  }
+
   ejecutarEnTransaccion(db, () => {
     const existe = db
       .prepare('SELECT comercio_id FROM configuracion_sistema WHERE comercio_id = ?')
@@ -1588,13 +1598,14 @@ export function guardarConfiguracionNetlify(
     if (existe) {
       db.prepare(
         `UPDATE configuracion_sistema
-         SET netlify_token = COALESCE(?, netlify_token),
+         SET netlify_token = NULL,
              netlify_site_name = COALESCE(?, netlify_site_name),
              updated_at = ?
          WHERE comercio_id = ?`
       ).run(
-        params.netlifyToken !== undefined ? params.netlifyToken?.trim() || null : null,
-        params.netlifySiteName !== undefined ? params.netlifySiteName?.trim() || null : null,
+        params.netlifySiteName !== undefined
+          ? params.netlifySiteName?.trim() || null
+          : null,
         ahora,
         params.actor.comercio_id
       );
@@ -1602,10 +1613,9 @@ export function guardarConfiguracionNetlify(
       db.prepare(
         `INSERT INTO configuracion_sistema (
           comercio_id, netlify_token, netlify_site_name, updated_at
-        ) VALUES (?, ?, ?, ?)`
+        ) VALUES (?, NULL, ?, ?)`
       ).run(
         params.actor.comercio_id,
-        params.netlifyToken?.trim() || null,
         params.netlifySiteName?.trim() || null,
         ahora
       );
@@ -1619,7 +1629,7 @@ export function guardarConfiguracionNetlify(
       valores_antes: null,
       valores_despues: {
         netlify_site_name: params.netlifySiteName ?? null,
-        token_configurado: Boolean(params.netlifyToken),
+        token_configurado: Boolean(tokensNetlifyMemoria.get(params.actor.comercio_id)),
       },
       motivo: 'Actualización de credenciales y parámetros de despliegue Netlify',
     });
@@ -1641,6 +1651,14 @@ export function registrarDespliegueNetlifyExitoso(
 ): EstadoConfigVentaMovil {
   exigirPermiso(params.actor.rol, 'configurar_venta_movil_y_arca');
   const ahora = new Date().toISOString();
+  const siteUrlHttps = params.siteUrl.trim().replace(/^http:\/\//i, 'https://');
+  const urlVentaMovilHttps = params.urlVentaMovil
+    .trim()
+    .replace(/^http:\/\//i, 'https://');
+
+  if (params.token?.trim()) {
+    tokensNetlifyMemoria.set(params.actor.comercio_id, params.token.trim());
+  }
 
   ejecutarEnTransaccion(db, () => {
     db.prepare(
@@ -1649,17 +1667,16 @@ export function registrarDespliegueNetlifyExitoso(
            netlify_site_name = ?,
            netlify_site_url = ?,
            netlify_ultimo_despliegue_at = ?,
-           netlify_token = COALESCE(?, netlify_token),
+           netlify_token = NULL,
            venta_movil_url = ?,
            updated_at = ?
        WHERE comercio_id = ?`
     ).run(
       params.siteId,
       params.siteName,
-      params.siteUrl,
+      siteUrlHttps,
       ahora,
-      params.token?.trim() || null,
-      params.urlVentaMovil,
+      urlVentaMovilHttps,
       ahora,
       params.actor.comercio_id
     );
@@ -1682,8 +1699,8 @@ export function registrarDespliegueNetlifyExitoso(
       valores_despues: {
         site_id: params.siteId,
         site_name: params.siteName,
-        site_url: params.siteUrl,
-        url_venta_movil: params.urlVentaMovil,
+        site_url: siteUrlHttps,
+        url_venta_movil: urlVentaMovilHttps,
         desplegado_at: ahora,
       },
       motivo: 'Publicación exitosa del cajero móvil en Netlify con bloqueo de buscadores',

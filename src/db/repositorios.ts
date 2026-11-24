@@ -83,7 +83,13 @@ export function encolarSync(
 export function insertarRegistroAuditoria(
   db: DatabaseSync,
   params: {
-    actor: ActorContexto;
+    actor: {
+      readonly comercio_id: string;
+      readonly usuario_id?: string | null;
+      readonly usuario_nombre: string;
+      readonly rol: RolUsuario | string;
+      readonly device_id: string;
+    };
     accion: string;
     entidad: string;
     entidad_id: string | null;
@@ -114,7 +120,10 @@ export function insertarRegistroAuditoria(
     id,
     comercio_id: params.actor.comercio_id,
     fecha_hora: ahora,
-    usuario_id: params.actor.usuario_id,
+    usuario_id:
+      params.actor.usuario_id && params.actor.usuario_id.trim().length > 0
+        ? params.actor.usuario_id.trim()
+        : null,
     usuario_nombre: params.actor.usuario_nombre,
     rol: params.actor.rol,
     device_id: params.actor.device_id,
@@ -417,6 +426,42 @@ export function actualizarRolOEstadoUsuario(
 
     encolarSync(db, 'usuarios', params.usuarioObjetivoId, 'update', ahora);
 
+    if (actual.rol !== params.nuevoRol || !params.nuevoActivo) {
+      try {
+        const activas = db
+          .prepare(
+            `SELECT id FROM sesiones_moviles
+             WHERE comercio_id = ? AND usuario_id = ? AND estado = 'activa' AND deleted_at IS NULL`
+          )
+          .all(actor.comercio_id, params.usuarioObjetivoId) as unknown as Array<{ id: string }>;
+
+        if (activas.length > 0) {
+          db.prepare(
+            `UPDATE sesiones_moviles
+             SET estado = 'revocada',
+                 revocada_at = ?,
+                 revocada_por_id = ?,
+                 motivo_revocacion = ?,
+                 updated_at = ?,
+                 sync_status = 'pendiente'
+             WHERE comercio_id = ? AND usuario_id = ? AND estado = 'activa' AND deleted_at IS NULL`
+          ).run(
+            ahora,
+            actor.usuario_id,
+            !params.nuevoActivo ? 'Usuario desactivado' : 'Cambio de rol de usuario',
+            ahora,
+            actor.comercio_id,
+            params.usuarioObjetivoId
+          );
+          for (const s of activas) {
+            encolarSync(db, 'sesiones_moviles', s.id, 'update', ahora);
+          }
+        }
+      } catch {
+        // Ignorar si la tabla sesiones_moviles no existe en un entorno parcial
+      }
+    }
+
     insertarRegistroAuditoria(db, {
       actor,
       accion: 'usuario_actualizar_rol_estado',
@@ -455,13 +500,50 @@ export function crearProducto(
     categoriaId?: string | null;
     marcaId?: string | null;
     proveedorId?: string | null;
+    sucursalId?: string | null;
   }
 ): string {
   exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
   asegurarCentavos(datos.costoCompraCentavos, 'costoCompraCentavos');
   asegurarCentavos(datos.precioVentaCentavos, 'precioVentaCentavos');
+  if (datos.costoCompraCentavos < 0 || datos.precioVentaCentavos < 0) {
+    throw new Error('El costo de compra y el precio de venta deben ser >= 0.');
+  }
 
   return ejecutarEnTransaccion(db, () => {
+    if (datos.categoriaId) {
+      const cat = db
+        .prepare(
+          `SELECT id FROM categorias WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+        )
+        .get(datos.categoriaId, actor.comercio_id);
+      if (!cat) throw new Error('Categoría no encontrada en este comercio.');
+    }
+    if (datos.marcaId) {
+      const marca = db
+        .prepare(
+          `SELECT id FROM marcas WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+        )
+        .get(datos.marcaId, actor.comercio_id);
+      if (!marca) throw new Error('Marca no encontrada en este comercio.');
+    }
+    if (datos.proveedorId) {
+      const prov = db
+        .prepare(
+          `SELECT id FROM proveedores WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+        )
+        .get(datos.proveedorId, actor.comercio_id);
+      if (!prov) throw new Error('Proveedor no encontrado en este comercio.');
+    }
+    if (datos.sucursalId) {
+      const suc = db
+        .prepare(
+          `SELECT id FROM sucursales WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL AND activo = 1 LIMIT 1`
+        )
+        .get(datos.sucursalId, actor.comercio_id);
+      if (!suc) throw new Error('Sucursal no encontrada o inactiva.');
+    }
+
     const ahora = new Date().toISOString();
     const productoId = generarUuidV7();
 
@@ -585,16 +667,24 @@ export function crearProducto(
         cantidad: datos.stockInicial,
         motivo: 'Stock inicial al crear producto',
       });
+      const cfgSuc = db
+        .prepare(
+          `SELECT sucursal_activa_id FROM configuracion_sistema WHERE comercio_id = ? LIMIT 1`
+        )
+        .get(actor.comercio_id) as { sucursal_activa_id: string | null } | undefined;
+      const sucId = datos.sucursalId ?? cfgSuc?.sucursal_activa_id ?? null;
+
       db.prepare(
         `INSERT INTO movimientos_stock (
-          id, comercio_id, producto_id, tipo, cantidad, costo_unitario,
+          id, comercio_id, producto_id, sucursal_id, tipo, cantidad, costo_unitario,
           referencia_id, motivo, usuario_id,
           created_at, updated_at, deleted_at, device_id, sync_status
-        ) VALUES (?, ?, ?, 'ajuste', ?, ?, ?, 'Stock inicial al crear producto', ?, ?, ?, NULL, ?, 'pendiente')`
+        ) VALUES (?, ?, ?, ?, 'ajuste', ?, ?, ?, 'Stock inicial al crear producto', ?, ?, ?, NULL, ?, 'pendiente')`
       ).run(
         movId,
         actor.comercio_id,
         productoId,
+        sucId,
         cantidadNormalizada,
         datos.costoCompraCentavos,
         productoId,
@@ -639,11 +729,31 @@ export function registrarMovimientoStock(
     costoUnitarioCentavos?: Centavos;
     referenciaId?: string;
     motivo?: string;
+    sucursalId?: string | null;
   }
 ): string {
   exigirPermiso(actor.rol, 'abm_productos_precios_stock_compras');
 
   return ejecutarEnTransaccion(db, () => {
+    const prod = db
+      .prepare(
+        `SELECT id, permite_decimales FROM productos
+         WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL
+         LIMIT 1`
+      )
+      .get(datos.productoId, actor.comercio_id) as
+      | { id: string; permite_decimales: number }
+      | undefined;
+
+    if (!prod) {
+      throw new Error('Producto no encontrado o dado de baja en este comercio.');
+    }
+    if (prod.permite_decimales === 0 && !Number.isInteger(datos.cantidad)) {
+      throw new Error(
+        'CANTIDAD_ENTERA_REQUERIDA: Este producto no admite cantidades decimales.'
+      );
+    }
+
     const ahora = new Date().toISOString();
     const movId = generarUuidV7();
     const cantidadConSigno = normalizarMovimientoStock({
@@ -653,17 +763,41 @@ export function registrarMovimientoStock(
     });
     const costo = datos.costoUnitarioCentavos ?? 0;
     asegurarCentavos(costo, 'costoUnitarioCentavos');
+    if (costo < 0) {
+      throw new Error('El costo unitario no puede ser negativo.');
+    }
+
+    if (datos.sucursalId) {
+      const sucValida = db
+        .prepare(
+          `SELECT id FROM sucursales
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL AND activo = 1
+           LIMIT 1`
+        )
+        .get(datos.sucursalId, actor.comercio_id);
+      if (!sucValida) {
+        throw new Error('La sucursal indicada no existe o está inactiva.');
+      }
+    }
+
+    const cfgSuc = db
+      .prepare(
+        `SELECT sucursal_activa_id FROM configuracion_sistema WHERE comercio_id = ? LIMIT 1`
+      )
+      .get(actor.comercio_id) as { sucursal_activa_id: string | null } | undefined;
+    const sucId = datos.sucursalId ?? cfgSuc?.sucursal_activa_id ?? null;
 
     db.prepare(
       `INSERT INTO movimientos_stock (
-        id, comercio_id, producto_id, tipo, cantidad, costo_unitario,
+        id, comercio_id, producto_id, sucursal_id, tipo, cantidad, costo_unitario,
         referencia_id, motivo, usuario_id,
         created_at, updated_at, deleted_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
     ).run(
       movId,
       actor.comercio_id,
       datos.productoId,
+      sucId,
       datos.tipo,
       cantidadConSigno,
       costo,
@@ -684,6 +818,7 @@ export function registrarMovimientoStock(
       entidad_id: movId,
       valores_despues: {
         producto_id: datos.productoId,
+        sucursal_id: sucId,
         tipo: datos.tipo,
         cantidad: cantidadConSigno,
         costo_unitario: costo,
@@ -698,12 +833,39 @@ export function registrarMovimientoStock(
 
 /**
  * Obtiene el stock actual de un producto calculándolo desde la tabla movimientos_stock (Regla 4).
+ * Si se indica `sucursalId` (y no es 'todas'), devuelve el stock en esa sucursal específica.
  */
 export function obtenerStockProducto(
   db: DatabaseSync,
   comercioId: string,
-  productoId: string
+  productoId: string,
+  sucursalId?: string | null
 ): number {
+  if (sucursalId && sucursalId !== 'todas') {
+    const sucRow = db
+      .prepare(
+        `SELECT es_principal FROM sucursales WHERE id = ? AND comercio_id = ? LIMIT 1`
+      )
+      .get(sucursalId, comercioId) as { es_principal: number } | undefined;
+    const esPrincipal = (sucRow?.es_principal ?? 0) === 1;
+
+    const filasSuc = db
+      .prepare(
+        esPrincipal
+          ? `SELECT cantidad, deleted_at
+             FROM movimientos_stock
+             WHERE comercio_id = ? AND producto_id = ? AND (sucursal_id = ? OR sucursal_id IS NULL)`
+          : `SELECT cantidad, deleted_at
+             FROM movimientos_stock
+             WHERE comercio_id = ? AND producto_id = ? AND sucursal_id = ?`
+      )
+      .all(comercioId, productoId, sucursalId) as unknown as {
+      cantidad: number;
+      deleted_at: string | null;
+    }[];
+    return calcularStockActual(filasSuc);
+  }
+
   const filas = db
     .prepare(
       `SELECT cantidad, deleted_at
@@ -837,6 +999,7 @@ export function registrarVenta(
     cajaSesionId?: string;
     canal?: 'escritorio' | 'web';
     listaPrecioId?: string;
+    sucursalId?: string | null;
   }
 ): {
   ventaId: string;
@@ -868,12 +1031,47 @@ export function registrarVenta(
 
     const arcaHabilitada = (comercioRow?.arca_habilitada ?? 0) === 1;
 
+    if (params.listaPrecioId) {
+      const lp = db
+        .prepare(
+          `SELECT id FROM listas_precio
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL LIMIT 1`
+        )
+        .get(params.listaPrecioId, actor.comercio_id);
+      if (!lp) {
+        throw new Error('La lista de precios seleccionada no existe en este comercio.');
+      }
+    }
+    if (params.cajaSesionId) {
+      const cs = db
+        .prepare(
+          `SELECT id FROM caja_sesiones
+           WHERE id = ? AND comercio_id = ? AND estado = 'abierta' AND deleted_at IS NULL LIMIT 1`
+        )
+        .get(params.cajaSesionId, actor.comercio_id);
+      if (!cs) {
+        throw new Error('La sesión de caja indicada no existe o está cerrada.');
+      }
+    }
+    if (params.sucursalId) {
+      const suc = db
+        .prepare(
+          `SELECT id FROM sucursales
+           WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL AND activo = 1 LIMIT 1`
+        )
+        .get(params.sucursalId, actor.comercio_id);
+      if (!suc) {
+        throw new Error('La sucursal seleccionada no existe o está inactiva.');
+      }
+    }
+
     const itemsInput: ItemVentaInput[] = params.items.map((it) => {
       const prod = db
         .prepare(
           `SELECT
             p.id,
             p.nombre,
+            p.permite_decimales,
             p.costo_compra,
             p.alicuota_iva,
             p.exento_iva,
@@ -887,6 +1085,7 @@ export function registrarVenta(
         | {
             id: string;
             nombre: string;
+            permite_decimales: number;
             costo_compra: Centavos;
             alicuota_iva: AlicuotaIva;
             exento_iva: number;
@@ -896,6 +1095,11 @@ export function registrarVenta(
 
       if (!prod) {
         throw new Error(`Producto no encontrado o inactivo: ${it.productoId}`);
+      }
+      if (prod.permite_decimales === 0 && !Number.isInteger(it.cantidad)) {
+        throw new Error(
+          `CANTIDAD_ENTERA_REQUERIDA: "${prod.nombre}" no admite cantidades decimales.`
+        );
       }
 
       let precioListaEspecifica: Centavos | undefined;
@@ -924,10 +1128,13 @@ export function registrarVenta(
           .get(it.varianteId, actor.comercio_id, prod.id) as
           | { nombre: string; precio_adicional: Centavos }
           | undefined;
-        if (varRow) {
-          adicionalVarianteCentavos = varRow.precio_adicional;
-          sufijoVariante = ` (${varRow.nombre})`;
+        if (!varRow) {
+          throw new Error(
+            `Variante no encontrada o inactiva para "${prod.nombre}".`
+          );
         }
+        adicionalVarianteCentavos = varRow.precio_adicional;
+        sufijoVariante = ` (${varRow.nombre})`;
       }
 
       const precioUnitarioAplicado = resolverPrecioProductoEnLista({
@@ -1057,16 +1264,25 @@ export function registrarVenta(
       ? (comercioRow?.arca_punto_venta ?? 1)
       : null;
 
+    const cfgSuc = db
+      .prepare(
+        `SELECT sucursal_activa_id FROM configuracion_sistema WHERE comercio_id = ? LIMIT 1`
+      )
+      .get(actor.comercio_id) as { sucursal_activa_id: string | null } | undefined;
+    const sucursalVentaId =
+      params.sucursalId ?? cfgSuc?.sucursal_activa_id ?? null;
+
     db.prepare(
       `INSERT INTO ventas (
-        id, comercio_id, fecha, usuario_id, cliente_id, lista_precio_id,
+        id, comercio_id, sucursal_id, fecha, usuario_id, cliente_id, lista_precio_id,
         subtotal, descuento, total, estado, caja_sesion_id,
         tipo_comprobante, punto_venta, canal, dispositivo_id, estado_facturacion,
         created_at, updated_at, deleted_at, device_id, sync_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completada', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completada', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
     ).run(
       ventaId,
       actor.comercio_id,
+      sucursalVentaId,
       ahora,
       actor.usuario_id,
       params.clienteId ?? null,
@@ -1122,14 +1338,15 @@ export function registrarVenta(
 
       db.prepare(
         `INSERT INTO movimientos_stock (
-          id, comercio_id, producto_id, tipo, cantidad, costo_unitario,
+          id, comercio_id, producto_id, sucursal_id, tipo, cantidad, costo_unitario,
           referencia_id, motivo, usuario_id,
           created_at, updated_at, deleted_at, device_id, sync_status
-        ) VALUES (?, ?, ?, 'venta', ?, ?, ?, 'Venta de mostrador', ?, ?, ?, NULL, ?, 'pendiente')`
+        ) VALUES (?, ?, ?, ?, 'venta', ?, ?, ?, 'Venta de mostrador', ?, ?, ?, NULL, ?, 'pendiente')`
       ).run(
         movId,
         actor.comercio_id,
         item.producto_id,
+        sucursalVentaId,
         cantidadDescuentoStock,
         item.costo_unitario,
         ventaId,
@@ -1245,12 +1462,13 @@ export function anularVenta(
     const ahora = new Date().toISOString();
     const venta = db
       .prepare(
-        `SELECT id, estado, total, cliente_id, tipo_comprobante, estado_facturacion FROM ventas
+        `SELECT id, sucursal_id, estado, total, cliente_id, tipo_comprobante, estado_facturacion FROM ventas
          WHERE id = ? AND comercio_id = ? AND deleted_at IS NULL`
       )
       .get(params.ventaId, actor.comercio_id) as
       | {
           id: string;
+          sucursal_id: string | null;
           estado: 'completada' | 'anulada';
           total: Centavos;
           cliente_id: string | null;
@@ -1315,14 +1533,15 @@ export function anularVenta(
 
       db.prepare(
         `INSERT INTO movimientos_stock (
-          id, comercio_id, producto_id, tipo, cantidad, costo_unitario,
+          id, comercio_id, producto_id, sucursal_id, tipo, cantidad, costo_unitario,
           referencia_id, motivo, usuario_id,
           created_at, updated_at, deleted_at, device_id, sync_status
-        ) VALUES (?, ?, ?, 'anulacion_venta', ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
+        ) VALUES (?, ?, ?, ?, 'anulacion_venta', ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pendiente')`
       ).run(
         movId,
         actor.comercio_id,
         item.producto_id,
+        venta.sucursal_id,
         cantidadDevolucion,
         item.costo_unitario,
         params.ventaId,
