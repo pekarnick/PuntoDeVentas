@@ -31,6 +31,11 @@ export function App(): React.ReactElement {
   const [rutaArranqueDb, setRutaArranqueDb] = useState<string | undefined>(
     undefined
   );
+  const esEntornoTest =
+    typeof import.meta !== 'undefined' &&
+    Boolean((import.meta as { env?: { MODE?: string } }).env?.MODE === 'test');
+  const [cargandoArranque, setCargandoArranque] = useState(!esEntornoTest);
+  const [errorArranque, setErrorArranque] = useState<string | null>(null);
   const { modoTema, alternarTemaVisual } = useTemaVisual();
 
   const ajustarPestaniaSegunRol = useCallback((nuevoRol: RolUsuario) => {
@@ -60,23 +65,41 @@ export function App(): React.ReactElement {
     onSesionCerrada: reiniciarPestaniaAlSalir,
   });
 
+  const consultarEstadoArranque = useCallback(async () => {
+    setErrorArranque(null);
+    if (!esEntornoTest) {
+      setCargandoArranque(true);
+    }
+    try {
+      const res = await invocarPosApi<{
+        requiereConfiguracionInicial: boolean;
+        rutaBaseDatos?: string;
+      }>('obtener_estado_arranque', {});
+      setRequiereConfigInicial(Boolean(res.requiereConfiguracionInicial));
+      setRutaArranqueDb(res.rutaBaseDatos);
+      setErrorArranque(null);
+    } catch (err) {
+      if (!esEntornoTest) {
+        setErrorArranque(
+          err instanceof Error
+            ? err.message
+            : 'No se pudo conectar con la base de datos local.'
+        );
+      }
+    } finally {
+      setCargandoArranque(false);
+    }
+  }, [esEntornoTest]);
+
   useEffect(() => {
     if (operadorAutenticado) {
       setRequiereConfigInicial(false);
+      setCargandoArranque(false);
+      setErrorArranque(null);
       return;
     }
-    void invocarPosApi<{
-      requiereConfiguracionInicial: boolean;
-      rutaBaseDatos?: string;
-    }>('obtener_estado_arranque', {})
-      .then((res) => {
-        setRequiereConfigInicial(Boolean(res.requiereConfiguracionInicial));
-        setRutaArranqueDb(res.rutaBaseDatos);
-      })
-      .catch(() => {
-        // Ignorar si no hay servidor local en tests aislados
-      });
-  }, [operadorAutenticado]);
+    void consultarEstadoArranque();
+  }, [operadorAutenticado, consultarEstadoArranque]);
 
   const {
     datosServidor,
@@ -99,6 +122,77 @@ export function App(): React.ReactElement {
   const permisosModulos = calcularPermisosModulosPorRol(rolActivo);
 
   if (!operadorAutenticado) {
+    if (cargandoArranque) {
+      return (
+        <div
+          className={`app-layout theme-${modoTema}`}
+          data-theme={modoTema}
+          style={{
+            minHeight: '100vh',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '2rem',
+          }}
+        >
+          <section className="card" style={{ padding: '1.5rem 2rem', textAlign: 'center' }}>
+            <p style={{ margin: 0, fontWeight: 600 }}>
+              Iniciando base de datos local...
+            </p>
+          </section>
+        </div>
+      );
+    }
+
+    if (errorArranque) {
+      return (
+        <div
+          className={`app-layout theme-${modoTema}`}
+          data-theme={modoTema}
+          style={{
+            minHeight: '100vh',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+          }}
+        >
+          <main
+            className="main-content"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '2rem 1rem',
+              flex: 1,
+            }}
+          >
+            <section
+              className="card"
+              style={{ width: '100%', maxWidth: '520px', padding: '1.75rem' }}
+            >
+              <h1 style={{ margin: '0 0 0.5rem 0', fontSize: '1.35rem' }}>
+                No se pudo iniciar la base de datos local
+              </h1>
+              <p className="text-muted" style={{ marginTop: 0 }}>
+                El sistema necesita acceso a su base de datos local para iniciar.
+              </p>
+              <div className="alert-error" role="alert" style={{ marginBottom: '1rem' }}>
+                {errorArranque}
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void consultarEstadoArranque()}
+              >
+                Reintentar conexión
+              </button>
+            </section>
+          </main>
+          <PiePaginaInstitucional />
+        </div>
+      );
+    }
+
     if (requiereConfigInicial) {
       return (
         <PantallaConfiguracionInicial

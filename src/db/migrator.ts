@@ -19,12 +19,23 @@ export interface MigracionAplicada {
   readonly aplicada_at: string;
 }
 
+export function resolverDirectorioMigracionesPorDefecto(): string {
+  const resourcesDir = process.env.POS_RESOURCES_DIR?.trim();
+  if (resourcesDir) {
+    const candidato = path.resolve(resourcesDir, 'migrations');
+    if (fs.existsSync(candidato)) {
+      return candidato;
+    }
+  }
+  return path.resolve(process.cwd(), 'migrations');
+}
+
 /**
  * Inicializa una conexión SQLite con claves foráneas activas y aplica todas las migraciones pendientes.
  */
 export function crearBaseDatos(
   rutaArchivo: string = ':memory:',
-  directorioMigraciones: string = path.resolve(process.cwd(), 'migrations')
+  directorioMigraciones: string = resolverDirectorioMigracionesPorDefecto()
 ): DatabaseSyncType {
   const db = new DatabaseSync(rutaArchivo);
   db.exec('PRAGMA foreign_keys = ON;');
@@ -40,7 +51,7 @@ export function crearBaseDatos(
  */
 export function aplicarMigraciones(
   db: DatabaseSyncType,
-  directorioMigraciones: string = path.resolve(process.cwd(), 'migrations')
+  directorioMigraciones: string = resolverDirectorioMigracionesPorDefecto()
 ): MigracionAplicada[] {
   db.exec(`
     CREATE TABLE IF NOT EXISTS _migraciones (

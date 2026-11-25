@@ -347,7 +347,10 @@ export function prepararPaqueteVentaMovilNetlify(params: {
   directorioDist?: string;
 }): Buffer {
   const distDir =
-    params.directorioDist || path.resolve(process.cwd(), 'dist');
+    params.directorioDist ||
+    (process.env.POS_RESOURCES_DIR?.trim()
+      ? path.resolve(process.env.POS_RESOURCES_DIR.trim(), 'dist')
+      : path.resolve(process.cwd(), 'dist'));
   const archivos: ArchivoAComprimir[] = [];
 
   // 1. Directivas de bloqueo absoluto a buscadores

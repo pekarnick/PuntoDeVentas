@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
-import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import {
+  construirUrlImagenProducto,
+  invocarPosApi,
+} from '../../db/cliente_pos_api.ts';
 import {
   formatearMonedaARS,
   pesosACentavos,
@@ -1442,7 +1445,7 @@ export function PanelVentaPOS({
                 >
                   {prod.imagen_path && (
                     <img
-                      src={`/api/pos-imagen/${prod.id}_thumb.webp`}
+                      src={construirUrlImagenProducto(`${prod.id}_thumb.webp`)}
                       alt={prod.nombre}
                       style={{
                         width: '36px',

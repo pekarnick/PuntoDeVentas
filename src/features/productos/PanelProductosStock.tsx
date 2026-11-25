@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { PaginadorTabla } from '../../components/PaginadorTabla.tsx';
-import { invocarPosApi } from '../../db/cliente_pos_api.ts';
+import {
+  construirUrlImagenProducto,
+  invocarPosApi,
+} from '../../db/cliente_pos_api.ts';
 import { calcularPrecioYStockCombo } from '../../domain/arca_fase4.ts';
 import {
   formatearMonedaARS,
@@ -2622,7 +2625,12 @@ export function PanelProductosStock({
                     >
                       {p.imagen_path && (
                         <img
-                          src={`/api/pos-imagen/${p.id}_thumb.webp?h=${p.imagen_hash ?? ''}`}
+                          src={construirUrlImagenProducto(
+                            `${p.id}_thumb.webp`,
+                            p.imagen_hash
+                              ? `h=${encodeURIComponent(p.imagen_hash)}`
+                              : undefined
+                          )}
                           alt={p.nombre}
                           style={{
                             width: '38px',

@@ -38,6 +38,94 @@ const CLAVE_SESION_TOKEN_LOCAL = 'pos_sesion_token_local_v1';
 
 let sessionTokenLocalMemoria: string | null = null;
 
+export interface ConfigBackendLocalCliente {
+  readonly baseUrl: string;
+  readonly bootToken: string | null;
+}
+
+let configBackendLocalMemoria: ConfigBackendLocalCliente | null = null;
+let promesaResolucionBackendLocal: Promise<ConfigBackendLocalCliente> | null =
+  null;
+
+function esEntornoTauri(): boolean {
+  if (typeof window === 'undefined') return false;
+  return '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
+}
+
+export function obtenerConfigBackendLocalSincrono(): ConfigBackendLocalCliente {
+  return configBackendLocalMemoria ?? { baseUrl: '', bootToken: null };
+}
+
+export async function resolverConfigBackendLocal(): Promise<ConfigBackendLocalCliente> {
+  if (configBackendLocalMemoria) {
+    return configBackendLocalMemoria;
+  }
+  if (!esEntornoTauri()) {
+    configBackendLocalMemoria = { baseUrl: '', bootToken: null };
+    return configBackendLocalMemoria;
+  }
+  if (promesaResolucionBackendLocal) {
+    return promesaResolucionBackendLocal;
+  }
+
+  promesaResolucionBackendLocal = (async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const res = await invoke<{
+        activo?: boolean;
+        baseUrl?: string | null;
+        bootToken?: string | null;
+        error?: string | null;
+      }>('obtener_config_backend_local');
+
+      if (res?.error) {
+        throw new Error(res.error);
+      }
+
+      if (res?.activo && res.baseUrl) {
+        const cfg: ConfigBackendLocalCliente = {
+          baseUrl: res.baseUrl.replace(/\/+$/, ''),
+          bootToken: res.bootToken?.trim() || null,
+        };
+        configBackendLocalMemoria = cfg;
+        return cfg;
+      }
+
+      const cfgDev: ConfigBackendLocalCliente = { baseUrl: '', bootToken: null };
+      configBackendLocalMemoria = cfgDev;
+      return cfgDev;
+    } finally {
+      promesaResolucionBackendLocal = null;
+    }
+  })();
+
+  return promesaResolucionBackendLocal;
+}
+
+export function construirUrlImagenProducto(
+  nombreArchivo: string,
+  queryExtra?: string
+): string {
+  const { baseUrl, bootToken } = obtenerConfigBackendLocalSincrono();
+  const sessionToken = obtenerTokenSesionLocal();
+  const params = new URLSearchParams();
+  if (sessionToken) {
+    params.set('st', sessionToken);
+  }
+  if (bootToken) {
+    params.set('bt', bootToken);
+  }
+  if (queryExtra) {
+    const extra = new URLSearchParams(queryExtra);
+    extra.forEach((v, k) => {
+      if (v) params.set(k, v);
+    });
+  }
+  const qs = params.toString();
+  const ruta = `/api/pos-imagen/${encodeURIComponent(nombreArchivo)}${qs ? `?${qs}` : ''}`;
+  return baseUrl ? `${baseUrl}${ruta}` : ruta;
+}
+
 export function establecerTokenSesionLocal(token: string | null): void {
   const limpio = token && token.trim() ? token.trim() : null;
   sessionTokenLocalMemoria = limpio;
@@ -1145,14 +1233,42 @@ export async function invocarPosApi<T>(
     return ejecutarAccionMovilDirectoSupabase<T>(accion, payloadEfectivo);
   }
 
+  const backendCfg = esAccionMovil
+    ? obtenerConfigBackendLocalSincrono()
+    : await resolverConfigBackendLocal();
+  const tokenLocal = obtenerTokenSesionLocal();
+
+  // Si estamos dentro del ejecutable nativo Tauri y el sidecar local está activo,
+  // usar el canal IPC directo de Rust (`invocar_pos_backend_local`) para evitar
+  // restricciones de red/CORS/PNA de WebView2.
+  if (esEntornoTauri() && backendCfg.baseUrl) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const jsonIpc = await invoke<
+      { ok: true; data: T } | { ok: false; error: string }
+    >('invocar_pos_backend_local', {
+      accion,
+      payload: payloadEfectivo,
+      sessionToken: tokenLocal ?? null,
+    });
+    if (!jsonIpc.ok) {
+      throw new Error(jsonIpc.error);
+    }
+    return jsonIpc.data;
+  }
+
   let respuesta: Response;
   try {
-    const tokenLocal = obtenerTokenSesionLocal();
-    respuesta = await fetch('/api/pos', {
+    const urlApi = backendCfg.baseUrl
+      ? `${backendCfg.baseUrl}/api/pos`
+      : '/api/pos';
+    respuesta = await fetch(urlApi, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(tokenLocal ? { 'X-POS-Session': tokenLocal } : {}),
+        ...(backendCfg.bootToken
+          ? { 'X-POS-Boot-Token': backendCfg.bootToken }
+          : {}),
       },
       body: JSON.stringify({ accion, payload: payloadEfectivo }),
     });

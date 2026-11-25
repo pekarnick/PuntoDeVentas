@@ -9,7 +9,8 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.2-yellowgreen.svg)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL-lightblue.svg)](https://www.sqlite.org/)
 [![Supabase](https://img.shields.io/badge/Supabase-Postgres_&_RLS-emerald.svg)](https://supabase.com/)
-[![Vitest](https://img.shields.io/badge/Tests-85%20passing-brightgreen.svg)](https://vitest.dev/)
+[![Vitest](https://img.shields.io/badge/Tests-86%20passing-brightgreen.svg)](https://vitest.dev/)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 ---
 
@@ -348,4 +349,8 @@ npm test
 ## 📄 Licencia y Autoría
 
 Desarrollado y mantenido por **GAR - Guillermo Adolfo Rohde**.  
-Todos los derechos reservados. Proyecto concebido bajo estándares de alta disponibilidad, integridad criptográfica y rendimiento para el comercio argentino.
+Distribuido bajo la licencia **GNU Affero General Public License v3.0 (`AGPL-3.0-only`)** — ver el archivo [LICENSE](LICENSE) para más detalles.
+
+- **Uso libre personal y comercial:** Cualquier persona o comercio puede utilizar el sistema de forma gratuita.
+- **Reconocimiento de autoría obligatorio:** Toda copia, redistribución o versión derivada debe conservar de forma visible los créditos y avisos de copyright originales de **GAR - Guillermo Adolfo Rohde**.
+- **Código abierto obligatorio en modificaciones y servicios web (Copyleft + Red):** Cualquier modificación, agregado o versión derivada —ya sea que se distribuya como instalador o se ofrezca a terceros a través de una red/servidor web— debe publicar su código fuente completo bajo la misma licencia **GNU AGPL v3.0**.

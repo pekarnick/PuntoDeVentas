@@ -176,11 +176,9 @@ import type {
   ProveedorArca,
 } from '../../packages/domain/src/index.ts';
 
-export const RUTA_DB_POR_DEFECTO = path.resolve(
-  process.cwd(),
-  'data',
-  'pos_local.db'
-);
+export const RUTA_DB_POR_DEFECTO = process.env.POS_DATA_DIR?.trim()
+  ? path.resolve(process.env.POS_DATA_DIR.trim(), 'pos_local.db')
+  : path.resolve(process.cwd(), 'data', 'pos_local.db');
 
 let instanciaDb: DatabaseSync | null = null;
 let rutaActivaDb: string = RUTA_DB_POR_DEFECTO;
@@ -227,6 +225,18 @@ export function limpiarSesionesLocalesParaTest(): void {
   sesionesNubeMemoria.supabaseEmail = null;
   sesionesNubeMemoria.firebaseIdToken = null;
   sesionesNubeMemoria.firebaseEmail = null;
+}
+
+export function cerrarConexionLocalDisco(): void {
+  if (instanciaDb) {
+    try {
+      instanciaDb.close();
+    } catch {
+      // Ignorar si ya estaba cerrada
+    }
+    instanciaDb = null;
+    rutaActivaDb = RUTA_DB_POR_DEFECTO;
+  }
 }
 
 function crearSesionOperadorLocal(
@@ -1610,11 +1620,21 @@ export function ejecutarAccionPosLocal(
 
     case 'obtener_sql_migracion_supabase': {
       exigirPermiso(actor.rol, 'configuracion_sensible');
-      const rutaUnificado = path.resolve(
-        process.cwd(),
+      const baseRecursos = process.env.POS_RESOURCES_DIR?.trim()
+        ? path.resolve(process.env.POS_RESOURCES_DIR.trim())
+        : process.cwd();
+      const rutaUnificadoRes = path.resolve(
+        baseRecursos,
         'supabase',
         'esquema_completo_unificado.sql'
       );
+      const rutaUnificado = fs.existsSync(rutaUnificadoRes)
+        ? rutaUnificadoRes
+        : path.resolve(
+            process.cwd(),
+            'supabase',
+            'esquema_completo_unificado.sql'
+          );
       if (fs.existsSync(rutaUnificado)) {
         return {
           sql: fs.readFileSync(rutaUnificado, 'utf-8').trim(),
@@ -1623,7 +1643,10 @@ export function ejecutarAccionPosLocal(
         };
       }
 
-      const dirMig = path.resolve(process.cwd(), 'supabase', 'migrations');
+      const dirMigRes = path.resolve(baseRecursos, 'supabase', 'migrations');
+      const dirMig = fs.existsSync(dirMigRes)
+        ? dirMigRes
+        : path.resolve(process.cwd(), 'supabase', 'migrations');
       const leerMig = (nombre: string) =>
         fs.existsSync(path.join(dirMig, nombre))
           ? fs.readFileSync(path.join(dirMig, nombre), 'utf-8')

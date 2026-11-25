@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   invocarPosApi,
+  obtenerConfigBackendLocalSincrono,
   obtenerTokenSesionLocal,
 } from '../db/cliente_pos_api.ts';
 import type { RolUsuario } from '../domain/permisos.ts';
@@ -182,11 +183,14 @@ export function useEstadoServidorPos({
       if (autenticado && pendientes > 0 && !sinConexionNavegador) {
         try {
           const token = obtenerTokenSesionLocal();
-          void fetch('/api/pos', {
+          const { baseUrl, bootToken } = obtenerConfigBackendLocalSincrono();
+          const urlApi = baseUrl ? `${baseUrl}/api/pos` : '/api/pos';
+          void fetch(urlApi, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               ...(token ? { 'X-POS-Session': token } : {}),
+              ...(bootToken ? { 'X-POS-Boot-Token': bootToken } : {}),
             },
             body: JSON.stringify({
               accion: 'sync_subir_ahora',
